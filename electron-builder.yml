@@ -1,0 +1,41 @@
+appId: com.baige.designform
+productName: 策问 Designform
+artifactName: Designform-${version}-Windows-x64.${ext}
+directories:
+  output: release
+files:
+  - runtime/desktop.js
+  - package.json
+  - "!node_modules/**"
+  - runtime/preload.cjs
+extraFiles:
+  - from: desktop/策问MCP.cmd
+    to: 策问MCP.cmd
+  - from: desktop/策问CLI.cmd
+    to: 策问CLI.cmd
+  - from: desktop/使用说明.md
+    to: 使用说明.md
+extraResources:
+  - from: dist
+    to: dist
+  - from: templates/example
+    to: templates/example
+  - from: integration/skills
+    to: integration/skills
+  - from: docs/protocol
+    to: integration/protocol
+  - from: runtime
+    to: runtime
+    filter:
+      - cli.js
+      - mcp.js
+      - serve.js
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+win:
+  target:
+    - zip
+  icon: public/icons/cewen.ico
+  signExecutable: false
+asar: true
+npmRebuild: false

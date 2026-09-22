@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "策问问询包",
+  "type": "object",
+  "required": [
+    "requestId",
+    "round",
+    "questions"
+  ],
+  "properties": {
+    "requestId": {
+      "type": "string"
+    },
+    "round": {
+      "type": "string"
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "background",
+          "options",
+          "targets"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "background": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "maxItems": 26,
+            "items": {
+              "type": "string"
+            }
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
+            "enum": [
+              "single",
+              "multiple"
+            ]
+          },
+          "follows": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "when": {
+            "type": "object",
+            "required": [
+              "questionId"
+            ],
+            "properties": {
+              "questionId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$"
+              },
+              "option": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

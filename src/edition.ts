@@ -1,0 +1,41 @@
+/// <reference types="vite/client" />
+/** 发行形态在构建时固定，桌面包不依赖 GitHub Pages 的可用性。 */
+export const isWebEdition = import.meta.env.MODE === 'web';
+export const releaseUrl = 'https://github.com/Syurli/Designform/releases/latest';
+
+/** 文件夹选择按钮保持在真实用户点击中，避免浏览器拦截延迟弹出的授权框。 */
+export function prepareDirectoryFields(container: HTMLElement) {
+  if (!isWebEdition) return;
+  const fields = container.querySelectorAll<HTMLInputElement>('input[name="directory"], form[data-form="open"] input[name="path"]');
+  for (const input of fields) {
+    input.value = ''; input.readOnly = true; input.required = false; input.placeholder = '尚未选择文件夹';
+    const details = input.closest('details'); if (details) details.open = true;
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary-button'; button.textContent = '选择本机文件夹'; input.after(button);
+    // 模块在启动阶段预载，点击时不能先等待 import 才调用选择器。
+    button.addEventListener('click', () => {
+      if (!folderPicker) { input.placeholder = '文件服务正在准备，请稍后再点一次'; return; }
+      button.disabled = true;
+      void folderPicker().then(value => { input.value = value; input.title = value; input.dispatchEvent(new Event('input',{bubbles:true})); }).catch(error => { input.placeholder = error instanceof DOMException && error.name === 'AbortError' ? '已取消选择，原文件未修改' : String(error.message ?? error); }).finally(() => { button.disabled = false; });
+    });
+  }
+  for (const button of container.querySelectorAll<HTMLButtonElement>('[data-project-path]')) {
+    button.addEventListener('click', event => {
+      if (!folderPermission || button.dataset.authorized === 'yes') { delete button.dataset.authorized; return; }
+      event.stopImmediatePropagation(); event.stopPropagation();
+      void folderPermission(button.dataset.projectPath!).then(() => { button.dataset.authorized = 'yes'; button.click(); }).catch(error => {
+        const feedback = container.querySelector<HTMLElement>('[role="status"]'); if (feedback) { feedback.hidden = false; feedback.textContent = error.message; }
+      });
+    });
+  }
+  if (container.querySelector('[data-form="create"]')) {
+    const note = document.createElement('p'); note.className = 'edition-note quiet';
+    note.textContent = '网页版 · 正式项目直接保存在你选择的本机文件夹，不上传。虚构示例暂存在当前浏览器，清除网站数据会删除示例和最近入口；请用资料交换导出需保留的示例。';
+    container.querySelector('.project-dialog-header')?.after(note);
+    const example = container.querySelector('[data-action="example"] span'); if (example) example.textContent = '浏览器示例 · 可导出为本机项目';
+  }
+}
+let folderPicker: (() => Promise<string>) | undefined;
+let folderPermission: ((filename: string) => Promise<void>) | undefined;
+if (isWebEdition) void import('../browser/platform').then(platform => {
+  folderPicker = platform.chooseDirectory; folderPermission = platform.requestDirectoryPermission;
+});

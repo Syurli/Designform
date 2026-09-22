@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-web/
+.local/
+*.log
+/runtime/
+/release/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+*.sqlite-wal
+*.sqlite-shm

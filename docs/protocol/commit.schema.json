@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "策问正文批次",
+  "type": "object",
+  "required": [
+    "projectId",
+    "requestId",
+    "baseRevision",
+    "reason",
+    "changes"
+  ],
+  "properties": {
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$"
+    },
+    "requestId": {
+      "type": "string"
+    },
+    "baseRevision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "actor": {
+      "enum": [
+        "user",
+        "external",
+        "import",
+        "restore",
+        "llm"
+      ]
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "baseHash",
+          "text"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(PROJECT\\.md|docs/.+\\.md)$"
+          },
+          "baseHash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

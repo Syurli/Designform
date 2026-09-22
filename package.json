@@ -1,0 +1,51 @@
+{
+  "name": "baige-designform",
+  "private": true,
+  "version": "0.3.0",
+  "type": "module",
+  "main": "runtime/desktop.js",
+  "description": "策问 Designform — 游戏策划知识空间",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "serve": "node runtime/serve.js",
+    "desktop": "electron .",
+    "cli": "node runtime/cli.js",
+    "mcp": "node runtime/mcp.js",
+    "package:win": "npm run build && npm run build:runtime && electron-builder --win --x64",
+    "icons": "node scripts/export-icons.mjs",
+    "dev:web": "vite --mode web --host 127.0.0.1 --port 5174",
+    "build:web": "tsc --noEmit && vite build --mode web",
+    "build:all": "npm run build && npm run build:web && npm run build:runtime",
+    "licenses": "node scripts/collect-licenses.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@noble/hashes": "2.4.0",
+    "buffer": "6.0.3",
+    "lucide": "1.47.0",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0",
+    "path-browserify": "1.0.1",
+    "sql.js": "1.14.2",
+    "three": "0.186.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "@types/path-browserify": "1.0.3",
+    "@types/sql.js": "1.4.11",
+    "@types/three": "0.186.0",
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "sharp": "0.35.4",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  },
+  "author": "BAIGE"
+}

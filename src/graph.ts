@@ -1,0 +1,1145 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { types, type KnowledgeData, type KnowledgeNode, type KnowledgeEdge } from './data';
+import { buildAnalysis, edgeSentence, laneLabels, type AnalysisResult, type AnalysisLane } from './analysis';
+import { currentTheme } from './theme';
+
+/** 三种空间模式共享同一场景；切换时只改变目标坐标，不重新创建节点。 */
+export type GraphMode = 'galaxy' | 'network' | 'layers';
+type DesignNode = KnowledgeNode;
+type StarNode = { data: DesignNode; point: THREE.Sprite; halo: THREE.Sprite; label: HTMLButtonElement };
+type Connection = { data: KnowledgeEdge; curve: THREE.QuadraticBezierCurve3; line: THREE.Line; material: THREE.LineBasicMaterial; particle: THREE.Sprite; path: SVGPathElement; hit: SVGPathElement; label: HTMLButtonElement };
+type NodeAppearance = { point: number; halo: number };
+/** 展开比例独立于卡片的位置；打断动画时从当前比例继续，不把整层文字清空。 */
+type CardAppearance = { open: number; opacity: number };
+type OverviewSnapshot = { mode: GraphMode; positions: Map<string, THREE.Vector3>; camera: THREE.Vector3; target: THREE.Vector3 };
+/** 导航发生前的真实屏幕位置；使用视口坐标，允许工具栏与画布高度同时变化。 */
+type NavigationFrame = {
+  mode: GraphMode; rect: { left: number; top: number; width: number; height: number };
+  projections: Map<string, THREE.Vector3>; camera: THREE.Vector3; target: THREE.Vector3;
+  quaternion: THREE.Quaternion; appearance: Map<string, NodeAppearance>; lines: number[];
+  scale: number; ambient: number;
+  cards: Map<string, CardAppearance>; cardEdges: number[];
+};
+type LayoutTransition = {
+  start: number; duration: number; from: Map<string, THREE.Vector3>; to: Map<string, THREE.Vector3>;
+  cameraFrom: THREE.Vector3; cameraTo: THREE.Vector3; targetFrom: THREE.Vector3; targetTo: THREE.Vector3;
+  cameraInterrupted: boolean; restoreOverview: boolean; analysisMorph: boolean;
+  appearance: Map<string, NodeAppearance>; lines: number[]; scaleFrom: number; ambientFrom: number;
+  refocus: boolean; cards: Map<string, CardAppearance>; cardEdges: number[];
+};
+
+/** 用固定种子生成背景星点，使重新打开页面后的视觉位置保持稳定。 */
+function randomGenerator(seed: number) {
+  return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+}
+
+/** 星空是知识节点的背景，实际规则使用可聚焦的原生按钮承载文字。 */
+export class KnowledgeGraph {
+  private scene = new THREE.Scene();
+  private camera = new THREE.PerspectiveCamera(42, 1, 1, 8000);
+  private renderer: THREE.WebGLRenderer;
+  private controls: OrbitControls;
+  private stars = new Map<string, StarNode>();
+  private connections: Connection[] = [];
+  private backgrounds: THREE.Points[] = [];
+  private clouds: THREE.Sprite[] = [];
+  private labelLayer = document.createElement('div');
+  private edgeLayer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  private analysis?: AnalysisResult;
+  private relationIndex: number | null = null;
+  private laneHeadings = new Map<string, HTMLDivElement>();
+  private lanePositions = new Map<string, THREE.Vector3>();
+  private frame = 0;
+  private observer: ResizeObserver;
+  private active = true;
+  private mode: GraphMode = 'galaxy';
+  private selected: string | null = null;
+  private group: string | null = null;
+  private query = '';
+  private directOnly = false;
+  private scopeIds: string[] | null = null;
+  private includeArchived = false;
+  private labelsAll = false;
+  private detailedGraph = false;
+  private motionPaused = false;
+  private reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  private labelsDirty = true;
+  private labelSizes = new Map<string, { width: number; height: number }>();
+  private previousSize = { width: 0, height: 0 };
+  /** 隐藏的阅读页不具备有效画布尺寸，恢复显示后再计算布局。 */
+  private layoutDeferred = false;
+  private deferredModeOptions?: { restoreOverview?: boolean };
+  private overview?: OverviewSnapshot;
+  private navigationFrame?: NavigationFrame;
+  private lastValidFrame?: NavigationFrame;
+  private desiredAppearance = new Map<string, NodeAppearance>();
+  private desiredLines: number[] = [];
+  private currentScale = 1;
+  private ambient = 1;
+  private contentOpacity = 1;
+  private cardAppearance = new Map<string, CardAppearance>();
+  private cardEdgeOpacity: number[] = [];
+  private texture: THREE.CanvasTexture;
+  private transition: LayoutTransition | null = null;
+  private selectionRing: THREE.Sprite;
+  private raycaster = new THREE.Raycaster();
+  /** 一次完整的主指针点击才触发选择；旋转、拖回原点、多指操作都不能误清空。 */
+  private pointerStart: { x: number; y: number; id: number; moved: boolean } | null = null;
+  private disposed = false;
+  /** 历史布局按稳定身份复用，版本增删不让已有节点重新洗牌。 */
+  private layoutMemory = new Map<string, { group: string; point: THREE.Vector3 }>();
+  private retiring = new Set<string>();
+  private versionChanging = false;
+  private light = currentTheme() === 'light';
+  /** 星系装饰只承担空间提示，不生成虚构的知识节点或关系。 */
+  private galaxyDust?: THREE.Points;
+  private galaxyCore?: THREE.Sprite;
+  private primaryGdd?: string;
+
+  private findCore() {
+    return this.data.nodes.filter(node => node.kind === 'document' && node.documentType === 'gdd' && node.status !== 'archived')
+      .sort((a, b) => Number(/\/GDD\.md$/i.test(b.documentPath)) - Number(/\/GDD\.md$/i.test(a.documentPath)) || a.documentPath.localeCompare(b.documentPath, 'zh-CN'))[0]?.id;
+  }
+  private coreId() { return this.primaryGdd; }
+  private starSize(node: KnowledgeNode, halo = false) {
+    return node.id === this.coreId() ? halo ? 205 : 46 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
+  }
+
+  constructor(private container: HTMLElement, private select: (id: string) => void, private onCount: (count: number) => void, private selectRelation: (index: number) => void, private data: KnowledgeData, private clearSelection: () => void) {
+    this.primaryGdd = this.findCore();
+    this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+    this.renderer.setClearColor(0x080c18, 0);
+    this.renderer.domElement.setAttribute('aria-label', '游戏策划关系图，可拖动旋转或平移；也可通过左侧目录和图上的文字选择节点');
+    this.container.append(this.renderer.domElement);
+    // 分析连线与 WebGL 使用相同的节点投影；SVG 为细线提供宽点击区域和清晰箭头。
+    this.edgeLayer.classList.add('analysis-edges');
+    this.edgeLayer.setAttribute('aria-hidden', 'true');
+    const definitions = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    definitions.innerHTML = '<marker id="analysis-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="#9dbbdd" stroke-width="1.6"/></marker>';
+    this.edgeLayer.append(definitions);
+    this.container.append(this.edgeLayer);
+    this.labelLayer.className = 'star-labels';
+    this.container.append(this.labelLayer);
+    ['upstream', 'focus', 'downstream', 'context'].forEach(lane => {
+      const heading = document.createElement('div');
+      heading.className = `analysis-lane-heading ${lane}`;
+      heading.hidden = true;
+      this.labelLayer.append(heading);
+      this.laneHeadings.set(lane, heading);
+    });
+    this.texture = this.makeGlowTexture();
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.075;
+    this.controls.minDistance = 150;
+    this.controls.maxDistance = 3400;
+    this.controls.maxPolarAngle = Math.PI * .9;
+    // 拖动只能接管镜头，节点继续完成变换，避免留下半三维、半分层的坐标。
+    this.controls.addEventListener('start', () => { if (this.transition) this.transition.cameraInterrupted = true; });
+    this.controls.addEventListener('change', () => { this.labelsDirty = true; });
+    this.createBackground();
+    const geometry = this.layout('galaxy');
+    data.nodes.forEach(node => {
+      const color = data.groups.find(group => group.id === node.group)!.color;
+      const point = this.sprite(color, this.starSize(node), .98);
+      const halo = this.sprite(color, this.starSize(node, true), .22);
+      point.position.copy(geometry.get(node.id)!);
+      halo.position.copy(point.position);
+      const label = document.createElement('button');
+      label.className = `star-label ${node.kind}`;
+      label.type = 'button';
+      label.textContent = node.title;
+      label.style.setProperty('--node-color', color);
+      label.setAttribute('aria-label', `查看${node.title}`);
+      label.addEventListener('click', () => this.select(node.id));
+      this.labelLayer.append(label);
+      this.stars.set(node.id, { data: node, point, halo, label });
+    });
+    data.edges.forEach((edge, index) => {
+      const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3());
+      const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: .19, depthWrite: false });
+      const line = new THREE.Line(new THREE.BufferGeometry(), material);
+      this.scene.add(line);
+      const particle = this.sprite('#b8e5ff', 8, .85);
+      particle.visible = false;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.classList.add('analysis-edge', edge.type);
+      const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      hit.classList.add('analysis-edge-hit');
+      hit.addEventListener('click', () => { if (this.contentOpacity >= .35) this.selectEdge(edge.id); });
+      this.edgeLayer.append(path, hit);
+      const label = document.createElement('button');
+      label.type = 'button';
+      label.className = `analysis-edge-label ${edge.type}`;
+      label.textContent = types.find(type => type.id === edge.type)?.label ?? '关联';
+      label.setAttribute('aria-label', `查看关系依据：${edgeSentence(edge, data.nodes, data.edges)}`);
+      label.addEventListener('click', () => this.selectEdge(edge.id));
+      label.hidden = true;
+      this.labelLayer.append(label);
+      this.connections.push({ data: edge, curve, line, material, particle, path, hit, label });
+    });
+    this.selectionRing = this.sprite('#d1dcff', 58, .28);
+    this.selectionRing.visible = false;
+    const initialFraming = this.framing(geometry);
+    this.camera.position.copy(initialFraming.position);
+    this.controls.target.copy(initialFraming.target);
+    this.controls.update();
+    this.updateConnections();
+    this.observer = new ResizeObserver(() => this.resize());
+    this.observer.observe(container);
+    this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
+    this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
+    this.renderer.domElement.addEventListener('pointermove', this.pointerMove);
+    this.renderer.domElement.addEventListener('pointercancel', this.pointerCancel);
+    document.addEventListener('visibilitychange', this.visibilityChanged);
+    window.addEventListener('cewen-theme-change', this.themeChanged);
+    this.resize();
+    this.refreshVisibility();
+    this.themeChanged();
+    document.fonts.ready.then(() => { if (!this.disposed) this.measureLabels(); });
+    this.animate();
+  }
+
+  /** 径向透明贴图只生成一次；柔光使用叠加混合，不依赖外部图片或高成本全屏模糊。 */
+  private makeGlowTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 128;
+    const context = canvas.getContext('2d')!;
+    const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(.1, 'rgba(255,255,255,.95)');
+    gradient.addColorStop(.25, 'rgba(255,255,255,.5)');
+    gradient.addColorStop(.5, 'rgba(255,255,255,.12)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  /** 创建始终面向镜头的星点，尺寸是场景单位，文字另由屏幕空间绘制。 */
+  private sprite(color: string, size: number, opacity: number) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.texture, color: this.graphColor(color), transparent: true, opacity, blending: this.light ? THREE.NormalBlending : THREE.AdditiveBlending, depthWrite: false }));
+    sprite.userData.baseColor = color;
+    sprite.scale.setScalar(size);
+    this.scene.add(sprite);
+    return sprite;
+  }
+
+  /** 浅色用有色实体点与普通混合，避免发光叠加在白底上消失；不改布局与镜头。 */
+  private graphColor(color: string) { return new THREE.Color(color).multiplyScalar(this.light ? .3 : 1); }
+  private themeChanged = () => {
+    this.light = currentTheme() === 'light';
+    this.scene.traverse(object => {
+      if (object instanceof THREE.Sprite) {
+        object.material.color.copy(this.graphColor(object.userData.baseColor ?? '#b8e5ff'));
+        object.material.blending = this.light ? THREE.NormalBlending : THREE.AdditiveBlending;
+        object.material.needsUpdate = true;
+      }
+    });
+    this.backgrounds.forEach((field,index) => {
+      const material = field.material as THREE.PointsMaterial;
+      material.color.set(this.light ? '#738aa8' : index ? '#bed5ff' : '#899fcf');
+      material.blending = this.light ? THREE.NormalBlending : THREE.AdditiveBlending; material.needsUpdate = true;
+    });
+    this.edgeLayer.querySelector('marker path')?.setAttribute('stroke', this.light ? '#547aa6' : '#9dbbdd');
+    this.refreshVisibility(); this.labelsDirty = true;
+  };
+
+  /** 远近两层星尘产生空间感；星云强度始终低于知识节点，避免抢占阅读注意力。 */
+  private createBackground() {
+    const random = randomGenerator(20260921);
+    [1000, 180].forEach((count, layer) => {
+      const positions = new Float32Array(count * 3);
+      for (let index = 0; index < count; index++) {
+        positions[index * 3] = (random() - .5) * 4400;
+        positions[index * 3 + 1] = (random() - .5) * 3200;
+        positions[index * 3 + 2] = -1800 + random() * 2100;
+      }
+      const geometry = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.PointsMaterial({ color: layer ? '#bed5ff' : '#899fcf', size: layer ? 3.2 : 1.7, sizeAttenuation: false, transparent: true, opacity: layer ? .85 : .6, map: this.texture, depthWrite: false, blending: THREE.AdditiveBlending });
+      const field = new THREE.Points(geometry, material);
+      this.scene.add(field);
+      this.backgrounds.push(field);
+    });
+    this.data.groups.forEach((group, index) => {
+      const cloud = this.sprite(group.color, 670, .042);
+      const angle = index / this.data.groups.length * Math.PI * 2 - Math.PI / 2;
+      cloud.position.set(Math.cos(angle) * 360, Math.sin(angle) * 245, -200);
+      cloud.scale.y = 430;
+      this.clouds.push(cloud);
+    });
+    // 四条渐疏旋臂围绕原点，倾斜薄盘保留三维纵深；粒子不参与点击与计数。
+    const dust = new Float32Array(4200 * 3);
+    for (let index = 0; index < 4200; index++) {
+      const radius = 45 + Math.pow(random(), .7) * 650;
+      const angle = index % 4 * Math.PI / 2 + radius * .0048 + (random() - .5) * .3;
+      dust[index * 3] = Math.cos(angle) * radius;
+      dust[index * 3 + 1] = Math.sin(angle) * radius * .66;
+      dust[index * 3 + 2] = Math.sin(angle) * radius * .23 + (random() - .5) * 36 - 50;
+    }
+    this.galaxyDust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(dust, 3)), new THREE.PointsMaterial({ color: '#b0bcdf', size: 2.4, sizeAttenuation: false, transparent: true, opacity: .3, map: this.texture, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.scene.add(this.galaxyDust);
+    this.galaxyCore = this.sprite('#e6cda4', 390, .13); this.galaxyCore.position.set(0, 0, -45); this.galaxyCore.scale.y = 245;
+  }
+
+  /** 布局是纯坐标计算。包含关系与跨系统关系均被保留，不把存在循环的图强制当成树。 */
+  private layout(mode: GraphMode) {
+    const result = new Map<string, THREE.Vector3>();
+    const maxRows = Math.max(1, ...this.data.groups.map(group => this.data.nodes.filter(node => node.group === group.id).length));
+    this.data.groups.forEach((group, groupIndex) => {
+      const members = this.data.nodes.filter(node => node.group === group.id);
+      const angle = groupIndex / this.data.groups.length * Math.PI * 2 + Math.PI / 2;
+      const center = new THREE.Vector3(Math.cos(angle) * 330, Math.sin(angle) * 245, mode === 'galaxy' ? Math.sin(groupIndex * 2.1) * 140 : 0);
+      members.forEach((node, index) => {
+        if (mode === 'layers') {
+          result.set(node.id, new THREE.Vector3((groupIndex - (this.data.groups.length - 1) / 2) * 250, (maxRows - 1) * 46 - index * 92, 0));
+        } else if (index === 0) {
+          result.set(node.id, center.clone());
+        } else {
+          const orbit = members.length > 20 ? index * 2.399963 : (index - 1) / Math.max(members.length - 1, 1) * Math.PI * 2 + groupIndex * .38;
+          const radius = members.length > 20 ? 35 * Math.sqrt(index) : mode === 'galaxy' ? 113 + index % 2 * 12 : 117;
+          result.set(node.id, center.clone().add(new THREE.Vector3(Math.cos(orbit) * radius, Math.sin(orbit) * radius * .82, mode === 'galaxy' ? Math.sin(orbit * 1.4) * 86 : 0)));
+        }
+      });
+    });
+    if (mode === 'galaxy') {
+      const core = this.coreId();
+      // 总纲固定在中心，规则在近核轨道；系统为旋臂上的星团，DD 与规则由内向外展开。
+      this.data.groups.forEach((group, groupIndex) => {
+        const angle = groupIndex / Math.max(this.data.groups.length, 1) * Math.PI * 2 + .4;
+        const radius = 340 + groupIndex % 2 * 55;
+        const center = new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * .7, Math.sin(angle) * radius * .24);
+        const members = this.data.nodes.filter(node => node.group === group.id && node.id !== core && (node.kind === 'system' || node.documentId !== core));
+        const documents = members.filter(node => node.kind === 'document');
+        members.forEach(node => {
+          if (node.kind === 'system') { result.set(node.id, center.clone()); return; }
+          const docIndex = Math.max(0, documents.findIndex(doc => doc.id === node.documentId));
+          const orbit = angle + .9 + docIndex * 2.399963;
+          const docRadius = 85 + Math.sqrt(docIndex) * 35;
+          const point = center.clone().add(new THREE.Vector3(Math.cos(orbit) * docRadius, Math.sin(orbit) * docRadius * .8, Math.sin(orbit) * 40));
+          if (node.kind === 'rule') {
+            const siblings = members.filter(other => other.kind === 'rule' && other.documentId === node.documentId);
+            const index = siblings.findIndex(other => other.id === node.id), local = index * 2.399963 + orbit;
+            const distance = 43 + Math.sqrt(index) * 22;
+            point.add(new THREE.Vector3(Math.cos(local) * distance, Math.sin(local) * distance * .85, Math.sin(local * 1.4) * 34));
+          }
+          result.set(node.id, point);
+        });
+      });
+      const coreRules = this.data.nodes.filter(node => node.kind === 'rule' && node.documentId === core);
+      coreRules.forEach((node, index) => { const angle = index / coreRules.length * Math.PI * 2 + .5; const radius = 115 + Math.floor(index / 6) * 38; result.set(node.id, new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * .7, Math.sin(angle) * 32)); });
+      if (core) result.set(core, new THREE.Vector3());
+    }
+    if (mode === 'network') this.analysisLayout(result);
+    else {
+      const layoutKey = mode === 'galaxy' ? 'galaxy-v2' : mode;
+      const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
+      this.data.nodes.forEach(node => {
+        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key);
+        if (mode === 'galaxy' && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
+        if (saved) result.set(node.id, saved.point.clone());
+        else {
+          const point = result.get(node.id)!;
+          // 新条目避开已有槽位；旧节点始终复用自己的坐标，不随数组下标漂移。
+          if (this.layoutMemory.size) for (let attempt = 0; attempt < 2000 && occupied.some(old => old.distanceToSquared(point) < 900); attempt++) {
+            if (mode === 'layers') point.y -= 92;
+            else { const angle = attempt * 2.399963; point.x += Math.cos(angle) * 35; point.y += Math.sin(angle) * 35; point.z += 12; }
+          }
+          this.layoutMemory.set(key, { group: node.group, point: point.clone() }); occupied.push(point.clone());
+        }
+      });
+    }
+    return result;
+  }
+
+  /** 自定义阅读坐标属于编辑器视图；没有此缓存仍可从公开内容重建图谱。 */
+  exportLayout() { return [...this.layoutMemory].map(([key, value]) => ({ key, group: value.group, point: value.point.toArray() })); }
+  restoreLayout(value: unknown) {
+    if (!Array.isArray(value) || value.length > 20000) return;
+    for (const row of value) if (row && typeof row.key === 'string' && typeof row.group === 'string' && Array.isArray(row.point) && row.point.length === 3 && row.point.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 1000000)) this.layoutMemory.set(row.key, { group: row.group, point: new THREE.Vector3(...row.point as [number,number,number]) });
+    this.setMode(this.mode);
+  }
+
+  /** 边的回调查询当前身份，避免增删版本后旧数组下标选中别的关系。 */
+  private selectEdge(id: string) { const index = this.data.edges.findIndex(edge => edge.id === id); if (index >= 0) this.selectRelation(index); }
+
+  private createStar(node: KnowledgeNode, position: THREE.Vector3): StarNode {
+    const color = this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+    const point = this.sprite(color, this.starSize(node), 0);
+    const halo = this.sprite(color, this.starSize(node, true), 0);
+    point.position.copy(position); halo.position.copy(position);
+    const label = document.createElement('button'); label.type = 'button'; label.className = `star-label ${node.kind}`;
+    label.textContent = node.title; label.style.setProperty('--node-color', color); label.setAttribute('aria-label', `查看${node.title}`);
+    label.addEventListener('click', () => { if (!this.retiring.has(node.id)) this.select(node.id); }); this.labelLayer.append(label);
+    return { data: node, point, halo, label };
+  }
+
+  private createConnection(edge: KnowledgeEdge): Connection {
+    const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: 0, depthWrite: false });
+    const line = new THREE.Line(new THREE.BufferGeometry(), material); this.scene.add(line);
+    const particle = this.sprite('#b8e5ff', 8, 0); particle.visible = false;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.classList.add('analysis-edge', edge.type);
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path'); hit.classList.add('analysis-edge-hit'); hit.addEventListener('click', () => this.selectEdge(edge.id)); this.edgeLayer.append(path, hit);
+    const label = document.createElement('button'); label.type = 'button'; label.className = `analysis-edge-label ${edge.type}`; label.textContent = types.find(type => type.id === edge.type)?.label ?? '关联'; label.hidden = true; label.addEventListener('click', () => this.selectEdge(edge.id)); this.labelLayer.append(label);
+    return { data: edge, curve: new THREE.QuadraticBezierCurve3(new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()), material, line, particle, path, hit, label };
+  }
+
+  /** 数据版本沿用当前场景与镜头；新增从归属节点展开，删除保留到收拢完成。 */
+  updateData(data: KnowledgeData) {
+    const before = new Map([...this.stars].map(([id, star]) => [id, star.data]));
+    const from = new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()]));
+    const appearance = new Map([...this.stars].map(([id, star]) => [id, { point: star.point.material.opacity, halo: star.halo.material.opacity }]));
+    const oldConnections = new Map(this.connections.map(connection => [connection.data.id, connection]));
+    this.data = data; this.primaryGdd = this.findCore(); this.transition = null; this.retiring.clear();
+    if (this.selected && !data.nodes.some(node => node.id === this.selected)) this.selected = null;
+    if (this.group && !data.groups.some(group => group.id === this.group)) this.group = null;
+    this.analysis = this.selected ? buildAnalysis(this.selected, data.nodes, data.edges) : undefined;
+    const to = this.layout(this.mode);
+    for (const node of data.nodes) {
+      let star = this.stars.get(node.id);
+      if (!star) {
+        const origin = from.get(node.group) ?? to.get(node.group) ?? to.get(node.id)!;
+        star = this.createStar(node, origin); this.stars.set(node.id, star); from.set(node.id, origin.clone()); appearance.set(node.id, { point: 0, halo: 0 });
+      }
+      const changed = before.has(node.id) && JSON.stringify(before.get(node.id)) !== JSON.stringify(node);
+      star.data = node; star.label.inert = false; star.label.textContent = node.title; star.label.classList.toggle('version-changed', changed);
+      const color = data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+      star.point.userData.baseColor = star.halo.userData.baseColor = color;
+      star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', color);
+    }
+    const ids = new Set(data.nodes.map(node => node.id));
+    for (const [id, star] of this.stars) if (!ids.has(id)) { this.retiring.add(id); to.set(id, to.get(star.data.group)?.clone() ?? from.get(id)!.clone()); star.label.inert = true; }
+    this.connections = data.edges.map(edge => {
+      const existing = oldConnections.get(edge.id); oldConnections.delete(edge.id);
+      if (existing) { existing.data = edge; existing.label.textContent = types.find(type => type.id === edge.type)?.label ?? '关联'; return existing; }
+      return this.createConnection(edge);
+    });
+    this.connections.push(...oldConnections.values());
+    const lines = this.connections.map(connection => connection.material.opacity);
+    this.prepareAnalysis(true); this.refreshVisibility(false);
+    this.versionChanging = true;
+    this.transition = { start: performance.now(), duration: this.reduceMotion.matches ? 0 : this.mode === 'network' ? 360 : 850, from, to, cameraFrom: this.camera.position.clone(), cameraTo: this.camera.position.clone(), targetFrom: this.controls.target.clone(), targetTo: this.controls.target.clone(), cameraInterrupted: true, restoreOverview: false, analysisMorph: this.mode === 'network', appearance, lines, scaleFrom: this.currentScale, ambientFrom: this.ambient, refocus: false, cards: new Map(this.cardAppearance), cardEdges: [...this.cardEdgeOpacity] };
+    this.measureLabels(); this.advanceTransition(this.transition.start);
+  }
+
+  /** 完成后才释放离开的图元，避免新旧版本之间出现整屏空白。 */
+  private clearRetired() {
+    for (const id of this.retiring) {
+      const star = this.stars.get(id); if (!star) continue;
+      this.scene.remove(star.point, star.halo); star.point.material.dispose(); star.halo.material.dispose(); star.label.remove(); this.stars.delete(id); this.cardAppearance.delete(id); this.labelSizes.delete(id); this.desiredAppearance.delete(id);
+    }
+    this.retiring.clear();
+    const ids = new Set(this.data.edges.map(edge => edge.id));
+    this.connections = this.connections.filter(connection => {
+      if (ids.has(connection.data.id)) return true;
+      this.scene.remove(connection.line, connection.particle); connection.line.geometry.dispose(); connection.material.dispose(); connection.particle.material.dispose(); connection.path.remove(); connection.hit.remove(); connection.label.remove(); return false;
+    });
+    this.versionChanging = false;
+  }
+
+  /** 以一屏一个稳定字号的分析桌面组织卡片；关系较多时向下延伸，滚动阅读而不缩小文字。 */
+  private analysisLayout(result: Map<string, THREE.Vector3>) {
+    this.lanePositions.clear();
+    if (!this.analysis) return;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    const narrow = width < 560;
+    const lanes: AnalysisLane[] = ['upstream', 'downstream', 'context'];
+    const position = (x: number, y: number) => new THREE.Vector3(x - width / 2, height / 2 - y, 0);
+    if (narrow) {
+      result.set(this.analysis.focus.id, position(width / 2, 110));
+      this.lanePositions.set('focus', position(width / 2, 22));
+      let cursor = 230;
+      lanes.forEach(lane => {
+        const entries = this.analysis!.entries.filter(entry => entry.lane === lane);
+        this.lanePositions.set(lane, position(width / 2, cursor));
+        cursor += 88;
+        entries.forEach(entry => { result.set(entry.node.id, position(width / 2, cursor)); cursor += 170; });
+        if (!entries.length) cursor += 35;
+      });
+    } else {
+      const step = width / 3;
+      result.set(this.analysis.focus.id, position(width / 2, 114));
+      this.lanePositions.set('focus', position(width / 2, 22));
+      (['upstream', 'downstream'] as const).forEach((lane, laneIndex) => {
+        const x = step * (laneIndex === 0 ? .5 : 2.5);
+        this.lanePositions.set(lane, position(x, 22));
+        this.analysis!.entries.filter(entry => entry.lane === lane).forEach((entry, index) => result.set(entry.node.id, position(x, 114 + index * 174)));
+      });
+      const sideRows = Math.max(1, ...lanes.slice(0, 2).map(lane => this.analysis!.entries.filter(entry => entry.lane === lane).length));
+      const contextTop = sideRows * 174 + 50;
+      this.lanePositions.set('context', position(width / 2, contextTop));
+      const context = this.analysis.entries.filter(entry => entry.lane === 'context');
+      const columns = Math.min(3, Math.max(context.length, 1));
+      // 每列按等宽单元居中；收窄窗口或打开详情后，卡片间距仍大于卡片宽度。
+      context.forEach((entry, index) => result.set(entry.node.id, position(width / columns * (index % columns + .5), contextTop + 95 + Math.floor(index / columns) * 174)));
+    }
+  }
+
+  /** 在进入分析或更换焦点时建立摘要卡片；其正文始终来自同一个节点对象。 */
+  private prepareAnalysis(keepOutgoingCards = false) {
+    this.analysis = this.selected ? buildAnalysis(this.selected, this.data.nodes, this.data.edges) : undefined;
+    const enabled = this.mode === 'network';
+    this.container.parentElement!.classList.toggle('analysis-mode', enabled);
+    this.edgeLayer.style.display = enabled || keepOutgoingCards ? '' : 'none';
+    if (enabled) {
+      const width = this.container.clientWidth;
+      const entries = this.analysis?.entries ?? [];
+      const narrow = width < 560;
+      this.controls.enablePan = !narrow;
+      this.renderer.domElement.style.touchAction = narrow ? 'pan-y' : 'none';
+      const sideRows = Math.max(1, ...(['upstream', 'downstream'] as const).map(lane => entries.filter(entry => entry.lane === lane).length));
+      const contextRows = Math.ceil(entries.filter(entry => entry.lane === 'context').length / 3);
+      const height = !this.analysis ? 450 : narrow ? 430 + entries.length * 170 + 3 * 88 : sideRows * 174 + 190 + Math.max(1, contextRows) * 174;
+      this.container.style.height = `${height}px`;
+      this.container.style.setProperty('--analysis-card-width', `${narrow ? Math.min(width - 110, 260) : Math.min(226, (width - 112) / 3)}px`);
+    } else {
+      this.container.style.height = '';
+      this.controls.enablePan = true;
+      this.renderer.domElement.style.touchAction = 'none';
+    }
+    this.stars.forEach(star => {
+      const wasCard = star.label.classList.contains('analysis-card');
+      if (!enabled && keepOutgoingCards && wasCard && (this.cardAppearance.get(star.data.id)?.open ?? 0) > .001) return;
+      star.label.classList.toggle('analysis-card', enabled);
+      if (!enabled) {
+        star.label.textContent = star.data.title;
+        star.label.style.removeProperty('clip-path');
+        star.label.style.removeProperty('opacity');
+        star.label.style.removeProperty('--card-inset');
+        star.label.style.removeProperty('--card-text-opacity');
+        star.label.style.removeProperty('--card-corners-opacity');
+        star.label.inert = false;
+        this.cardAppearance.set(star.data.id, { open: 0, opacity: 0 });
+        return;
+      }
+      const entry = this.analysis?.entries.find(item => item.node.id === star.data.id);
+      // 共同卡片沿用同一个内容元素，退出卡片也保留原说明直至收拢结束。
+      if (wasCard) {
+        if (entry || star.data.id === this.selected) star.label.querySelector('.analysis-card-role')!.textContent = star.data.id === this.selected ? '当前焦点' : laneLabels[entry!.lane];
+        return;
+      }
+      const meta = document.createElement('span');
+      meta.className = 'analysis-card-meta';
+      meta.textContent = `${this.data.groups.find(group => group.id === star.data.group)!.label} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[star.data.status]}`;
+      const title = document.createElement('strong');
+      title.textContent = star.data.title;
+      const summary = document.createElement('span');
+      summary.className = 'analysis-card-summary';
+      summary.textContent = star.data.summary;
+      const role = document.createElement('span');
+      role.className = 'analysis-card-role';
+      role.textContent = star.data.id === this.selected ? '当前焦点' : entry ? laneLabels[entry.lane] : '';
+      star.label.replaceChildren(meta, title, summary, role);
+    });
+    this.laneHeadings.forEach((heading, lane) => {
+      heading.hidden = !enabled || !this.analysis;
+      const count = this.analysis?.entries.filter(entry => entry.lane === lane).length ?? 0;
+      heading.textContent = lane === 'focus' ? '当前分析条目' : `${laneLabels[lane as AnalysisLane]} · ${count}${count ? '' : ' / 暂无记录'}`;
+    });
+    this.measureLabels();
+  }
+
+  /** 根据当前画布比例计算总览镜头；窄屏仍允许缩放和平移查看局部。 */
+  private framing(positions: Map<string, THREE.Vector3>) {
+    // 分析坐标按可读像素设计，默认一场景单位对应一个屏幕像素，超出视口的内容可滚动。
+    if (this.mode === 'network') return { target: new THREE.Vector3(), position: new THREE.Vector3(0, 0, this.container.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))) };
+    // 只对当前可见对象取景；没有结果时使用完整布局，空状态由界面负责显示。
+    const visible = [...positions].filter(([id]) => (this.desiredAppearance.get(id)?.point ?? Number(this.stars.get(id)?.point.visible)) > 0).map(([, point]) => point);
+    const box = new THREE.Box3().setFromPoints(visible.length ? visible : [...positions.values()]);
+    const size = box.getSize(new THREE.Vector3());
+    const target = box.getCenter(new THREE.Vector3());
+    if (this.mode === 'galaxy' && this.coreId() && !this.group && !this.query && !this.scopeIds && !this.directOnly) { target.set(0, 0, 0); size.x = Math.max(Math.abs(box.min.x), Math.abs(box.max.x)) * 2; size.y = Math.max(Math.abs(box.min.y), Math.abs(box.max.y)) * 2; }
+    const aspect = Math.max(this.container.clientWidth / Math.max(this.container.clientHeight, 1), .45);
+    const tangent = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const distance = Math.max((size.x + 150) / aspect, size.y + 160) / (2 * tangent) + size.z * .5;
+    return { target, position: target.clone().add(new THREE.Vector3(0, this.mode === 'galaxy' ? 100 : 0, Math.min(Math.max(distance, 450), 3300))) };
+  }
+
+  /** 仅保存真实镜头与节点坐标；隐藏视图没有有效尺寸，也不会用零尺寸重新取景。 */
+  rememberOverview() {
+    if (this.mode === 'network' || this.disposed) return;
+    // 返回动画尚未结束又进入分析时，继续保留原总览，避免把半途坐标当成新的基线。
+    if (this.transition?.restoreOverview && this.overview?.mode === this.mode) return;
+    this.overview = {
+      mode: this.mode,
+      positions: new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()])),
+      camera: this.camera.position.clone(), target: this.controls.target.clone()
+    };
+  }
+
+  /** 由导航入口在修改工具栏、滚动位置或页面样式之前调用，下一次 setMode 消费一次。 */
+  captureNavigationFrame() {
+    if (!this.disposed) this.navigationFrame = this.captureFrame() ?? this.lastValidFrame;
+  }
+
+  /** 投影仅在画面变化时保存；隐藏时沿用最后一次有效画面，不制造零尺寸坐标。 */
+  private captureFrame(): NavigationFrame | undefined {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return undefined;
+    this.camera.updateMatrixWorld();
+    const frame: NavigationFrame = {
+      mode: this.mode, rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      projections: new Map(), camera: this.camera.position.clone(), target: this.controls.target.clone(),
+      quaternion: this.camera.quaternion.clone(), appearance: new Map(), lines: [],
+      scale: this.currentScale, ambient: this.ambient,
+      cards: new Map([...this.cardAppearance].map(([id, value]) => [id, { ...value }])), cardEdges: [...this.cardEdgeOpacity]
+    };
+    this.stars.forEach((star, id) => {
+      const point = star.point.position.clone().project(this.camera);
+      frame.projections.set(id, new THREE.Vector3(rect.left + (point.x + 1) * rect.width / 2, rect.top + (1 - point.y) * rect.height / 2, point.z));
+      frame.appearance.set(id, { point: star.point.visible ? star.point.material.opacity : 0, halo: star.halo.visible ? star.halo.material.opacity : 0 });
+    });
+    frame.lines = this.connections.map(connection => connection.line.visible ? connection.material.opacity : 0);
+    this.lastValidFrame = frame;
+    return frame;
+  }
+
+  /** 动画从当前屏幕位置出发；返回时使用保存的用户视角，不重新缩放到全图。 */
+  setMode(mode: GraphMode, options: { restoreOverview?: boolean } = {}) {
+    if (this.disposed) return;
+    if (this.versionChanging) this.clearRetired();
+    const frame = this.navigationFrame ?? this.captureFrame() ?? this.lastValidFrame;
+    this.mode = mode;
+    if (!this.active || !this.container.clientWidth || !this.container.clientHeight) {
+      this.layoutDeferred = true;
+      this.deferredModeOptions = options;
+      this.navigationFrame = frame;
+      return;
+    }
+    this.navigationFrame = undefined;
+    this.layoutDeferred = false;
+    this.deferredModeOptions = undefined;
+    this.transition = null;
+    // 返回途中又切总览布局时，模式名已变化，但尚未收拢的卡片仍需续接。
+    const hasOutgoingCards = [...(frame?.cards.values() ?? [])].some(card => card.open > .001);
+    this.prepareAnalysis(mode !== 'network' && hasOutgoingCards);
+    this.controls.enableRotate = mode === 'galaxy';
+    this.controls.enableZoom = mode !== 'network';
+    this.controls.maxDistance = mode === 'network' ? 10000 : 3400;
+    this.controls.mouseButtons.LEFT = mode === 'galaxy' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    this.controls.touches.ONE = mode === 'galaxy' ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
+    this.container.dataset.mode = mode;
+
+    // 先更新真实画布比例，再把导航前的屏幕点反投影到新的画布，避免高度切换时跳位。
+    const width = this.container.clientWidth, height = this.container.clientHeight;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+    this.previousSize = { width, height };
+    if (frame) {
+      // 清空上次拖动剩余的阻尼，随后恢复捕获的镜头，防止旧惯性偏移返回位置。
+      this.controls.enableDamping = false;
+      this.controls.update();
+      this.controls.enableDamping = true;
+      this.camera.position.copy(frame.camera);
+      this.controls.target.copy(frame.target);
+      this.camera.quaternion.copy(frame.quaternion);
+      this.camera.updateMatrixWorld();
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const from = new Map([...this.stars].map(([id, star]) => {
+      const projected = frame?.projections.get(id);
+      const point = projected
+        ? new THREE.Vector3((projected.x - rect.left) / rect.width * 2 - 1, 1 - (projected.y - rect.top) / rect.height * 2, projected.z).unproject(this.camera)
+        : star.point.position.clone();
+      return [id, point] as const;
+    }));
+    this.refreshVisibility(false);
+    const saved = options.restoreOverview && this.overview?.mode === mode ? this.overview : undefined;
+    const to = saved ? new Map([...saved.positions].map(([id, point]) => [id, point.clone()])) : this.layout(mode);
+    const framing = saved ? { position: saved.camera.clone(), target: saved.target.clone() } : this.framing(to);
+    const analysisMorph = mode === 'network' || frame?.mode === 'network';
+    const refocus = mode === 'network' && frame?.mode === 'network';
+    if (refocus) {
+      this.stars.forEach((_, id) => {
+        const previous = frame?.cards.get(id)?.open ?? 0;
+        const visible = this.analysis?.visibleIds.has(id);
+        // 新邻居从被选中的知识节点向外出现；旧卡片在自己的节点处收拢，不飞回隐藏布局。
+        if (visible && previous < .001 && this.selected) from.set(id, from.get(this.selected)!.clone());
+        if (!visible && previous > 0) to.set(id, from.get(id)!.clone());
+      });
+    }
+    // 较长分析页的镜头可能远于总览缩放上限；迁移期间放宽范围，防止控制器截断动画起点。
+    this.controls.maxDistance = Math.max(mode === 'network' ? 10000 : 3400, this.camera.position.distanceTo(this.controls.target), framing.position.distanceTo(framing.target)) + 1;
+    this.transition = {
+      start: performance.now(), duration: this.reduceMotion.matches ? 0 : refocus ? 360 : analysisMorph ? 520 : 1150, from, to,
+      cameraFrom: this.camera.position.clone(), cameraTo: framing.position,
+      targetFrom: this.controls.target.clone(), targetTo: framing.target, cameraInterrupted: false,
+      restoreOverview: Boolean(saved), analysisMorph,
+      appearance: frame?.appearance ?? new Map(this.desiredAppearance), lines: frame?.lines ?? [...this.desiredLines],
+      scaleFrom: frame ? frame.scale * frame.rect.height / height : this.currentScale,
+      ambientFrom: frame?.ambient ?? this.ambient,
+      refocus, cards: frame?.cards ?? new Map(), cardEdges: frame?.cardEdges ?? []
+    };
+    this.container.classList.add('graph-transitioning');
+    this.container.dataset.transition = refocus ? 'refocus-analysis' : mode === 'network' ? 'enter-analysis' : frame?.mode === 'network' ? 'leave-analysis' : 'layout';
+    // 分析卡片采用固定像素布局，镜头抵达前暂不接收平移，避免停在错误阅读比例。
+    this.controls.enabled = mode !== 'network' || this.reduceMotion.matches;
+    this.advanceTransition(this.transition.start);
+    this.labelsDirty = true;
+  }
+
+  /** 选择、查询与分组过滤只影响可见性，始终保留稳定的节点 ID 和布局坐标。 */
+  setState(state: { selected: string | null; group: string | null; query: string; directOnly: boolean; labelsAll: boolean; paused: boolean; relationIndex?: number | null; scopeIds?: string[] | null; includeArchived?: boolean; detailedGraph?: boolean }, options: { deferLayout?: boolean; preserveCamera?: boolean } = {}) {
+    this.detailedGraph = state.detailedGraph === true; this.scopeIds = state.scopeIds ?? null; this.includeArchived = state.includeArchived === true;
+    const scopeChanged = this.group !== state.group || this.query !== state.query.trim().toLowerCase() || this.directOnly !== state.directOnly || (state.directOnly && this.selected !== state.selected);
+    const focusChanged = this.selected !== state.selected;
+    this.selected = state.selected;
+    this.group = state.group;
+    this.query = state.query.trim().toLowerCase();
+    this.directOnly = state.directOnly;
+    this.labelsAll = state.labelsAll;
+    this.motionPaused = state.paused;
+    this.relationIndex = state.relationIndex ?? null;
+    // 导航会紧接着调用 setMode，避免先用旧页面模式生成一次过渡布局。
+    if (options.deferLayout) return;
+    if (!options.preserveCamera && (this.mode === 'network' ? focusChanged : scopeChanged)) this.reset();
+    else this.refreshVisibility();
+  }
+
+  private neighbors() {
+    const related = new Set<string>();
+    if (this.selected) {
+      related.add(this.selected);
+      this.data.edges.forEach(edge => { if (edge.source === this.selected) related.add(edge.target); if (edge.target === this.selected) related.add(edge.source); });
+    }
+    return related;
+  }
+
+  private refreshVisibility(applyAppearance = true) {
+    this.labelsDirty = true;
+    const related = this.neighbors();
+    let count = 0;
+    this.stars.forEach(star => {
+      const match = !this.query || `${star.data.id} ${star.data.title} ${star.data.summary} ${star.data.content.join(' ')}`.toLowerCase().includes(this.query);
+      const visible = !this.retiring.has(star.data.id) && (this.mode === 'network' ? Boolean(this.analysis?.visibleIds.has(star.data.id)) : (this.includeArchived || star.data.status !== 'archived') && (this.detailedGraph || this.data.nodes.length <= 500 || star.data.kind !== 'rule' || Boolean(this.group || this.query || this.scopeIds || related.has(star.data.id))) && (!this.scopeIds || this.scopeIds.includes(star.data.id)) && (!this.group || star.data.group === this.group) && match && (!this.directOnly || !this.selected || related.has(star.data.id)));
+      const core = star.data.id === this.coreId();
+      const highlighted = core || !this.selected || related.has(star.data.id);
+      star.label.classList.toggle('galaxy-core', core && this.mode === 'galaxy');
+      this.desiredAppearance.set(star.data.id, { point: visible ? highlighted ? 1 : .38 : 0, halo: visible ? highlighted ? .25 : .055 : 0 });
+      star.label.classList.toggle('selected', star.data.id === this.selected);
+      star.label.classList.toggle('related', related.has(star.data.id));
+      star.label.setAttribute('aria-pressed', String(star.data.id === this.selected));
+      if (visible) count++;
+    });
+    const currentEdges = new Set(this.data.edges.map(edge => edge.id));
+    this.connections.forEach((connection, index) => {
+      const { source, target } = connection.data;
+      const overviewVisible = currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
+      connection.path.classList.toggle('selected', index === this.relationIndex);
+      connection.label.setAttribute('aria-pressed', String(index === this.relationIndex));
+      const focused = source === this.selected || target === this.selected;
+      connection.material.color.set(this.light ? focused ? '#37669a' : '#6b86a3' : focused ? '#9cc8f2' : '#6a8ba8');
+      const galaxyLine = source === this.coreId() ? .3 : connection.data.type === 'contains' ? .2 : .09;
+      this.desiredLines[index] = overviewVisible ? focused ? .65 : this.selected ? .07 : this.mode === 'galaxy' ? galaxyLine : .24 : 0;
+      // 普通“关联”没有因果方向，不绘制方向粒子，避免视觉暗示出不存在的依赖。
+      connection.particle.visible = overviewVisible && focused && connection.data.type !== 'relates';
+    });
+    const current = this.selected && this.stars.get(this.selected);
+    this.selectionRing.visible = Boolean(current && this.desiredAppearance.get(current.data.id)!.point > 0);
+    if (current) this.selectionRing.position.copy(current.point.position);
+    if (applyAppearance) {
+      const ratio = this.transition ? this.transitionRatio(performance.now()) : 1;
+      this.applyAppearance(ratio);
+      this.applyCardAppearance(ratio);
+    }
+    this.onCount(count);
+  }
+
+  /** 可见数量使用最终筛选结果；退出中的节点仍可短暂绘制，但不再接受选择。 */
+  private applyAppearance(ratio: number) {
+    const change = this.transition;
+    const ease = (value: number) => { const t = THREE.MathUtils.clamp(value, 0, 1); return t * t * (3 - 2 * t); };
+    this.stars.forEach((star, id) => {
+      const target = this.desiredAppearance.get(id) ?? { point: 0, halo: 0 };
+      const source = change?.appearance.get(id) ?? target;
+      const alpha = change?.analysisMorph ? ease(target.point === 0 ? ratio / .42 : ratio / .72) : ease(ratio);
+      star.point.material.opacity = THREE.MathUtils.lerp(source.point, target.point, alpha);
+      star.halo.material.opacity = THREE.MathUtils.lerp(source.halo, target.halo, alpha);
+      star.point.visible = star.point.material.opacity > .002;
+      star.halo.visible = star.halo.material.opacity > .002;
+    });
+    this.connections.forEach((connection, index) => {
+      const target = this.desiredLines[index] ?? 0;
+      const source = change?.lines[index] ?? target;
+      connection.material.opacity = THREE.MathUtils.lerp(source, target, ease(change?.analysisMorph ? ratio / .55 : ratio));
+      connection.line.visible = connection.material.opacity > .001;
+    });
+    const selected = this.selected && this.stars.get(this.selected);
+    this.selectionRing.material.opacity = selected ? .28 * selected.point.material.opacity : 0;
+  }
+
+  /** 动画进度统一处理减少动态效果设置；用户中途开启该设置时也会立即完成。 */
+  private transitionRatio(now: number) {
+    const change = this.transition;
+    return !change || change.duration === 0 || this.reduceMotion.matches ? 1 : THREE.MathUtils.clamp((now - change.start) / change.duration, 0, 1);
+  }
+
+  /** 清理整体文字层的旧透明状态；逐张卡片的展开与点击资格由各自进度决定。 */
+  private setContentOpacity(opacity: number) {
+    this.contentOpacity = opacity;
+    const settled = opacity >= 1;
+    this.labelLayer.style.opacity = this.edgeLayer.style.opacity = settled ? '' : String(opacity);
+    this.labelLayer.inert = opacity < .35;
+    this.connections.forEach(connection => { connection.hit.style.pointerEvents = opacity < .35 ? 'none' : ''; });
+    this.container.style.setProperty('--graph-content-opacity', String(opacity));
+  }
+
+  /** 卡片各自展开或收拢。共同卡片保持完整，离开的卡片保留到收拢完成后再隐藏。 */
+  private applyCardAppearance(ratio: number) {
+    const change = this.transition;
+    const outCubic = (value: number) => 1 - (1 - THREE.MathUtils.clamp(value, 0, 1)) ** 3;
+    this.stars.forEach((star, id) => {
+      if (!star.label.classList.contains('analysis-card')) return;
+      const desired = this.mode === 'network' && Boolean(this.analysis?.visibleIds.has(id));
+      const source = change?.cards.get(id) ?? { open: desired && !change ? 1 : 0, opacity: desired && !change ? 1 : 0 };
+      const closingShare = Math.min(.68, 240 / Math.max(change?.duration ?? 1, 1));
+      const progress = outCubic(ratio / (desired ? .92 : closingShare));
+      const open = THREE.MathUtils.lerp(source.open, desired ? 1 : 0, progress);
+      const opacity = THREE.MathUtils.lerp(source.opacity, desired ? 1 : 0, progress);
+      this.cardAppearance.set(id, { open, opacity });
+      star.label.style.setProperty('--card-inset', `${(1 - open) * 50}%`);
+      star.label.style.setProperty('--card-text-opacity', String(THREE.MathUtils.smoothstep(open, .2, .78)));
+      star.label.style.setProperty('--card-corners-opacity', String(4 * open * (1 - open)));
+      star.label.style.opacity = String(opacity);
+      // 即使仍在收拢，旧卡片也不再接收点击；共同卡片不锁定，允许继续追踪。
+      star.label.inert = !desired || open < .3;
+      star.label.hidden = open < .001;
+      if (this.mode !== 'network' && open < .001) {
+        // 收拢到节点后立即接回总览标签，不在动画末尾再突然补上一整批标题。
+        star.label.classList.remove('analysis-card');
+        star.label.textContent = star.data.title;
+        star.label.style.removeProperty('opacity');
+        star.label.inert = false;
+        star.label.hidden = false;
+        this.labelSizes.set(id, { width: star.label.offsetWidth, height: star.label.offsetHeight });
+      }
+    });
+    this.connections.forEach((connection, index) => {
+      const desired = this.mode === 'network' && Boolean(this.analysis?.edgeIndices.includes(index));
+      const source = change?.cardEdges[index] ?? (desired && !change ? 1 : 0);
+      const opacity = THREE.MathUtils.lerp(source, desired ? 1 : 0, outCubic(ratio));
+      this.cardEdgeOpacity[index] = opacity;
+      connection.path.style.display = opacity > .001 ? '' : 'none';
+      connection.path.style.opacity = String(opacity * (index === this.relationIndex ? 1 : .64));
+      connection.label.style.opacity = String(opacity);
+      connection.label.inert = !desired || opacity < .3;
+      connection.hit.style.display = desired && opacity >= .3 ? '' : 'none';
+      connection.label.hidden = opacity < .001;
+    });
+  }
+
+  /** 镜头与节点共享一条可打断时间线；无需额外计时器，快速往返不会留下旧回调。 */
+  private advanceTransition(now: number) {
+    const change = this.transition;
+    if (!change) return;
+    const ratio = this.transitionRatio(now);
+    // 外层星图与分层维持原有缓动；分析页面快速响应，不等待一段空白再展示。
+    const eased = change.analysisMorph ? 1 - (1 - ratio) ** 3 : ratio < .5 ? 4 * ratio ** 3 : 1 - (-2 * ratio + 2) ** 3 / 2;
+    this.currentScale = THREE.MathUtils.lerp(change.scaleFrom, 1, eased);
+    this.stars.forEach((star, id) => {
+      star.point.position.lerpVectors(change.from.get(id)!, change.to.get(id)!, eased);
+      star.halo.position.copy(star.point.position);
+      star.point.scale.setScalar(this.starSize(star.data) * this.currentScale);
+      star.halo.scale.setScalar(this.starSize(star.data, true) * this.currentScale);
+    });
+    this.selectionRing.scale.setScalar(58 * this.currentScale);
+    if (!change.cameraInterrupted) {
+      this.camera.position.lerpVectors(change.cameraFrom, change.cameraTo, eased);
+      this.controls.target.lerpVectors(change.targetFrom, change.targetTo, eased);
+    }
+    this.ambient = THREE.MathUtils.lerp(change.ambientFrom, this.mode === 'galaxy' ? 1 : .24, eased);
+    this.applyAppearance(ratio);
+    this.setContentOpacity(1);
+    this.applyCardAppearance(ratio);
+    this.updateConnections();
+    this.labelsDirty = true;
+    if (ratio === 1) {
+      this.transition = null;
+      if (this.versionChanging) this.clearRetired();
+      this.controls.enabled = true;
+      this.controls.maxDistance = this.mode === 'network' ? 10000 : 3400;
+      this.setContentOpacity(1);
+      if (this.mode !== 'network' && change.analysisMorph) this.prepareAnalysis();
+      this.container.classList.remove('graph-transitioning');
+      delete this.container.dataset.transition;
+      this.container.style.removeProperty('--graph-content-opacity');
+    }
+  }
+
+  /** 对弧线的起点、终点与控制点一并更新，使连线始终跟随正在变换的节点。 */
+  private updateConnections() {
+    this.connections.forEach(connection => {
+      const from = this.stars.get(connection.data.source)!.point.position;
+      const to = this.stars.get(connection.data.target)!.point.position;
+      connection.curve.v0.copy(from);
+      connection.curve.v2.copy(to);
+      connection.curve.v1.copy(from).lerp(to, .5);
+      connection.curve.v1.z += this.mode === 'galaxy' ? Math.min(from.distanceTo(to) * .15, 70) : 0;
+      const points = connection.curve.getPoints(28);
+      const existing = connection.line.geometry.getAttribute('position');
+      if (existing) {
+        points.forEach((point, index) => existing.setXYZ(index, point.x, point.y, point.z));
+        existing.needsUpdate = true;
+        connection.line.geometry.computeBoundingSphere();
+      } else connection.line.geometry.setFromPoints(points);
+    });
+    if (this.selected) this.selectionRing.position.copy(this.stars.get(this.selected)!.point.position);
+  }
+
+  /** 屏幕标签按“选中→相关→系统→其他”排序，并避让已经放置的标签。 */
+  private updateLabels() {
+    this.camera.updateMatrixWorld();
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    if (this.mode === 'network') { this.updateAnalysisLabels(width, height); this.labelsDirty = false; return; }
+    if ([...this.stars.values()].some(star => star.label.classList.contains('analysis-card'))) this.updateAnalysisLabels(width, height, true);
+    const related = this.neighbors();
+    const bounds: { x: number; y: number; width: number; height: number }[] = [];
+    const score = (star: StarNode) => this.mode === 'galaxy' && star.data.id === this.coreId() ? -1 : star.data.id === this.selected ? 0 : related.has(star.data.id) ? 1 : star.data.kind === 'system' ? 2 : 3;
+    [...this.stars.values()].sort((a, b) => score(a) - score(b)).forEach(star => {
+      if (star.label.classList.contains('analysis-card')) return;
+      const point = star.point.position.clone().project(this.camera);
+      const eligible = this.labelsAll || this.mode === 'layers' || star.data.kind !== 'rule' || related.has(star.data.id) || Boolean(this.query);
+      if (!this.desiredAppearance.get(star.data.id)?.point || !eligible || point.z > 1 || point.z < -1) { star.label.hidden = true; return; }
+      star.label.hidden = false;
+      const size = this.labelSizes.get(star.data.id)!;
+      const labelWidth = size.width;
+      const labelHeight = size.height;
+      const centerX = (point.x + 1) * width / 2;
+      const centerY = (1 - point.y) * height / 2;
+      // 总纲与其他节点共用文字避让位置，保留优先级，不再固定挂一张居中的大标签。
+      const candidates = this.mode === 'layers'
+        ? [{ x: centerX - labelWidth / 2, y: centerY + 9 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 10 }]
+        : [{ x: centerX + 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth - 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth / 2, y: centerY + 12 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 12 }];
+      const choice = candidates.find(candidate => candidate.x >= 8 && candidate.y >= 8 && candidate.x + labelWidth < width - 8 && candidate.y + labelHeight < height - 8 && !bounds.some(bound => candidate.x < bound.x + bound.width + 5 && candidate.x + labelWidth + 5 > bound.x && candidate.y < bound.y + bound.height + 4 && candidate.y + labelHeight + 4 > bound.y));
+      if (!choice) { star.label.hidden = true; return; }
+      star.label.style.transform = `translate(${choice.x}px, ${choice.y}px)`;
+      bounds.push({ ...choice, width: labelWidth, height: labelHeight });
+    });
+    this.labelsDirty = false;
+  }
+
+  /** 卡片位置与场景节点投影一致，连线截在卡片边缘，点击线或文字均可读完整依据。 */
+  private updateAnalysisLabels(width: number, height: number, outgoingOnly = false) {
+    const projected = new Map<string, { x: number; y: number; width: number; height: number }>();
+    this.stars.forEach(star => {
+      const open = this.cardAppearance.get(star.data.id)?.open ?? 0;
+      if (!star.label.classList.contains('analysis-card')) {
+        if (outgoingOnly) {
+          const point = star.point.position.clone().project(this.camera);
+          projected.set(star.data.id, { x: (point.x + 1) * width / 2, y: (1 - point.y) * height / 2, width: 0, height: 0 });
+        }
+        return;
+      }
+      if (open < .001) { star.label.hidden = true; return; }
+      const point = star.point.position.clone().project(this.camera);
+      const size = this.labelSizes.get(star.data.id)!;
+      const x = (point.x + 1) * width / 2, y = (1 - point.y) * height / 2;
+      star.label.hidden = point.z > 1 || point.z < -1;
+      star.label.style.transform = `translate(${x - size.width / 2}px, ${y - size.height / 2}px)`;
+      // 线的端点追随正在展开的四角边界，不悬在尚未长成的完整卡片边缘。
+      projected.set(star.data.id, { x, y, width: size.width * open, height: size.height * open });
+    });
+    this.laneHeadings.forEach((heading, lane) => {
+      const anchor = this.lanePositions.get(lane);
+      if (outgoingOnly || !anchor || !this.analysis) { heading.hidden = true; return; }
+      const point = anchor.clone().project(this.camera);
+      heading.hidden = false;
+      heading.style.left = `${(point.x + 1) * width / 2}px`;
+      heading.style.top = `${(1 - point.y) * height / 2}px`;
+    });
+    this.edgeLayer.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    this.connections.forEach((connection, index) => {
+      if ((this.cardEdgeOpacity[index] ?? 0) < .001) return;
+      const from = projected.get(connection.data.source), to = projected.get(connection.data.target);
+      if (!from || !to) { connection.label.hidden = true; return; }
+      let sx: number, sy: number, tx: number, ty: number, c1x: number, c1y: number, c2x: number, c2y: number;
+      if (width < 560) {
+        // 窄屏把路径绕到卡片左侧，不让长连接穿过中间的正文。
+        sx = from.x - from.width / 2 - 3; sy = from.y;
+        tx = to.x - to.width / 2 - 3; ty = to.y;
+        c1x = c2x = 15 + index % 3 * 6; c1y = sy; c2y = ty;
+      } else {
+        const dx = to.x - from.x, dy = to.y - from.y;
+        const neighborId = connection.data.source === this.selected ? connection.data.target : connection.data.source;
+        const neighborLane = this.analysis?.entries.find(entry => entry.node.id === neighborId)?.lane;
+        const sideLane = neighborLane === 'upstream' || neighborLane === 'downstream';
+        const sourceRatio = Math.min((from.width / 2 + 5) / Math.max(Math.abs(dx), .01), (from.height / 2 + 5) / Math.max(Math.abs(dy), .01), .45);
+        const targetRatio = Math.min((to.width / 2 + 5) / Math.max(Math.abs(dx), .01), (to.height / 2 + 5) / Math.max(Math.abs(dy), .01), .45);
+        sx = from.x + dx * sourceRatio; sy = from.y + dy * sourceRatio;
+        tx = to.x - dx * targetRatio; ty = to.y - dy * targetRatio;
+        // 左右分区始终从卡片侧面进出，使长关系沿列间留白走线，不穿过上方卡片。
+        if (sideLane) {
+          const direction = dx >= 0 ? 1 : -1;
+          sx = from.x + direction * (from.width / 2 + 5); sy = from.y;
+          tx = to.x - direction * (to.width / 2 + 5); ty = to.y;
+        }
+        const horizontal = sideLane || Math.abs(dx) > Math.abs(dy) * .6;
+        c1x = horizontal ? (sx + tx) / 2 : sx; c2x = horizontal ? (sx + tx) / 2 : tx;
+        c1y = horizontal ? sy : (sy + ty) / 2; c2y = horizontal ? ty : (sy + ty) / 2;
+      }
+      const d = `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${tx} ${ty}`;
+      connection.path.setAttribute('d', d); connection.hit.setAttribute('d', d);
+      connection.path.setAttribute('marker-end', connection.data.type === 'relates' ? '' : 'url(#analysis-arrow)');
+      // 关系标签靠近相邻卡片，减少多个关系在焦点附近重叠。
+      const t = connection.data.source === this.selected ? .87 : .13;
+      const u = 1 - t;
+      const x = u ** 3 * sx + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t ** 3 * tx;
+      const y = u ** 3 * sy + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t ** 3 * ty;
+      connection.label.hidden = false;
+      connection.label.style.left = `${x}px`;
+      connection.label.style.top = `${y}px`;
+    });
+  }
+
+  /** 只在尺寸或字体改变时批量测量标签，避免动画每一帧触发同步页面排版。 */
+  private measureLabels() {
+    this.stars.forEach(star => { star.label.hidden = false; });
+    this.stars.forEach(star => { this.labelSizes.set(star.data.id, { width: star.label.offsetWidth, height: star.label.offsetHeight }); });
+    this.labelsDirty = true;
+  }
+
+  /** 页面隐藏或切到文档时停止渲染；回到图谱后恢复，避免后台占用显卡。 */
+  private animate = () => {
+    if (this.disposed) return;
+    this.frame = requestAnimationFrame(this.animate);
+    if (!this.active || document.hidden) return;
+    const now = performance.now();
+    this.advanceTransition(now);
+    this.controls.update();
+    this.backgrounds.forEach((field, index) => {
+      (field.material as THREE.PointsMaterial).opacity = this.ambient * (this.light ? index ? .25 : .13 : index ? .85 : .6);
+    });
+    this.clouds.forEach(cloud => { cloud.material.opacity = this.ambient * (this.light ? .025 : .055); });
+    const galaxyOpacity = Math.max(0, (this.ambient - .24) / .76) * Number(Boolean(this.coreId()));
+    if (this.galaxyDust) { const material = this.galaxyDust.material as THREE.PointsMaterial; material.opacity = galaxyOpacity * (this.light ? .21 : .4); material.color.set(this.light ? '#61768d' : '#a4b3d5'); material.blending = this.light ? THREE.NormalBlending : THREE.AdditiveBlending; }
+    if (this.galaxyCore) this.galaxyCore.material.opacity = galaxyOpacity * (this.light ? .035 : .14);
+    this.connections.forEach((connection, index) => {
+      if (connection.particle.visible) connection.particle.position.copy(connection.curve.getPoint(this.motionPaused || this.reduceMotion.matches ? .52 : (now * .00012 + index * .2) % 1));
+    });
+    if (this.labelsDirty) { this.updateLabels(); this.captureFrame(); }
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  private pointerDown = (event: PointerEvent) => {
+    if (!event.isPrimary || event.button !== 0) { if (this.pointerStart) this.pointerStart.moved = true; return; }
+    this.pointerStart = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
+  };
+  private pointerMove = (event: PointerEvent) => { if (this.pointerStart && Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 5) this.pointerStart.moved = true; };
+  private pointerCancel = () => { this.pointerStart = null; };
+  private pointerUp = (event: PointerEvent) => {
+    const start = this.pointerStart; this.pointerStart = null;
+    if (!start || start.id !== event.pointerId || start.moved || event.button !== 0 || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) return;
+    const box = this.container.getBoundingClientRect();
+    if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) return;
+    this.raycaster.setFromCamera(new THREE.Vector2((event.clientX - box.left) / box.width * 2 - 1, -(event.clientY - box.top) / box.height * 2 + 1), this.camera);
+    const targets = [...this.stars.values()].filter(star => star.point.visible && this.desiredAppearance.get(star.data.id)?.point);
+    const hit = this.raycaster.intersectObjects(targets.map(star => star.point))[0];
+    if (hit) this.select(targets.find(star => star.point === hit.object)!.data.id);
+    else if (this.mode !== 'network') this.clearSelection();
+  };
+  private visibilityChanged = () => { if (!document.hidden) this.controls.update(); };
+
+  private resize() {
+    if (this.disposed) return;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    if (!this.active || !width || !height) return;
+    if (this.layoutDeferred || (this.mode === 'network' && width !== this.previousSize.width)) {
+      // 响应式分区变化后仍从当前坐标移动，避免卡片瞬间改列。
+      this.setMode(this.mode, this.deferredModeOptions);
+      return;
+    }
+    this.camera.aspect = width / this.container.clientHeight;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, this.container.clientHeight);
+    this.measureLabels();
+    // 宽高变化后更新总览距离；动画途中沿用当前目标，避免镜头裁掉两侧系统。
+    if (this.transition && !this.transition.restoreOverview) {
+      const framing = this.framing(this.transition.to);
+      this.transition.cameraTo.copy(framing.position);
+      this.transition.targetTo.copy(framing.target);
+    }
+    else if (!this.transition && (width !== this.previousSize.width || height !== this.previousSize.height)) {
+      const framing = this.framing(this.layout(this.mode));
+      this.camera.position.copy(framing.position);
+      this.controls.target.copy(framing.target);
+      this.controls.update();
+    }
+    this.previousSize = { width, height: this.container.clientHeight };
+  }
+
+  /** 总览与缩放不改变任何设计数据；返回总览会平滑恢复当前布局。 */
+  reset() { this.setMode(this.mode); }
+
+  /** 仅正文、标题或依据变化时原位更新；节点增删由调用方安排结构更新。 */
+  updateText(data: KnowledgeData): boolean {
+    if (data.nodes.length !== this.data.nodes.length || data.edges.length !== this.data.edges.length || data.groups.length !== this.data.groups.length) return false;
+    if (data.nodes.some((node, index) => node.id !== this.data.nodes[index]?.id || node.group !== this.data.nodes[index]?.group || node.kind !== this.data.nodes[index]?.kind || node.documentType !== this.data.nodes[index]?.documentType || node.status !== this.data.nodes[index]?.status)) return false;
+    if (data.edges.some((edge, index) => edge.id !== this.data.edges[index]?.id || edge.source !== this.data.edges[index]?.source || edge.target !== this.data.edges[index]?.target || edge.type !== this.data.edges[index]?.type)) return false;
+    if (data.groups.some((group, index) => group.id !== this.data.groups[index]?.id || group.color !== this.data.groups[index]?.color)) return false;
+    this.data = data;
+    data.nodes.forEach(node => {
+      const star = this.stars.get(node.id)!; star.data = node;
+      star.label.setAttribute('aria-label', `查看${node.title}`);
+      if (star.label.classList.contains('analysis-card')) {
+        star.label.querySelector('strong')!.textContent = node.title;
+        star.label.querySelector('.analysis-card-summary')!.textContent = node.summary;
+        star.label.querySelector('.analysis-card-meta')!.textContent = `${data.groups.find(group => group.id === node.group)!.label} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[node.status]}`;
+      } else star.label.textContent = node.title;
+    });
+    data.edges.forEach((edge, index) => { this.connections[index].data = edge; this.connections[index].label.setAttribute('aria-label', `查看关系依据：${edgeSentence(edge, data.nodes, data.edges)}`); });
+    this.analysis = this.selected ? buildAnalysis(this.selected, data.nodes, data.edges) : undefined;
+    this.measureLabels(); this.refreshVisibility();
+    return true;
+  }
+  zoom(factor: number) {
+    // 分析卡片保持固定字号，采用滚动阅读；只缩小节点间距会使卡片互相遮挡。
+    if (this.mode === 'network') return;
+    if (this.transition) this.transition.cameraInterrupted = true;
+    this.camera.position.sub(this.controls.target).multiplyScalar(factor).add(this.controls.target);
+    this.controls.update();
+  }
+  /** 导航可先恢复显示，再由紧接着的 setMode 统一处理最终尺寸，避免多算一轮旧布局。 */
+  setActive(active: boolean, options: { deferLayout?: boolean } = {}) { this.active = active; if (active && !options.deferLayout) this.resize(); }
+
+  /** 在热更新或宿主卸载时释放纹理、几何、监听和动画帧，防止重复场景泄漏。 */
+  dispose() {
+    this.disposed = true;
+    cancelAnimationFrame(this.frame);
+    this.observer.disconnect();
+    this.transition = null;
+    this.navigationFrame = this.lastValidFrame = undefined;
+    this.overview = undefined;
+    this.setContentOpacity(1);
+    this.container.classList.remove('graph-transitioning');
+    delete this.container.dataset.transition;
+    this.container.style.removeProperty('--graph-content-opacity');
+    this.container.style.removeProperty('--analysis-card-width');
+    this.container.style.height = '';
+    this.container.parentElement?.classList.remove('analysis-mode');
+    delete this.container.dataset.mode;
+    this.controls.dispose();
+    document.removeEventListener('visibilitychange', this.visibilityChanged);
+    window.removeEventListener('cewen-theme-change', this.themeChanged);
+    this.renderer.domElement.removeEventListener('pointerdown', this.pointerDown);
+    this.renderer.domElement.removeEventListener('pointerup', this.pointerUp);
+    this.renderer.domElement.removeEventListener('pointermove', this.pointerMove);
+    this.renderer.domElement.removeEventListener('pointercancel', this.pointerCancel);
+    this.scene.traverse(object => {
+      const renderable = object as THREE.Mesh;
+      renderable.geometry?.dispose();
+      if (Array.isArray(renderable.material)) renderable.material.forEach(material => material.dispose());
+      else renderable.material?.dispose();
+    });
+    this.texture.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+    this.labelLayer.remove();
+    this.edgeLayer.remove();
+  }
+}

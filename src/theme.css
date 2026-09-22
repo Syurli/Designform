@@ -1,0 +1,58 @@
+/* 两种主题共用组件和布局；深色沿用各组件原值，浅色用同一组语义颜色覆盖。 */
+:root{--chrome-bg:#0b101d;--chrome-ink:#bdcde7;--chrome-menu:#142039;--chrome-line:#788fa52b;--page-height:100dvh}
+:root[data-theme=light]{
+  color-scheme:light;--chrome-bg:#cdd4d9;--chrome-ink:#2d414e;--chrome-menu:#d9dedf;--chrome-line:#72848b55;
+  --text-strong:#243a56;--text-body:#425c78;--text-muted:#61758d;
+  --text-good:#25705a;--text-danger:#a13d50;--text-warning:#88611e;
+  --surface-page:#c7cfd5;--surface-panel:#d0d6da;--surface-raised:#d9dedf;
+  --surface-card:#dde1e1;--surface-input:#e1e4e2;--surface-label:#d9dfe2ed;--surface-tint:#aabdc44a;
+  --surface-good:#c5dace;--surface-danger:#e5ccce;--surface-warning:#e4d9bd;
+  --line-soft:#819ab338;--line-active:#6488b880;--accent-strong:#486da6;
+  --theme-shadow:#233b5d12;--graph-edge:#6885a7;--graph-selected:#2d629b;--graph-purple:#78619a;
+}
+html,body{background:var(--surface-page,#080c18)}
+/* 浏览器的原生下拉框、日期及滚动条与表单遵循同一色彩方案。 */
+select,option,optgroup,input,textarea{color-scheme:inherit}
+select option,select optgroup{background:var(--surface-input,#142038);color:var(--text-strong,#dce6f7)}
+textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent-strong,#9baeff);outline-offset:2px}
+:root[data-theme=light] .star-label{text-shadow:none}
+:root[data-theme=light] .star-label:hover,:root[data-theme=light] .star-label.selected{background:#b9cbd7}
+:root[data-theme=light] .star-label.system{color:#2e4564}
+:root[data-theme=light] .star-label.analysis-card.selected{background:linear-gradient(140deg,#c0d0da,#d5dee1)}
+:root[data-theme=light] .star-label.analysis-card:hover{background:#cdd9df}
+:root[data-theme=light] .project-dialog::backdrop{background:#273c5c35}
+:root[data-theme=light] .mode-switch button.active,:root[data-theme=light] .main-nav button.active{background:#bdcdd8;color:#24456f}
+:root[data-theme=light] .primary-button{background:#446b9f;border-color:#446b9f;color:#fff}
+:root[data-theme=light] .primary-button:hover{background:#365c8d;color:#fff}
+:root[data-theme=light] .group-dot,:root[data-theme=light] .detail-group i{background:color-mix(in srgb,var(--group-color),#1e3551 35%)}
+:root[data-theme=light] .analysis-card{border-top-color:color-mix(in srgb,var(--node-color),#24456b 30%)}
+/* 图标使用独立 SVG；页面、浏览器标签和外框切换时使用相同品牌形状。 */
+.brand-mark{background:none;border:0;box-shadow:none;border-radius:11px;overflow:hidden}
+.brand-mark img{width:39px;height:39px;display:block}
+.project-art{height:36px;flex-shrink:0}.project-art svg{width:19px;height:19px}
+.theme-toggle{width:32px;height:32px;flex-shrink:0;border:1px solid var(--chrome-line)}
+[data-theme-toggle] svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+/* 原生系统按钮保留；其左侧是可拖拽、颜色统一的页面标题栏。 */
+.desktop-titlebar{height:36px;position:fixed;inset:0 0 auto;z-index:40;background:var(--chrome-bg);color:var(--chrome-ink);border-bottom:1px solid var(--chrome-line);app-region:drag;user-select:none}
+.desktop-titlebar-content{height:36px;display:flex;align-items:center;gap:13px;padding:0 12px;margin-left:env(titlebar-area-x,0px);width:env(titlebar-area-width,calc(100% - 140px))}
+.desktop-titlebar img{width:22px;height:22px}.desktop-titlebar strong{font-size:12px;font-weight:500;margin-right:12px;white-space:nowrap}.desktop-titlebar strong span{font-size:10px;opacity:.7;margin-left:5px}
+.desktop-menu{position:relative;app-region:no-drag;font-size:12px}.desktop-menu summary{list-style:none;cursor:pointer;padding:6px 10px;border-radius:5px}.desktop-menu summary::-webkit-details-marker{display:none}.desktop-menu[open] summary,.desktop-menu summary:hover{background:var(--surface-tint,#31476a55)}
+.desktop-menu>div{position:absolute;top:30px;left:0;min-width:185px;padding:6px;background:var(--chrome-menu);border:1px solid var(--chrome-line);border-radius:9px;box-shadow:0 15px 35px var(--theme-shadow,#0005)}
+.desktop-menu button{display:flex;width:100%;gap:10px;text-align:left;padding:9px 12px;border-radius:5px;align-items:center;color:var(--chrome-ink);font-size:12px}.desktop-menu button:hover{background:var(--surface-tint,#435c8455)}.desktop-menu hr{border:0;border-top:1px solid var(--chrome-line);margin:5px}
+.desktop-menu [data-theme-toggle]::after{content:'切换浅色主题'}:root[data-theme=light] .desktop-menu [data-theme-toggle]::after{content:'切换深色主题'}
+.desktop-host{--page-height:calc(100dvh - 36px)}.desktop-host body{padding-top:36px}.desktop-host #app{min-height:var(--page-height)}.desktop-host .sidebar{height:var(--page-height);top:36px}.desktop-host .workspace{height:var(--page-height)}
+@media(max-width:700px){.desktop-host .workspace{height:auto;min-height:var(--page-height)}.desktop-host .sidebar{top:36px}.topbar{gap:12px}.search-box{min-width:90px}.desktop-titlebar strong span{display:none}.desktop-titlebar-content{gap:4px}.theme-toggle{padding:5px}}
+@media(prefers-reduced-motion:no-preference){body,.sidebar,.topbar,.inspector,.project-dialog,.desktop-titlebar{transition:background-color .18s,color .18s,border-color .18s}}
+
+/* 总纲只以金色文字区分，字号、底色、边框和选中反馈沿用普通节点，避免中心出现大卡片。 */
+.star-label.galaxy-core:not(.analysis-card){color:var(--graph-core-text,#ddbf7e)}
+:root[data-theme=light]{--graph-core-text:#79551d}
+/* 阅读链接保持克制，正文仍是视觉主体。 */
+.markdown-preview a[href^="#cewen-doc="]{color:var(--accent-strong,#a8bfe2);text-decoration:underline;text-decoration-color:color-mix(in srgb,currentColor,transparent 48%);text-underline-offset:4px;text-decoration-thickness:1px;border-radius:2px;cursor:pointer}
+.markdown-preview a[href^="#cewen-doc="]:hover,.markdown-preview a[href^="#cewen-doc="]:focus-visible{color:var(--text-strong,#d6e4fb);background:var(--surface-tint,#90b3e51c);text-decoration-color:currentColor;outline-offset:4px}
+.markdown-preview [id]{scroll-margin-top:24px}
+.document-technical{margin-top:40px;border-top:1px solid var(--line-soft,#8096c02a);padding:18px 0;color:var(--text-muted,#8293ae);font-size:12px}
+.document-technical summary{cursor:pointer;font-size:12px;user-select:none}.document-technical h4{font-size:12px;font-weight:500}.document-technical[open] summary{margin-bottom:16px}.document-technical table{font-size:12px}
+.reading-navigation{display:flex;gap:24px;flex-wrap:wrap}.document-reading-footer{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}.document-reading-footer .document-source{margin-top:10px}
+.document-link-preview{position:fixed;z-index:90;width:305px;max-width:calc(100vw - 24px);padding:18px 20px;border:1px solid var(--line-active,#7894b55c);border-radius:11px;background:var(--surface-raised,#182339);color:var(--text-strong,#d7e1f2);box-shadow:0 12px 36px var(--theme-shadow,#0005);pointer-events:auto;line-height:1.7}
+.document-link-preview[hidden]{display:none}.document-link-preview small{display:block;font-size:10px;color:var(--text-muted,#93a3bb);margin-bottom:7px}.document-link-preview strong{display:block;font-size:15px;font-weight:550}.document-link-preview p{font-size:12px;line-height:1.85;margin:10px 0;color:var(--text-body,#a7b8d0);overflow-wrap:anywhere}.document-link-preview>span{font-size:10px;color:var(--text-muted,#7f93b0)}

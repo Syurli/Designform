@@ -1,0 +1,19 @@
+{
+  "requestId": "example-round-request",
+  "round": "ROUND-001",
+  "questions": [
+    {
+      "id": "question-route-rest",
+      "title": "长路线中怎样安排休息？",
+      "background": "本例仅用于虚构纸上远行项目，请先核对条目身份。",
+      "mode": "single",
+      "targets": [
+        "dd-resources/rest-cost"
+      ],
+      "options": [
+        "推荐：少量消耗补给；取舍清晰，但需要控制管理负担。",
+        "只消耗时间；更易理解，但时间压力需要另行设计。"
+      ]
+    }
+  ]
+}
