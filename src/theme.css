@@ -34,14 +34,13 @@ textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent-stron
 [data-theme-toggle] svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 /* 原生系统按钮保留；其左侧是可拖拽、颜色统一的页面标题栏。 */
 .desktop-titlebar{height:36px;position:fixed;inset:0 0 auto;z-index:40;background:var(--chrome-bg);color:var(--chrome-ink);border-bottom:1px solid var(--chrome-line);app-region:drag;user-select:none}
-.desktop-titlebar-content{height:36px;display:flex;align-items:center;gap:13px;padding:0 12px;margin-left:env(titlebar-area-x,0px);width:env(titlebar-area-width,calc(100% - 140px))}
-.desktop-titlebar img{width:22px;height:22px}.desktop-titlebar strong{font-size:12px;font-weight:500;margin-right:12px;white-space:nowrap}.desktop-titlebar strong span{font-size:10px;opacity:.7;margin-left:5px}
+.desktop-titlebar-content{height:36px;display:flex;align-items:center;gap:4px;padding:0 12px;margin-left:env(titlebar-area-x,0px);width:env(titlebar-area-width,calc(100% - 140px))}
 .desktop-menu{position:relative;app-region:no-drag;font-size:12px}.desktop-menu summary{list-style:none;cursor:pointer;padding:6px 10px;border-radius:5px}.desktop-menu summary::-webkit-details-marker{display:none}.desktop-menu[open] summary,.desktop-menu summary:hover{background:var(--surface-tint,#31476a55)}
 .desktop-menu>div{position:absolute;top:30px;left:0;min-width:185px;padding:6px;background:var(--chrome-menu);border:1px solid var(--chrome-line);border-radius:9px;box-shadow:0 15px 35px var(--theme-shadow,#0005)}
 .desktop-menu button{display:flex;width:100%;gap:10px;text-align:left;padding:9px 12px;border-radius:5px;align-items:center;color:var(--chrome-ink);font-size:12px}.desktop-menu button:hover{background:var(--surface-tint,#435c8455)}.desktop-menu hr{border:0;border-top:1px solid var(--chrome-line);margin:5px}
 .desktop-menu [data-theme-toggle]::after{content:'切换浅色主题'}:root[data-theme=light] .desktop-menu [data-theme-toggle]::after{content:'切换深色主题'}
 .desktop-host{--page-height:calc(100dvh - 36px)}.desktop-host body{padding-top:36px}.desktop-host #app{min-height:var(--page-height)}.desktop-host .sidebar{height:var(--page-height);top:36px}.desktop-host .workspace{height:var(--page-height)}
-@media(max-width:700px){.desktop-host .workspace{height:auto;min-height:var(--page-height)}.desktop-host .sidebar{top:36px}.topbar{gap:12px}.search-box{min-width:90px}.desktop-titlebar strong span{display:none}.desktop-titlebar-content{gap:4px}.theme-toggle{padding:5px}}
+@media(max-width:700px){.desktop-host .workspace{height:auto;min-height:var(--page-height)}.desktop-host .sidebar{top:36px}.topbar{gap:12px}.search-box{min-width:90px}.theme-toggle{padding:5px}}
 @media(prefers-reduced-motion:no-preference){body,.sidebar,.topbar,.inspector,.project-dialog,.desktop-titlebar{transition:background-color .18s,color .18s,border-color .18s}}
 
 /* 总纲只以金色文字区分，字号、底色、边框和选中反馈沿用普通节点，避免中心出现大卡片。 */

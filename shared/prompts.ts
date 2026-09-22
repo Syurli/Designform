@@ -20,8 +20,14 @@ export function ideaBrief(idea: GameIdea) {
   return [idea.idea.trim() ? `我的设想：${idea.idea.trim()}` : '游戏方向尚未明确。', `想尝试的类型：${genres.join('、') || '待讨论'}。`, `本轮目标：${idea.scope || '待讨论'}。`, `想尝试的玩法：${play.join('、') || '待讨论'}。`, `目标平台：${idea.platform || '待讨论'}；开发资源：${idea.team || '待讨论'}；单次体验时长：${idea.session || '待讨论'}。`, idea.constraints.trim() ? `补充条件（保留已定与待定的区别）：\n${idea.constraints.trim()}` : '具体预算、内容规模与制作周期尚未确定。'].join('\n\n');
 }
 export interface IntegrationInfo { mode: 'local' | 'web'; root?: string; launcher?: string; runtime?: string; skill?: string; guide?: string; url?: string }
+/** 连接入口只处理工具接入，不把游戏构思或文档修改混入这次任务。 */
+export function composeConnectionPrompt(snapshot?: ProjectSnapshot, integration?: IntegrationInfo) {
+  if(integration?.mode !== 'local')return ['我正在使用策问网页版，希望与你通过文件协作。',snapshot?`当前项目：${snapshot.project.name}，查看版本：${snapshot.revisionLabel??'未记录'}。`:'目前尚未选择项目。','网页版没有直接提供 MCP 服务。请先告诉我本轮需要提供哪些公开 Markdown 或上下文包；我提供后再读取，不假定能访问我的本机文件。现在先确认协作方式，具体策划任务由我下一步提出。'].join('\n\n');
+  return ['请帮我接入本机正在运行的策问 MCP，本轮只完成连接检查。',`服务地址：${integration.url}\n${integration.launcher?`MCP 启动入口：${integration.launcher}`:`MCP 运行文件：${integration.runtime}（使用本机 Node.js）`}\n接入说明：${integration.guide}\n协作 Skill：${integration.skill}`,snapshot?`连接后请核对项目“${snapshot.project.name}”（${snapshot.project.id}）。\n项目目录：${snapshot.project.path}\n我当前查看：${snapshot.revisionLabel??'未记录'}${snapshot.historical?'（历史只读）':''}。`:'目前尚未选择项目，连接成功后等我指定。','先检查是否已有策问工具。未接入时读取上面的接入说明，按当前客户端支持的方式配置；需要我在客户端确认或重启时，告诉我具体操作，不要求我自行猜填配置 JSON。','通过 cewen_projects 核对工具连通和项目身份。明确知道实际模型名称时调用 cewen_identify，不确定时报告未知。最后简短告诉我连接结果、实际模型名称和项目是否匹配。','如果无法访问本机或注册 MCP，请直接说明原因，不把读取文件当成 MCP 已连接。本轮不修改策划、发布问询或创建版本；后续策划任务由我另行提出。'].join('\n\n');
+}
 /** 软件只提供已知真实入口，不凭网页地址或复制动作宣称 MCP 在线。 */
 export function composePrompt(input: { scene: PromptScene; idea?: GameIdea; snapshot?: ProjectSnapshot; documentIds?: string[]; integration?: IntegrationInfo; extra?: string }) {
+  if(input.scene==='connect')return composeConnectionPrompt(input.snapshot,input.integration)+(input.extra?.trim()?`\n\n补充要求：${input.extra.trim()}`:'');
   const scene = promptScenes.find(scene => scene[0] === input.scene) ?? promptScenes[0], snapshot = input.snapshot;
   const documents = input.documentIds?.length ? snapshot?.documents.filter(doc => input.documentIds!.includes(doc.id)) : [];
   const context = snapshot ? `继续策问中的项目“${snapshot.project.name}”（身份 ${snapshot.project.id}）。当前查看修订：${snapshot.revisionLabel ?? '尚无版本'} / ${snapshot.revision ?? '无'}${snapshot.historical ? '，此为只读历史，请先确认当前工作稿，不能回写历史。' : '。'}\n${input.integration?.mode === 'local' ? `项目文件夹：${snapshot.project.path}\n` : '请读取我另行提供的项目文件或上下文包；不要假定能访问我的电脑。\n'}${documents?.length ? `本轮聚焦：\n${documents.map(doc => `- ${doc.title}（${doc.id}，${doc.path}）`).join('\n')}\n需要更多背景时，再读取关联文档。` : '先读取 PROJECT.md、公开文档目录及总纲；没有总纲时先确认设想，不虚构文档。'}` : '目前尚未创建项目，请先讨论；等方向明确后再整理项目，不擅自创建本地文件夹。';
