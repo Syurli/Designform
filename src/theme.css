@@ -24,8 +24,8 @@ textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent-stron
 :root[data-theme=light] .mode-switch button.active,:root[data-theme=light] .main-nav button.active{background:#bdcdd8;color:#24456f}
 :root[data-theme=light] .primary-button{background:#446b9f;border-color:#446b9f;color:#fff}
 :root[data-theme=light] .primary-button:hover{background:#365c8d;color:#fff}
-:root[data-theme=light] .group-dot,:root[data-theme=light] .detail-group i{background:color-mix(in srgb,var(--group-color),#1e3551 35%)}
-:root[data-theme=light] .analysis-card{border-top-color:color-mix(in srgb,var(--node-color),#24456b 30%)}
+:root[data-theme=light] .group-dot,:root[data-theme=light] .detail-group i{background:var(--group-color);box-shadow:0 0 0 1px #24374633}
+:root[data-theme=light] .analysis-card{border-top-color:var(--node-color)}
 /* 图标使用独立 SVG；页面、浏览器标签和外框切换时使用相同品牌形状。 */
 .brand-mark{background:none;border:0;box-shadow:none;border-radius:11px;overflow:hidden}
 .brand-mark img{width:39px;height:39px;display:block}

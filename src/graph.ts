@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { types, type KnowledgeData, type KnowledgeNode, type KnowledgeEdge } from './data';
 import { buildAnalysis, edgeSentence, laneLabels, type AnalysisResult, type AnalysisLane } from './analysis';
 import { currentTheme } from './theme';
+import { categoryColor } from './category-color';
 
 /** 三种空间模式共享同一场景；切换时只改变目标坐标，不重新创建节点。 */
 export type GraphMode = 'galaxy' | 'network' | 'layers';
@@ -96,6 +97,12 @@ export class KnowledgeGraph {
   private galaxyDust?: THREE.Points;
   private galaxyCore?: THREE.Sprite;
   private primaryGdd?: string;
+  /** 星尘按文档身份保存过渡权重；暂停使用累计时间，恢复时不跳相位。 */
+  private dustWeights = new Map<string, number>();
+  private dustOwners: string[] = [];
+  private motionTime = 0;
+  private lastMotionFrame = 0;
+  private contextStart?: { x: number; y: number; moved: boolean };
 
   private findCore() {
     return this.data.nodes.filter(node => node.kind === 'document' && node.documentType === 'gdd' && node.status !== 'archived')
@@ -103,7 +110,7 @@ export class KnowledgeGraph {
   }
   private coreId() { return this.primaryGdd; }
   private starSize(node: KnowledgeNode, halo = false) {
-    return node.id === this.coreId() ? halo ? 205 : 46 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
+    return node.id === this.coreId() ? halo ? 68 : 23 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
   }
 
   constructor(private container: HTMLElement, private select: (id: string) => void, private onCount: (count: number) => void, private selectRelation: (index: number) => void, private data: KnowledgeData, private clearSelection: () => void) {
@@ -151,7 +158,7 @@ export class KnowledgeGraph {
       label.className = `star-label ${node.kind}`;
       label.type = 'button';
       label.textContent = node.title;
-      label.style.setProperty('--node-color', color);
+      label.style.setProperty('--node-color', categoryColor(color));label.dataset.graphNode=node.id;
       label.setAttribute('aria-label', `查看${node.title}`);
       label.addEventListener('click', () => this.select(node.id));
       this.labelLayer.append(label);
@@ -193,6 +200,9 @@ export class KnowledgeGraph {
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
     this.renderer.domElement.addEventListener('pointermove', this.pointerMove);
     this.renderer.domElement.addEventListener('pointercancel', this.pointerCancel);
+    this.container.addEventListener('contextmenu',this.contextMenu);
+    this.container.addEventListener('pointerdown',this.contextDown);
+    this.container.addEventListener('pointermove',this.contextMove);
     document.addEventListener('visibilitychange', this.visibilityChanged);
     window.addEventListener('cewen-theme-change', this.themeChanged);
     this.resize();
@@ -228,9 +238,10 @@ export class KnowledgeGraph {
   }
 
   /** 浅色用有色实体点与普通混合，避免发光叠加在白底上消失；不改布局与镜头。 */
-  private graphColor(color: string) { return new THREE.Color(color).multiplyScalar(this.light ? .3 : 1); }
+  private graphColor(color: string) { return new THREE.Color(categoryColor(color,this.light)); }
   private themeChanged = () => {
     this.light = currentTheme() === 'light';
+    this.stars.forEach(star=>star.label.style.setProperty('--node-color',categoryColor(star.point.userData.baseColor,this.light)));
     this.scene.traverse(object => {
       if (object instanceof THREE.Sprite) {
         object.material.color.copy(this.graphColor(object.userData.baseColor ?? '#b8e5ff'));
@@ -271,17 +282,30 @@ export class KnowledgeGraph {
       this.clouds.push(cloud);
     });
     // 四条渐疏旋臂围绕原点，倾斜薄盘保留三维纵深；粒子不参与点击与计数。
-    const dust = new Float32Array(4200 * 3);
-    for (let index = 0; index < 4200; index++) {
-      const radius = 45 + Math.pow(random(), .7) * 650;
-      const angle = index % 4 * Math.PI / 2 + radius * .0048 + (random() - .5) * .3;
-      dust[index * 3] = Math.cos(angle) * radius;
-      dust[index * 3 + 1] = Math.sin(angle) * radius * .66;
-      dust[index * 3 + 2] = Math.sin(angle) * radius * .23 + (random() - .5) * 36 - 50;
-    }
-    this.galaxyDust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(dust, 3)), new THREE.PointsMaterial({ color: '#b0bcdf', size: 2.4, sizeAttenuation: false, transparent: true, opacity: .3, map: this.texture, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.galaxyDust = new THREE.Points(new THREE.BufferGeometry(), new THREE.ShaderMaterial({
+      uniforms:{tone:{value:new THREE.Color('#a4b3d5')},ambient:{value:0},phase:{value:0},pixelRatio:{value:this.renderer.getPixelRatio()}},
+      vertexShader:'attribute float weight; uniform float phase; uniform float pixelRatio; varying float fade; void main(){ vec3 p=position; p.x+=sin(phase*.11+position.y*.008)*2.0; p.y+=cos(phase*.09+position.x*.009)*1.5; fade=weight*(.91+.09*sin(phase*.25+position.x)); gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.); gl_PointSize=2.4*pixelRatio; }',
+      fragmentShader:'uniform vec3 tone; uniform float ambient; varying float fade; void main(){ float radius=length(gl_PointCoord-.5)*2.; float alpha=(1.-smoothstep(.1,1.,radius))*fade*ambient; gl_FragColor=vec4(tone,alpha); }',
+      transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+    }));
     this.scene.add(this.galaxyDust);
-    this.galaxyCore = this.sprite('#e6cda4', 390, .13); this.galaxyCore.position.set(0, 0, -45); this.galaxyCore.scale.y = 245;
+    this.rebuildDust();
+    this.galaxyCore = this.sprite('#e6cda4', 165, .07); this.galaxyCore.position.set(0, 0, -45); this.galaxyCore.scale.y = 105;
+  }
+
+  /** 增长递减且封顶；同一文档的种子不受排序和筛选影响。 */
+  private rebuildDust() {
+    if(!this.galaxyDust)return;
+    const ids=this.data.nodes.filter(node=>node.kind==='document'&&node.documentType==='dd'&&node.status!=='archived').map(node=>node.id);
+    const live=new Set(ids),retired=[...this.dustWeights].filter(([id,weight])=>!live.has(id)&&weight>.005).map(([id])=>id);
+    const owners=[...ids,...retired],perDocument=owners.length?Math.max(1,Math.min(104,Math.floor(9000/owners.length))):0;
+    const positions:number[]=[],weights:number[]=[];this.dustOwners=[];
+    for(const id of owners){let seed=17;for(const char of id)seed=(seed*31+char.charCodeAt(0))%2147483647;const random=randomGenerator(seed||1),arm=Math.floor(random()*4),center=90+random()*550;
+      if(!this.dustWeights.has(id))this.dustWeights.set(id,0);
+      for(let i=0;i<perDocument&&weights.length<9000;i++){const radius=Math.max(45,Math.min(720,center+(random()-.5)*240)),angle=arm*Math.PI/2+radius*.0048+(random()-.5)*.35;positions.push(Math.cos(angle)*radius,Math.sin(angle)*radius*.66,Math.sin(angle)*radius*.23+(random()-.5)*34-50);weights.push(this.dustWeights.get(id)!);this.dustOwners.push(id);}
+    }
+    for(const [id] of this.dustWeights)if(!owners.includes(id))this.dustWeights.delete(id);
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.setAttribute('weight',new THREE.Float32BufferAttribute(weights,1));this.galaxyDust.geometry.dispose();this.galaxyDust.geometry=geometry;
   }
 
   /** 布局是纯坐标计算。包含关系与跨系统关系均被保留，不把存在循环的图强制当成树。 */
@@ -371,7 +395,7 @@ export class KnowledgeGraph {
     const halo = this.sprite(color, this.starSize(node, true), 0);
     point.position.copy(position); halo.position.copy(position);
     const label = document.createElement('button'); label.type = 'button'; label.className = `star-label ${node.kind}`;
-    label.textContent = node.title; label.style.setProperty('--node-color', color); label.setAttribute('aria-label', `查看${node.title}`);
+    label.textContent = node.title; label.style.setProperty('--node-color', categoryColor(color)); label.setAttribute('aria-label', `查看${node.title}`);label.dataset.graphNode=node.id;
     label.addEventListener('click', () => { if (!this.retiring.has(node.id)) this.select(node.id); }); this.labelLayer.append(label);
     return { data: node, point, halo, label };
   }
@@ -388,11 +412,13 @@ export class KnowledgeGraph {
 
   /** 数据版本沿用当前场景与镜头；新增从归属节点展开，删除保留到收拢完成。 */
   updateData(data: KnowledgeData) {
+    const previousCore=this.coreId();
     const before = new Map([...this.stars].map(([id, star]) => [id, star.data]));
     const from = new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()]));
     const appearance = new Map([...this.stars].map(([id, star]) => [id, { point: star.point.material.opacity, halo: star.halo.material.opacity }]));
     const oldConnections = new Map(this.connections.map(connection => [connection.data.id, connection]));
     this.data = data; this.primaryGdd = this.findCore(); this.transition = null; this.retiring.clear();
+    this.rebuildDust();
     if (this.selected && !data.nodes.some(node => node.id === this.selected)) this.selected = null;
     if (this.group && !data.groups.some(group => group.id === this.group)) this.group = null;
     this.analysis = this.selected ? buildAnalysis(this.selected, data.nodes, data.edges) : undefined;
@@ -407,7 +433,7 @@ export class KnowledgeGraph {
       star.data = node; star.label.inert = false; star.label.textContent = node.title; star.label.classList.toggle('version-changed', changed);
       const color = data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
       star.point.userData.baseColor = star.halo.userData.baseColor = color;
-      star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', color);
+      star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', categoryColor(color));
     }
     const ids = new Set(data.nodes.map(node => node.id));
     for (const [id, star] of this.stars) if (!ids.has(id)) { this.retiring.add(id); to.set(id, to.get(star.data.group)?.clone() ?? from.get(id)!.clone()); star.label.inert = true; }
@@ -421,6 +447,8 @@ export class KnowledgeGraph {
     this.prepareAnalysis(true); this.refreshVisibility(false);
     this.versionChanging = true;
     this.transition = { start: performance.now(), duration: this.reduceMotion.matches ? 0 : this.mode === 'network' ? 360 : 850, from, to, cameraFrom: this.camera.position.clone(), cameraTo: this.camera.position.clone(), targetFrom: this.controls.target.clone(), targetTo: this.controls.target.clone(), cameraInterrupted: true, restoreOverview: false, analysisMorph: this.mode === 'network', appearance, lines, scaleFrom: this.currentScale, ambientFrom: this.ambient, refocus: false, cards: new Map(this.cardAppearance), cardEdges: [...this.cardEdgeOpacity] };
+    // 第一份总纲出现时将新中心纳入视野；普通版本迭代继续保留用户镜头。
+    if(previousCore!==this.coreId()&&this.mode==='galaxy') {const framing=this.framing(to);this.transition.cameraTo=framing.position;this.transition.targetTo=framing.target;this.transition.cameraInterrupted=false;}
     this.measureLabels(); this.advanceTransition(this.transition.start);
   }
 
@@ -1007,17 +1035,26 @@ export class KnowledgeGraph {
   private animate = () => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.animate);
-    if (!this.active || document.hidden) return;
+    if (!this.active || document.hidden) {this.lastMotionFrame=0;return;}
     const now = performance.now();
+    const delta=this.lastMotionFrame?Math.min((now-this.lastMotionFrame)/1000,.05):0;this.lastMotionFrame=now;
+    if(!this.motionPaused&&!this.reduceMotion.matches)this.motionTime+=delta;
     this.advanceTransition(now);
     this.controls.update();
     this.backgrounds.forEach((field, index) => {
       (field.material as THREE.PointsMaterial).opacity = this.ambient * (this.light ? index ? .25 : .13 : index ? .85 : .6);
     });
     this.clouds.forEach(cloud => { cloud.material.opacity = this.ambient * (this.light ? .025 : .055); });
-    const galaxyOpacity = Math.max(0, (this.ambient - .24) / .76) * Number(Boolean(this.coreId()));
-    if (this.galaxyDust) { const material = this.galaxyDust.material as THREE.PointsMaterial; material.opacity = galaxyOpacity * (this.light ? .21 : .4); material.color.set(this.light ? '#61768d' : '#a4b3d5'); material.blending = this.light ? THREE.NormalBlending : THREE.AdditiveBlending; }
-    if (this.galaxyCore) this.galaxyCore.material.opacity = galaxyOpacity * (this.light ? .035 : .14);
+    const galaxyOpacity = Math.max(0, (this.ambient - .24) / .76);
+    if (this.galaxyDust) {
+      const material=this.galaxyDust.material as THREE.ShaderMaterial;material.uniforms.ambient.value=galaxyOpacity*(this.light?.22:.4);material.uniforms.phase.value=this.motionTime;material.uniforms.tone.value.set(this.light?'#61768d':'#a4b3d5');material.blending=this.light?THREE.NormalBlending:THREE.AdditiveBlending;
+      const live=new Set(this.data.nodes.filter(node=>node.kind==='document'&&node.documentType==='dd'&&node.status!=='archived').map(node=>node.id));
+      for(const [id,value] of this.dustWeights){const desired=live.has(id)?(this.desiredAppearance.get(id)?.point??1)>0?1:.14:0;this.dustWeights.set(id,this.reduceMotion.matches||this.motionPaused?desired:THREE.MathUtils.lerp(value,desired,1-Math.exp(-delta*5)));}
+      const weights=this.galaxyDust.geometry.getAttribute('weight');if(weights){this.dustOwners.forEach((id,i)=>weights.setX(i,this.dustWeights.get(id)??0));weights.needsUpdate=true;}
+    }
+    const breath=1+Math.sin(this.motionTime*Math.PI/4)*.045;
+    if (this.galaxyCore) {this.galaxyCore.material.opacity=galaxyOpacity*Number(Boolean(this.coreId()))*(this.light?.025:.065)*breath;this.galaxyCore.scale.set(165*breath,105*breath,1);}
+    const core=this.coreId()?this.stars.get(this.coreId()!):undefined;if(core&&this.mode==='galaxy')core.halo.scale.setScalar(this.starSize(core.data,true)*this.currentScale*breath);
     this.connections.forEach((connection, index) => {
       if (connection.particle.visible) connection.particle.position.copy(connection.curve.getPoint(this.motionPaused || this.reduceMotion.matches ? .52 : (now * .00012 + index * .2) % 1));
     });
@@ -1029,6 +1066,16 @@ export class KnowledgeGraph {
     if (!event.isPrimary || event.button !== 0) { if (this.pointerStart) this.pointerStart.moved = true; return; }
     this.pointerStart = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
   };
+  /** 右键拖动仍交给镜头，只有未移动的点击才打开上下文菜单。 */
+  private contextDown = (event: PointerEvent) => {if(event.button===2)this.contextStart={x:event.clientX,y:event.clientY,moved:false};};
+  private contextMove = (event: PointerEvent) => {if(this.contextStart&&Math.hypot(event.clientX-this.contextStart.x,event.clientY-this.contextStart.y)>5)this.contextStart.moved=true;};
+  private contextMenu = (event: MouseEvent) => {
+    event.preventDefault();const start=this.contextStart;this.contextStart=undefined;if(start?.moved)return;
+    let id=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]')?.dataset.graphNode;
+    if(!id){const box=this.container.getBoundingClientRect();this.raycaster.setFromCamera(new THREE.Vector2((event.clientX-box.left)/box.width*2-1,-(event.clientY-box.top)/box.height*2+1),this.camera);const targets=[...this.stars.values()].filter(star=>star.point.visible&&(this.desiredAppearance.get(star.data.id)?.point??0)>0);const hit=this.raycaster.intersectObjects(targets.map(star=>star.point))[0];id=targets.find(star=>star.point===hit?.object)?.data.id;}
+    window.dispatchEvent(new CustomEvent('cewen:graph-context',{detail:{id,x:event.clientX,y:event.clientY}}));
+  };
+  setContextMenuOpen(open: boolean) {this.controls.enabled=!open&&(this.mode!=='network'||this.reduceMotion.matches);}
   private pointerMove = (event: PointerEvent) => { if (this.pointerStart && Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 5) this.pointerStart.moved = true; };
   private pointerCancel = () => { this.pointerStart = null; };
   private pointerUp = (event: PointerEvent) => {
@@ -1130,6 +1177,7 @@ export class KnowledgeGraph {
     this.renderer.domElement.removeEventListener('pointerup', this.pointerUp);
     this.renderer.domElement.removeEventListener('pointermove', this.pointerMove);
     this.renderer.domElement.removeEventListener('pointercancel', this.pointerCancel);
+    this.container.removeEventListener('contextmenu',this.contextMenu);this.container.removeEventListener('pointerdown',this.contextDown);this.container.removeEventListener('pointermove',this.contextMove);
     this.scene.traverse(object => {
       const renderable = object as THREE.Mesh;
       renderable.geometry?.dispose();

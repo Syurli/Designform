@@ -111,6 +111,8 @@ export interface KnowledgeData {
   nodes: KnowledgeNode[];
   edges: KnowledgeEdge[];
   groups: KnowledgeGroup[];
+  /** 项目级公开分类的修改基准，不要求用户在总纲正文维护目录字段。 */
+  projectEntry?: { text: string; hash: string };
 }
 
 /** 当前磁盘投影；有诊断时仍保留可读原文，不伪称同步无误。 */
@@ -222,4 +224,6 @@ export interface DocumentDraft {
   baseText: string | null;
   text: string;
   updatedAt: string;
+  /** 新稿附件跟随私人草稿，正式保存时与正文一起提交。 */
+  assets?: { path: string; text: string; encoding: 'base64' }[];
 }

@@ -1,3 +1,4 @@
+import { openCollaboration } from './prompt-panel';
 import type { DocumentDraft, ProjectSnapshot, Proposal, WorkspaceItem } from '../shared/model.ts';
 import { prepareDirectoryFields, isWebEdition } from './edition';
 import type { ImportPlan } from '../server/exchange.ts';
@@ -33,7 +34,7 @@ export class CollaborationPanel {
   }
   private error(error: unknown) { const feedback = this.dialog.querySelector('.collaboration-feedback'); if (feedback) feedback.textContent = error instanceof Error ? error.message : '协作操作未完成。'; }
   private shell(title: string, body: string) {
-    this.dialog.innerHTML = `<header class="project-dialog-header"><div><span class="eyebrow">DESIGN TOGETHER</span><h1>${html(title)}</h1><p>问题、原始回答与最终规则分开记录，正式修改形成版本。</p></div><button class="icon-button" data-collab="close" aria-label="关闭协作面板">×</button></header><nav class="collaboration-tabs"><button data-collab="inquiry">问询</button><button data-collab="exchange">资料交换</button><button data-collab="proposals">修改提案</button></nav><p class="collaboration-feedback" role="status"></p>${body}`;
+    this.dialog.innerHTML = `<header class="project-dialog-header"><div><span class="eyebrow">DESIGN TOGETHER</span><h1>${html(title)}</h1><p>问题、原始回答与最终规则分开记录，正式修改形成版本。</p></div><button class="icon-button" data-collab="close" aria-label="关闭协作面板">×</button></header><nav class="collaboration-tabs"><button data-collab="inquiry">问询</button><button data-collab="exchange">资料交换</button><button data-collab="proposals">修改提案</button><button data-collab="prompt">准备协作开场白</button></nav><p class="collaboration-feedback" role="status"></p>${body}`;
     prepareDirectoryFields(this.dialog);
     if (isWebEdition && this.dialog.querySelector('[data-collab-form="export"]')) {
       const note = document.createElement('p'); note.className = 'quiet'; note.textContent = '网页自动恢复点保存在本机浏览器专用存储，清除网站数据会删除它们。请定期导出完整备份到磁盘；项目文件夹中的正文与 versions 历史不受清除网站数据影响。'; this.dialog.querySelector('[data-collab-form="export"]')!.before(note);
@@ -99,6 +100,7 @@ export class CollaborationPanel {
   private async click(event: MouseEvent) {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-collab]'); if (!button) return;
     const action = button.dataset.collab;
+    if(action==='prompt'){const selected=[...this.dialog.querySelectorAll<HTMLOptionElement>('select[name=documents] option:checked')].map(option=>option.value);await openCollaboration(this.dialog.querySelector('[data-collab-form=answers]')?'inquiry':this.dialog.querySelector('[data-collab-form=accept]')?'answers':'import',this.opened,selected);return;}
     if (action === 'close') await this.close();
     else if (action === 'reject') { const state = await readWorkspace(this.opened!.project.id), item = state.items.find(item => item.id === button.dataset.id)!; await updateWorkspace(this.opened!.project.id, { baseRevision: state.revision, item: { ...item, state: item.state === 'rejected' ? 'pending' : 'rejected' } }); await this.open('proposals'); }
     else if (action === 'inquiry' || action === 'exchange' || action === 'proposals') await this.open(action);

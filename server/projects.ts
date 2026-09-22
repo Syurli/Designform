@@ -143,10 +143,11 @@ export class ProjectService {
   }
 
   /** 新建始终使用空目标目录；模板只复制虚构材料，绝不以真实资料作为默认。 */
-  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home): Promise<ProjectSnapshot> {
+  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home, setup?: { brief?: string; categories?: import('../shared/model.ts').KnowledgeGroup[] }): Promise<ProjectSnapshot> {
     await this.ready;
     name = name.trim();
     if (!name || name.length > 100) throw new ProjectError('INVALID_NAME', '请输入 1～100 个字符的项目名称。');
+    if (setup && (typeof setup !== 'object' || (setup.brief !== undefined && (typeof setup.brief !== 'string' || setup.brief.length > 20000)) || (setup.categories !== undefined && (!Array.isArray(setup.categories) || setup.categories.length > 60 || setup.categories.some(group => !group || !/^[A-Za-z0-9_-]{1,120}$/.test(group.id) || typeof group.label !== 'string' || !group.label.trim() || !/^#[0-9a-f]{6}$/i.test(group.color)))))) throw new ProjectError('INVALID_SETUP','创作起点或分类内容无效，请保留草稿后重新选择。');
     const id = `project-${randomUUID()}`;
     const folderName = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 65) || '新项目';
     const directory = path.join(path.resolve(parent), `${folderName}-${id.slice(-8)}`);
@@ -156,9 +157,9 @@ export class ProjectService {
       for (const entry of await readdir(this.templateRoot)) await cp(path.join(this.templateRoot, entry), path.join(directory, entry), { recursive: true, force: false, errorOnExist: true });
     }
     const guide = await optionalBytes(this.templateRoot, 'docs/README.md');
-    if (guide) await writeBytes(directory, 'docs/README.md', guide);
-    await writeBytes(directory, 'PROJECT.md', `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: kind === 'example' ? '完全虚构的教学示例，可放心修改和复制。' : '', example: kind === 'example' })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n`);
-    if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\nsystem: system-direction\nsystems:\n  - id: system-direction\n    title: 体验方向\n    color: '#EBC58D'\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n请填写希望玩家获得的体验。\n\n## 核心循环\n\n请描述主要行动、反馈与继续行动的理由。\n\n## 首版范围\n\n记录已确定的范围，其余保持待讨论。\n`);
+    if (guide) await writeBytes(directory, 'docs/README.md', kind==='example'?guide:'# 策划文档\n\n总纲位于 gdd，专项设计位于 dd，待讨论问题位于 questions，图片位于 assets。\n\n正文优先满足阅读；在自然文句中链接相关设计。保留文档身份，不将未决定的建议写成正式规则。设计分类在项目入口登记，个人草稿与视图不进入正文。\n');
+    await writeBytes(directory, 'PROJECT.md', `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: kind === 'example' ? '完全虚构的教学示例，可放心修改和复制。' : '', example: kind === 'example', ...(kind !== 'example' ? { minimumAppVersion: '0.4.0', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color })) } : {}) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`);
+    if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n## 核心循环\n\n## 首版范围\n\n## 尚未决定\n`);
     const project = await this.open(directory);
     return this.read(project.id);
   }
@@ -437,7 +438,7 @@ export class ProjectService {
     if (documentIds.some(id => !selected.some(document => document.id === id))) throw new ProjectError('MISSING_DOCUMENT', '上下文选择含有不存在的文档。');
     const ids = new Set(selected.map(document => document.id)), nodes = snapshot.nodes.filter(node => ids.has(node.documentId));
     const nodeIds = new Set(nodes.map(node => node.id));
-    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), annotations, instructions: '只修改指定当前文档，保留 ID 和用户原话；未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
+    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry?.text }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), annotations, instructions: '只修改指定当前文档，保留 ID 和用户原话；未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
     if (Buffer.byteLength(JSON.stringify(content)) > 4 * 1024 * 1024) throw new ProjectError('CONTEXT_TOO_LARGE', '上下文超过 4 MB，请选择较少的 DD；未静默截断。');
     return content;
   }
@@ -645,6 +646,10 @@ export class ProjectService {
     await this.ready;
     if (!/^[a-f0-9-]{16,50}$/i.test(draft.id) || typeof draft.text !== 'string' || Buffer.byteLength(draft.text) > 4 * 1024 * 1024) throw new ProjectError('INVALID_DRAFT', '草稿身份或正文不正确。');
     assertDocumentPath(draft.documentPath);
+    if (draft.assets !== undefined) {
+      if (!Array.isArray(draft.assets) || draft.assets.length > 20 || Buffer.byteLength(JSON.stringify(draft.assets)) > 6 * 1024 * 1024) throw new ProjectError('DRAFT_ASSETS_TOO_LARGE','草稿附件合计过大，请先保存当前文档再继续添加。');
+      for (const asset of draft.assets) { if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿图片无效。'); changeBytes({ ...asset, baseHash: null }); }
+    }
     const saved = { ...draft, updatedAt: new Date().toISOString() };
     await writeBytes(this.project(id).path, `.cewen/drafts/${draft.id}.json`, JSON.stringify(saved));
     return saved;

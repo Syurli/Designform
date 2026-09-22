@@ -6,7 +6,7 @@ import type { ProjectSnapshot } from '../shared/model.ts';
 import { createPresence } from './presence.ts';
 
 /** 本地 stdio 适配器只使用公开服务；输出通道仅用于 MCP，日志走标准错误。 */
-const server = new McpServer({ name: 'baige-cewen', version: '0.3.0' }), local = new LocalClient();
+const server = new McpServer({ name: 'baige-cewen', version: '0.4.0' }), local = new LocalClient();
 const presence = createPresence(server);
 /** 记录访问的项目和时间，不把工具参数或文档正文泄露到连接面板。 */
 const client = { request<T = unknown>(route: string, input?: unknown) { presence.activity(route); return local.request<T>(route, input); } };

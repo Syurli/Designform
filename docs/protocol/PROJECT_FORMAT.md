@@ -23,7 +23,9 @@ system: system-resources
 
 `type` 为 `gdd`、`dd`、`question`；普通说明文件不需要进入图谱。`status` 为 `draft`（草稿）、`question`（待确认）、`confirmed`（已确认）、`archived`（已归档）。问题文档也可用 `open` / `answered` / `partially-decided` / `decided` 表示问询进度，图谱仅把尚未落实的问题标为待确认，不把答案自动变成正式规则。
 
-GDD 的头部可声明 `systems` 列表，每项包含稳定 `id`、`title`、可选十六进制 `color`。DD 的 `system` 指定主要归属；普通工作分组保存在编辑器工作区，不写入此字段。
+应用 0.4 起在 `PROJECT.md` 的头部声明 `systems` 列表，每项包含稳定 `id`、`title`、可选十六进制 `color`；数组顺序即分类顺序。DD 的 `system` 指定主要归属；普通工作分组保存在编辑器工作区，不写入此字段。没有 GDD 也可以登记分类和写 DD。
+
+`PROJECT.systems` 字段存在（包括空列表）时即为唯一分类来源，缺少该字段才读取旧 `GDD.systems`。首次修改旧项目的分类，在同一版本中迁移登记、去掉当前 GDD 重复字段并写入 `minimumAppVersion: 0.4.0`；旧快照不修改。迁移后的项目使用 0.4 或更新的软件打开。
 
 普通段落不必拥有 ID。需要引用的规则使用锚点和标题：
 

@@ -89,6 +89,20 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   const parsed: { file: MarkdownFile; header: MarkdownHeader; children: RootContent[]; document: ProjectDocument }[] = [];
   const docIds = new Set<string>(), edgeIds = new Set<string>(), nodeIds = new Set<string>();
   const issue = (file: string, code: string, message: string, severity: Diagnostic['severity'] = 'error', line?: number) => diagnostics.push({ path: file, code, message, severity, line });
+  const projectEntry = files.find(file => file.path === 'PROJECT.md');
+  let projectSystems = false;
+  if (projectEntry) try {
+    const metadata = readHeader(projectEntry.text).metadata;
+    projectSystems = Object.hasOwn(metadata, 'systems');
+    if (projectSystems) {
+      if (!Array.isArray(metadata.systems)) issue('PROJECT.md', 'INVALID_SYSTEM', '分类目录必须是列表。');
+      else for (const raw of metadata.systems) {
+        const item = raw as Record<string, unknown> | null, id = identity(item?.id);
+        if (!id || groups.some(group => group.id === id)) { issue('PROJECT.md', 'INVALID_SYSTEM', '分类身份缺失或重复。'); continue; }
+        groups.push({ id, label: string(item?.title, id), color: /^#[0-9a-f]{6}$/i.test(string(item?.color)) ? string(item?.color) : palette[groups.length % palette.length] });
+      }
+    }
+  } catch (error) { issue('PROJECT.md','PARSE_ERROR', String(error)); }
 
   for (const file of files.filter(file => file.path.startsWith('docs/') && /\.md$/i.test(file.path)).sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'))) {
     try {
@@ -103,7 +117,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
       if (docIds.has(id)) { issue(file.path, 'DUPLICATE_ID', `文档 ID ${id} 已被使用，未自动合并。`); continue; }
       docIds.add(id);
       parsed.push({ file, header, children, document });
-      if (type === 'gdd' && Array.isArray(header.metadata.systems)) {
+      if (!projectSystems && type === 'gdd' && Array.isArray(header.metadata.systems)) {
         for (const raw of header.metadata.systems) {
           if (!raw || typeof raw !== 'object') { issue(file.path, 'INVALID_SYSTEM', '系统目录项必须包含 id 和 title。'); continue; }
           const system = raw as Record<string, unknown>, systemId = identity(system.id);
@@ -121,7 +135,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => !groups.some(group => group.id === item.document.system))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
   const root = parsed.filter(item => item.document.type === 'gdd' && item.document.status !== 'archived').sort((a, b) => Number(/\/GDD\.md$/i.test(b.file.path)) - Number(/\/GDD\.md$/i.test(a.file.path)))[0]?.document;
   for (const group of groups) {
-    nodes.push({ id: group.id, title: group.label, group: group.id, kind: 'system', summary: group.id === 'system-unassigned' ? '尚未指定主要系统的文档。' : `查看${group.label}的文档与规则。`, content: ['系统归属来自当前 GDD；用户工作分组不会修改此结构。'], source: root?.path ?? 'PROJECT.md', status: 'draft', documentId: root?.id ?? '', documentPath: root?.path ?? 'PROJECT.md' });
+    nodes.push({ id: group.id, title: group.label, group: group.id, kind: 'system', summary: group.id === 'system-unassigned' ? '尚未指定主要系统的文档。' : `查看${group.label}的文档与规则。`, content: ['设计分类来自公开项目目录；私人工作分组不会修改此结构。'], source: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', status: 'draft', documentId: root?.id ?? '', documentPath: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md' });
     nodeIds.add(group.id);
   }
 
@@ -212,5 +226,5 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     issue(nodes.find(node => node.id === edge.source)?.documentPath ?? 'docs/', 'BROKEN_RELATION', `关系 ${edge.id} 的目标 ${edge.target} 不存在。`);
     return false;
   });
-  return { documents, diagnostics, groups, nodes, edges: validEdges };
+  return { documents, diagnostics, groups, nodes, edges: validEdges, ...(projectEntry ? { projectEntry: { text: projectEntry.text, hash: projectEntry.hash } } : {}) };
 }

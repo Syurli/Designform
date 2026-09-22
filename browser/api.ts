@@ -11,11 +11,12 @@ export async function browserApi(route: string, value?: unknown): Promise<unknow
   const str = (key: string) => { if (typeof input[key] !== 'string' || !input[key]) throw new ProjectError('INVALID_REQUEST', `${key}不能为空。`); return input[key] as string; };
   if (url.pathname === '/api/session' || url.pathname === '/api/projects' && value === undefined) return { ...await service.list(), token: '' };
   if (url.pathname === '/api/connections') return { connections: [], heartbeatTimeoutMs: 35000 };
+  if (url.pathname === '/api/integration') return { mode: 'web' };
   if (url.pathname === '/api/projects') {
     if (!['blank','basic','example'].includes(str('kind'))) throw new ProjectError('INVALID_TEMPLATE','请选择有效模板。');
     const directory = str('directory');
     if (input.kind !== 'example' && !directory.startsWith('/folders/')) throw new ProjectError('FOLDER_REQUIRED','请先选择本机的项目保存文件夹。');
-    return prepareSnapshot(await service.create(str('name'), input.kind as 'blank'|'basic'|'example', directory));
+    return prepareSnapshot(await service.create(str('name'), input.kind as 'blank'|'basic'|'example', directory, input.setup as Parameters<ProjectService['create']>[3]));
   }
   if (url.pathname === '/api/projects/open') return prepareSnapshot(await service.read((await service.open(str('path'))).id));
   const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/([a-z-]+))?$/.exec(url.pathname);

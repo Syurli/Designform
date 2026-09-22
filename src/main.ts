@@ -3,6 +3,9 @@ import './workbench.css';
 import './features.css';
 import './theme.css';
 import './shell.css';
+import './authoring.css';
+import { categoryColor } from './category-color';
+import { openCollaboration } from './prompt-panel';
 import { initializeTheme, mountDesktopChrome } from './theme';
 import { createIcons, Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft } from 'lucide';
 import { KnowledgeGraph, type GraphMode } from './graph';
@@ -78,7 +81,7 @@ app.innerHTML = `
     <details class="system-filter"><summary><span id="system-filter-label">全部系统</span><small><span id="system-count">${groups.length}</span> 个系统</small></summary>
     <div class="system-list">
       <button data-group="" class="group-button active"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>
-      ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${group.color}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
+      ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
     </div>
     </details>
     <details class="reading-options"><summary>筛选与阅读记录</summary><button id="toggle-archived">显示已归档内容</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>大型图谱展开全部规则</label><button id="recent-reading">最近浏览</button><button id="save-reading-view">保存当前阅读视图</button><button id="reset-reading-filters">清除所有筛选</button></details>
@@ -106,7 +109,7 @@ app.innerHTML = `
         <div id="graph-canvas" class="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
         <div class="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
-        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${group.color}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">拖动旋转 · 滚轮缩放 · 点击阅读</span></div>
+        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">拖动旋转 · 滚轮缩放 · 点击阅读</span></div>
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
       <section class="cards-view" id="cards-view" hidden aria-label="策划卡片库"></section>
@@ -157,8 +160,8 @@ function renderAnalysisControls() {
   document.querySelectorAll<HTMLElement>('.graph-tools .tool-divider').forEach(divider => { divider.hidden = analyzing; });
   get('reset-view').setAttribute('aria-label', analyzing ? '重置分析布局' : '返回全图');
   get('reset-view').querySelector('span')!.textContent = analyzing ? '重置布局' : '全图';
-  get('graph-empty-title').textContent = analyzing ? '选择一个条目，展开它的关系' : '没有匹配的条目';
-  get('graph-empty-description').textContent = analyzing ? '可从上方焦点列表或左侧目录开始。' : '尝试其他关键词，或清除当前筛选。';
+  get('graph-empty-title').textContent = analyzing ? '选择一个条目，展开它的关系' : nodes.length ? '没有匹配的条目' : '尚无总纲或专项设计';
+  get('graph-empty-description').textContent = analyzing ? '可从上方焦点列表或左侧目录开始。' : nodes.length ? '尝试其他关键词，或清除当前筛选。' : '点击「＋ 新建」或右键星空，写下第一份设计。';
   get('clear-filters').textContent = analyzing ? '选择首个条目' : '清除筛选';
 }
 
@@ -195,11 +198,11 @@ function renderInspector() {
     return;
   }
   if (!selected) {
-    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">项目概览</span>${icon('orbit')}</div><h2>${escape(projectSnapshot?.project.name ?? '从你的第一份策划开始')}</h2><p class="overview-description">${escape(projectSnapshot?.project.description || '新建文档、写下规则，逐步连接你的游戏设计。')}</p><div class="overview-stats"><div><b>${nodes.length}</b><span>策划条目</span></div><div><b>${edges.length}</b><span>知识关联</span></div></div><div class="panel-divider"></div><div class="detail-label">从一个系统开始</div><div class="overview-groups">${groups.map(group => { const node = nodes.find(item => item.group === group.id && item.kind === 'system')!; return `<button data-node="${node.id}"><span class="group-dot" style="--group-color:${group.color}"></span>${escape(group.label)}${icon('arrow-up-right')}</button>`; }).join('')}</div><div class="reading-note">${projectSnapshot?.project.isExample ? '这是完全虚构的基础示例，可自由修改。' : '正文来自项目 Markdown，可用普通编辑器直接读写。'}<br>点击星点或目录条目，查看正文与关联。</div>${projectSnapshot?.diagnostics.length ? `<div class="project-warning">${projectSnapshot.diagnostics.map(issue => escape(`${issue.path}：${issue.message}`)).join('<br>')}</div>` : ''}${connectionError ? `<div class="project-warning">${escape(connectionError)}</div>` : ''}`;
+    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">项目概览</span>${icon('orbit')}</div><h2>${escape(projectSnapshot?.project.name ?? '从你的第一份策划开始')}</h2><p class="overview-description">${escape(projectSnapshot?.project.description || '新建文档、写下规则，逐步连接你的游戏设计。')}</p><div class="overview-stats"><div><b>${nodes.length}</b><span>策划条目</span></div><div><b>${edges.length}</b><span>知识关联</span></div></div><div class="panel-divider"></div><div class="detail-label">从一个系统开始</div><div class="overview-groups">${groups.map(group => { const node = nodes.find(item => item.group === group.id && item.kind === 'system')!; return `<button data-node="${node.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span>${escape(group.label)}${icon('arrow-up-right')}</button>`; }).join('')}</div><div class="reading-note">${projectSnapshot?.project.isExample ? '这是完全虚构的基础示例，可自由修改。' : '正文来自项目 Markdown，可用普通编辑器直接读写。'}<br>点击星点或目录条目，查看正文与关联。</div>${projectSnapshot?.diagnostics.length ? `<div class="project-warning">${projectSnapshot.diagnostics.map(issue => escape(`${issue.path}：${issue.message}`)).join('<br>')}</div>` : ''}${connectionError ? `<div class="project-warning">${escape(connectionError)}</div>` : ''}`;
   } else {
     const group = groupOf(selected);
     const relations = edges.filter(edge => edge.source === selected.id || edge.target === selected.id);
-    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">${kindNames[selected.kind]}</span><button class="icon-button" id="clear-selection" aria-label="关闭条目详情">${icon('x')}</button></div><div class="detail-group" style="--group-color:${group.color}"><i></i>${escape(group.label)}</div><h2>${escape(selected.title)}</h2><div class="detail-meta">${status(selected)}<span>${relations.length} 条关联</span></div><p class="detail-summary">${escape(selected.summary)}</p><button class="read-button" id="read-selected">${icon('file-text')}阅读全文${icon('arrow-up-right')}</button><div class="record-actions"><button id="item-history">条目历史</button><button id="document-history">文档历史</button><button id="copy-node-link">复制条目链接</button></div><div class="panel-divider"></div><div class="related-heading"><span>直接关联</span><label class="mini-check"><input type="checkbox" id="direct-only" ${state.directOnly ? 'checked' : ''}/>只看相关</label></div><div class="relation-list">${relations.map(edge => { const outward = edge.source === selected.id; const other = nodeById.get(outward ? edge.target : edge.source)!; const type = types.find(type => type.id === edge.type)!.label; const label = edge.type === 'relates' ? '关联' : `${outward ? '→' : '←'} ${type}`; return `<div class="relation-item"><button data-node="${other.id}"><span class="relation-type">${label}</span><span>${escape(other.title)}</span>${icon('chevron-right')}</button><p>${escape(edge.note)}</p></div>`; }).join('')}</div><div class="source-block"><span>资料来源</span><p>${escape(sourceName(selected.source))}</p><small>“已有依据”指设计有据，不代表已实现。</small></div>`;
+    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">${kindNames[selected.kind]}</span><button class="icon-button" id="clear-selection" aria-label="关闭条目详情">${icon('x')}</button></div><div class="detail-group" style="--group-color:${categoryColor(group.color)}"><i></i>${escape(group.label)}</div><h2>${escape(selected.title)}</h2><div class="detail-meta">${status(selected)}<span>${relations.length} 条关联</span></div><p class="detail-summary">${escape(selected.summary)}</p><button class="read-button" id="read-selected">${icon('file-text')}阅读全文${icon('arrow-up-right')}</button><div class="record-actions"><button id="item-history">条目历史</button><button id="document-history">文档历史</button><button id="copy-node-link">复制条目链接</button></div><div class="panel-divider"></div><div class="related-heading"><span>直接关联</span><label class="mini-check"><input type="checkbox" id="direct-only" ${state.directOnly ? 'checked' : ''}/>只看相关</label></div><div class="relation-list">${relations.map(edge => { const outward = edge.source === selected.id; const other = nodeById.get(outward ? edge.target : edge.source)!; const type = types.find(type => type.id === edge.type)!.label; const label = edge.type === 'relates' ? '关联' : `${outward ? '→' : '←'} ${type}`; return `<div class="relation-item"><button data-node="${other.id}"><span class="relation-type">${label}</span><span>${escape(other.title)}</span>${icon('chevron-right')}</button><p>${escape(edge.note)}</p></div>`; }).join('')}</div><div class="source-block"><span>资料来源</span><p>${escape(sourceName(selected.source))}</p><small>“已有依据”指设计有据，不代表已实现。</small></div>`;
   }
   if (selected) {
     // 总览先选中条目，再通过明确入口深入分析，单击星点仍可快速浏览摘要。
@@ -242,7 +245,7 @@ function renderReading() {
 
 function renderCards() {
   const visible = filteredNodes();
-  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${groupOf(node).color}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
+  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${categoryColor(groupOf(node).color)}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
   refreshIcons();
 }
 
@@ -410,7 +413,7 @@ app.addEventListener('click', event => {
   if ('group' in button.dataset) { state.group = button.dataset.group || null; state.directOnly = false; if (state.mode !== 'network') { state.selected = null; state.relationIndex = null; } (document.querySelector('.system-filter') as HTMLDetailsElement).open = false; sync(); return; }
   switch (button.id) {
     case 'project-center': case 'project-switch': void workbench.projects().catch(reportProjectError); break;
-    case 'new-document': workbench.newDocument(); break;
+    case 'new-document': void workbench.newDocument(state.group??'').catch(reportProjectError); break;
     case 'edit-document': void workbench.edit(state.selected ? nodeById.get(state.selected)?.documentId : undefined).catch(reportProjectError); break;
     case 'item-history': if (state.selected) void historyPanel.itemHistory(state.selected, false).catch(reportProjectError); break;
     case 'document-history': if (state.selected) void historyPanel.itemHistory(nodeById.get(state.selected)!.documentId, true).catch(reportProjectError); break;
@@ -500,8 +503,8 @@ function applyProject(snapshot: ProjectSnapshot) {
   get('project-description').textContent = snapshot.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存';
   get('refresh-project').textContent = snapshot.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件';
   get('system-count').textContent = String(groups.length);
-  document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${group.color}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
-  document.querySelector('.legend')!.innerHTML = groups.map(group => `<span><i style="background:${group.color}"></i>${escape(group.label)}</span>`).join('');
+  document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
+  document.querySelector('.legend')!.innerHTML = groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');
   get('analysis-focus').innerHTML = `<option value="">请选择条目</option>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}`;
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
@@ -530,6 +533,24 @@ async function refreshProject(verify = false) {
 function reportProjectError(error: unknown) { connectionError = error instanceof Error ? error.message : '本地项目操作未完成。'; get('project-save-state').textContent = connectionError; get('announcement').textContent = connectionError; renderInspector(); }
 
 const workbench = new ProjectWorkbench(() => projectSnapshot, applyProject);
+/** 上下文菜单在当前画布旁出现；所有操作回到同一编辑与保存流程。 */
+const graphMenu=document.createElement('div');graphMenu.className='star-context-menu';graphMenu.hidden=true;graphMenu.setAttribute('aria-label','星图快捷操作');document.body.append(graphMenu);
+const closeGraphMenu=()=>{graphMenu.hidden=true;graph?.setContextMenuOpen(false);};
+function openGraphMenu(detail:{id?:string;x:number;y:number}){
+  if(!projectSnapshot)return;const node=detail.id?nodeById.get(detail.id):undefined;
+  const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
+  graphMenu.innerHTML=`<small>${escape(node?.title??'在星图中开始')}</small>${actions.map(([action,label])=>`<button data-star-action="${action}">${label}</button>`).join('')}`;graphMenu.hidden=false;
+  graphMenu.style.left=`${Math.max(8,Math.min(detail.x,innerWidth-graphMenu.offsetWidth-8))}px`;graphMenu.style.top=`${Math.max(8,Math.min(detail.y,innerHeight-graphMenu.offsetHeight-8))}px`;graph?.setContextMenuOpen(true);
+  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'');break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'category-document':case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
+  graphMenu.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
+}
+window.addEventListener('cewen:graph-context',event=>openGraphMenu((event as CustomEvent).detail));
+document.addEventListener('pointerdown',event=>{if(!graphMenu.contains(event.target as Node))closeGraphMenu();});
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closeGraphMenu();});
+window.addEventListener('resize',closeGraphMenu);
+const graphCreate=document.createElement('button');graphCreate.className='secondary-button graph-create-button';graphCreate.textContent='＋ 新建';get('graph-canvas').parentElement!.append(graphCreate);graphCreate.addEventListener('click',()=>{const box=graphCreate.getBoundingClientRect();openGraphMenu({x:box.left,y:box.top-190});});
+const collaborationButton=document.createElement('button');collaborationButton.className='secondary-button';collaborationButton.textContent='与 LLM 协作';document.querySelector('.project-toolbar')!.append(collaborationButton);collaborationButton.addEventListener('click',()=>void openCollaboration(state.selected?'inquiry':'start',projectSnapshot,state.selected?[nodeById.get(state.selected)!.documentId].filter(Boolean):[]));
+window.addEventListener('cewen-theme-change',()=>{renderDirectory();renderInspector();renderCards();document.querySelectorAll<HTMLElement>('.system-list [data-group]').forEach(button=>{const group=groups.find(group=>group.id===button.dataset.group),dot=button.querySelector<HTMLElement>('.group-dot');if(group&&dot)dot.style.setProperty('--group-color',categoryColor(group.color));});document.querySelector('.legend')!.innerHTML=groups.map(group=>`<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');});
 const historyPanel = new HistoryPanel(() => projectSnapshot, applyProject);
 const workspacePanel = new WorkspacePanel(() => projectSnapshot, selectNode, item => workbench.publishAnnotation(item), (ids, title) => { state.scopeIds = ids; state.selected = null; state.relationIndex = null; sync(); get('announcement').textContent = `正在查看工作分组：${title}。清除筛选可返回全部。`; }, () => ({ ...state }), restoreReadingState, applyProject);
 /** 阅读状态与稳定坐标从工作区恢复，不介入公开文档历史。 */

@@ -25,7 +25,11 @@ else {
     try { if (JSON.parse(await readFile(path.join(preferences, 'appearance.json'), 'utf8')).theme === 'light') theme = 'light'; } catch { /* 首次启动使用已确认的深色主题。 */ }
     const colors = () => theme === 'dark' ? { color: '#0b101d', symbolColor: '#bdcde7', height: 36 } : { color: '#cdd4d9', symbolColor: '#2d414e', height: 36 };
     nativeTheme.themeSource = theme;
-    host = await startHost({ root });
+    host = await startHost({ root, installation: app.isPackaged ? path.dirname(app.getPath('exe')) : undefined, chooseDirectory: async initial => {
+      const settings: Electron.OpenDialogOptions = { title: '选择策问项目文件夹', defaultPath: initial || app.getPath('documents'), properties: ['openDirectory'] };
+      const result = window ? await dialog.showOpenDialog(window, settings) : await dialog.showOpenDialog(settings);
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    } });
     const iconPath = path.join(root, 'dist/icons/cewen.ico');
     // 自绘标题栏负责拖动与菜单，原生最小化、最大化和关闭按钮使用主题覆盖色。
     window = new BrowserWindow({ width: 1500, height: 960, minWidth: 850, minHeight: 650, title: '策问 Designform', icon: iconPath, backgroundColor: colors().color, show: true, titleBarStyle: 'hidden', titleBarOverlay: colors(), webPreferences: { preload: path.join(runtimeRoot, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true } });

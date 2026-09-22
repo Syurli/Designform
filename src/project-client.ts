@@ -19,7 +19,7 @@ export class ClientError extends Error {
 }
 
 /** 断开时抛错，不伪造成功或静默改用浏览器缓存。 */
-async function request<T>(url: string, input?: unknown, reconnect = true): Promise<T> {
+export async function request<T>(url: string, input?: unknown, reconnect = true): Promise<T> {
   if (isWebEdition) {
     try { webApi ??= await import('../browser/api'); return await webApi.browserApi(url,input) as T; }
     catch (error) { const failure = error as Error & { code?: string; details?: unknown }; throw new ClientError({ code: failure.code ?? 'LOCAL_IO_ERROR', message: failure.message, details: failure.details }); }
@@ -44,7 +44,7 @@ export const listProjects = () => request<ProjectLibrary>('/api/projects');
 /** 连接状态属于应用运行期，不依赖当前项目是否打开。 */
 export const readConnections = () => request<import('../shared/model.ts').LlmConnectionState>('/api/connections');
 export const readProject = (id: string, verify = false) => request<ProjectSnapshot>(`/api/projects/${encodeURIComponent(id)}${verify ? '?verify=1' : ''}`);
-export const createProject = (name: string, kind: 'blank' | 'basic' | 'example', directory: string) => request<ProjectSnapshot>('/api/projects', { name, kind, directory });
+export const createProject = (name: string, kind: 'blank' | 'basic' | 'example', directory: string, setup?: { brief?: string; categories?: import('../shared/model.ts').KnowledgeGroup[] }) => request<ProjectSnapshot>('/api/projects', { name, kind, directory, setup });
 export const openProject = (path: string) => request<ProjectSnapshot>('/api/projects/open', { path });
 export const commitProject = (value: CommitRequest) => request<ProjectSnapshot>(`/api/projects/${encodeURIComponent(value.projectId)}/commit`, value);
 export const recoverProject = (id: string, direction: 'continue' | 'rollback') => request<ProjectSnapshot>(`/api/projects/${encodeURIComponent(id)}/recover`, { direction });

@@ -6,9 +6,10 @@ import { PROTOCOL_VERSION, type CommitRequest, type DocumentDraft, type Workspac
 import { ProjectError } from './files.ts';
 import { ProjectService } from './projects.ts';
 import { ConnectionRegistry } from './connections.ts';
+import { chooseNativeDirectory } from './native-dialog.ts';
 
 /** API 生命周期由本地宿主管理；开发、浏览器和桌面复用同一服务实现。 */
-export function createProjectApi(options: { home?: string; templateRoot?: string } = {}) {
+export function createProjectApi(options: { home?: string; templateRoot?: string; root?: string; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string } = {}) {
   const service = new ProjectService(options.home ?? process.env.CEWEN_HOME ?? path.join(os.homedir(), 'Documents', '策问工作区', '开发沙盒'), options.templateRoot);
   const token = randomBytes(32).toString('hex');
   const connections = new ConnectionRegistry();
@@ -52,13 +53,20 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       }
       const imageRead = request.method === 'GET' && /\/asset$/.test(url.pathname) && request.headers.cookie?.split(';').some(cookie => cookie.trim() === `cewen=${token}`);
       if (request.headers['x-cewen-session'] !== token && !imageRead) throw new ProjectError('SESSION_REQUIRED', '连接已更新，请重新连接本地工作台。');
+      if (url.pathname === '/api/choose-directory' && request.method === 'POST') {
+        const input = await body(request); send(response, { path: await (options.chooseDirectory ?? chooseNativeDirectory)(typeof input.initial === 'string' ? input.initial : '') }); return true;
+      }
+      if (url.pathname === '/api/integration' && request.method === 'GET') {
+        const root = options.root ?? path.resolve('.');
+        send(response, { mode: 'local', root, skill: path.join(root,'integration/skills/cewen-collaborate/SKILL.md'), guide: path.join(root,options.installation?'integration/protocol/INTEGRATION.md':'docs/protocol/INTEGRATION.md'), launcher: options.installation ? path.join(options.installation,'策问MCP.cmd') : '', runtime: path.join(root,'runtime/mcp.js'), url: `http://${authority}` }); return true;
+      }
       if (url.pathname === '/api/connections' && request.method === 'GET') { send(response, connections.read()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'POST') { send(response, connections.update(await body(request))); return true; }
       if (url.pathname === '/api/projects' && request.method === 'GET') { send(response, await service.list()); return true; }
       if (url.pathname === '/api/projects' && request.method === 'POST') {
         const input = await body(request);
         if (!['blank', 'basic', 'example'].includes(String(input.kind))) throw new ProjectError('INVALID_TEMPLATE', '请选择空白、基础总纲或虚构示例。');
-        send(response, await service.create(required(input.name, '项目名称'), input.kind as 'blank' | 'basic' | 'example', typeof input.directory === 'string' && input.directory ? input.directory : undefined)); return true;
+        send(response, await service.create(required(input.name, '项目名称'), input.kind as 'blank' | 'basic' | 'example', typeof input.directory === 'string' && input.directory ? input.directory : undefined, input.setup as Parameters<ProjectService['create']>[3])); return true;
       }
       if (url.pathname === '/api/projects/open' && request.method === 'POST') { const input = await body(request); const project = await service.open(required(input.path, '项目目录')); send(response, await service.read(project.id)); return true; }
       const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(commit|history|recover|drafts|revision|restore-plan|baseline|workspace|asset|import-plan|apply-import|context|questions|answers|proposals|accept-proposal|export|copy|forget|checkpoint|undo-plan|move-document|paste-import|review-import|backup-status|reading-view|begin-batch|end-batch|reverse-relation|archive-documents))?$/.exec(url.pathname);

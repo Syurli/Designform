@@ -3,7 +3,7 @@ import { projectAssetUrl } from './project-client';
 import { escapeHtml, markdownView, resolveDocumentLink } from './markdown-view';
 
 /** 阅读链接只使用当前修订中的身份；历史预览不会偷读当前版本的摘要。 */
-export function projectMarkdown(document: ProjectDocument, snapshot: ProjectSnapshot) {
+export function projectMarkdown(document: ProjectDocument, snapshot: ProjectSnapshot, draftAssets?: {path: string; text: string}[]) {
   const href = (id: string) => `#cewen-doc=${encodeURIComponent(id)}`;
   const names = new Map<string, Set<string>>();
   const add = (name: string, id: string) => { if (name.trim().length < 2) return; const ids = names.get(name) ?? new Set(); ids.add(id); names.set(name, ids); };
@@ -15,7 +15,11 @@ export function projectMarkdown(document: ProjectDocument, snapshot: ProjectSnap
   for (const [name, ids] of names) if (ids.size === 1) { const id = [...ids][0]; if (id !== document.id && snapshot.nodes.some(node => node.id === id && node.status !== 'archived')) terms.set(name, href(id)); }
   return markdownView(document.text, (url, image) => {
     const target = resolveDocumentLink(document.path, url); if (!target) return null;
-    if (image || target.path.startsWith('docs/assets/')) return target.path.startsWith('docs/assets/') ? projectAssetUrl(snapshot,target.path) : null;
+    if (image || target.path.startsWith('docs/assets/')) {
+      const draft=draftAssets?.find(asset=>asset.path===target.path), extension=target.path.split('.').at(-1);
+      if(draft && ['png','jpg','jpeg','webp','gif'].includes(extension??''))return `data:image/${extension==='jpg'?'jpeg':extension};base64,${draft.text}`;
+      return target.path.startsWith('docs/assets/') ? projectAssetUrl(snapshot,target.path) : null;
+    }
     const linked = snapshot.documents.find(doc => doc.path === target.path); if (!linked) return null;
     let anchor: string; try { anchor = decodeURIComponent(target.anchor); } catch { return null; }
     const id = linked.id + (anchor ? `/${anchor}` : '');
