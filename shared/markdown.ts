@@ -151,7 +151,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     const content = paragraphs(children), line = header.bodyOffset ? file.text.slice(0, header.bodyOffset).split('\n').length : 1;
     nodes.push({ id: document.id, title: document.title, kind: 'document', documentType: document.type, group, summary: string(header.metadata.summary) || content[0] || '尚未填写设计正文。', content, source: `${file.path}:${line}`, status: document.status, documentId: document.id, documentPath: file.path });
     nodeIds.add(document.id);
-    if (document.id !== root?.id) appendEdge({ id: `contains:${group}:${document.id}`, source: group, target: document.id, type: 'contains', note: '来自当前文档的主要系统归属。' }, file.path);
+    if (document.id !== root?.id) appendEdge({ id: `contains:${group}:${document.id}`, source: group, target: document.id, type: 'contains', note: '来自当前文档的主要系统归属。', origin: {kind:'classification',path:file.path} }, file.path);
 
     let owner = document.id;
     const anchors = children.flatMap((node, index) => anchorOf(node) ? [{ index, id: anchorOf(node)! }] : []);
@@ -169,7 +169,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
         const sourceLine = line + (child.position?.start.line ?? 1) - 1;
         nodes.push({ id, title: plain(next), kind: 'rule', group, summary: content.find(text => !/^设计状态[：:]/.test(text)) ?? '尚未填写规则正文。', content, source: `${file.path}:${sourceLine}`, status, documentId: document.id, documentPath: file.path, anchor });
         nodeIds.add(id); owner = id;
-        appendEdge({ id: `contains:${document.id}:${anchor}`, source: document.id, target: id, type: 'contains', note: '来自当前 Markdown 的规则章节。' }, file.path);
+        appendEdge({ id: `contains:${document.id}:${anchor}`, source: document.id, target: id, type: 'contains', note: '来自当前 Markdown 的规则章节。', origin: {kind:'section',path:file.path} }, file.path);
       }
       if (child.type !== 'table') continue;
       const headers = child.children[0]?.children.map(cell => plain(cell).trim()) ?? [];
@@ -183,15 +183,15 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
         if (!id || !type || !target.split('/').every(part => identityPattern.test(part)) || target.split('/').length > 2) { issue(file.path, 'INVALID_RELATION', '关系表中存在无效身份或类型。', 'error', row.position?.start.line); continue; }
         const source = headers.includes('来源身份') ? get('来源身份').split('/').map(part => part.trim()).join('/') : owner;
         if (source !== document.id && !source.startsWith(`${document.id}/`)) { issue(file.path, 'INVALID_RELATION_SOURCE', '文末关系索引的来源必须属于当前文档。'); continue; }
-        appendEdge({ id, source, target, type, note: get('依据') || '尚未补充关系依据。' }, file.path);
+        appendEdge({ id, source, target, type, note: get('依据') || '未补充说明。', origin: {kind:'manual',path:file.path} }, file.path);
       }
     }
   }
 
   // 总纲声明的系统从总纲展开，避免反向把总纲包含进某个系统而形成归属环。
-  if (root) for (const group of groups) appendEdge({ id: `contains:${root.id}:${group.id}`, source: root.id, target: group.id, type: 'contains', note: '游戏总纲统领的文档系统目录。' }, root.path);
+  if (root) for (const group of groups) appendEdge({ id: `contains:${root.id}:${group.id}`, source: root.id, target: group.id, type: 'contains', note: '游戏总纲统领的文档系统目录。', origin: {kind:'catalog',path:projectSystems?'PROJECT.md':root.path} }, root.path);
 
-  // 明确写入正文的 Markdown 链接天然构成引用；重复提及和已有语义关系不重复加边。
+  // 同一对条目的多次正文提及聚合为引用线；与手工关系独立保留各自来源。
   // 仅阅读界面的同名词提示不进入模型，防止自动补出作者未声明的设计关系。
   for (const item of parsed) {
     const definitions = new Map(item.children.filter(node => node.type === 'definition').map(node => [node.identifier.toLowerCase(), node.url]));
@@ -204,7 +204,14 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
           const url = new URL(raw, `https://project.invalid/${item.file.path}`), targetDoc = documents.find(doc => doc.path === decodeURIComponent(url.pathname.slice(1)));
           if (targetDoc && targetDoc.type !== 'guide') {
             const target = targetDoc.id + (url.hash ? `/${decodeURIComponent(url.hash.slice(1))}` : '');
-            if (target !== owner && !edges.some(edge => edge.source === owner && edge.target === target)) appendEdge({ id: `reference:${owner}:${target}`, source: owner, target, type: 'references', note: `正文提及「${plain(node)}」，可沿链接阅读原文。` }, item.file.path);
+            if (target !== owner && node.position) {
+              // 同一端点对的正文引用合并显示，但保留每次出现的位置；手工关系独立存在。
+              const id = `reference:${owner}:${target}`;
+              const occurrence = { start: item.header.bodyOffset + node.position.start.offset!, end: item.header.bodyOffset + node.position.end.offset!, label: plain(node), url: raw, reference: node.type === 'linkReference' };
+              const existing = edges.find(edge => edge.id === id);
+              if (existing) { existing.origin!.occurrences!.push(occurrence); existing.note = `正文引用 ${existing.origin!.occurrences!.length} 处。`; }
+              else appendEdge({ id, source: owner, target, type: 'references', note: `正文提及「${plain(node)}」，可沿链接阅读原文。`, origin: {kind:'markdown',path:item.file.path,occurrences:[occurrence]} }, item.file.path);
+            }
           }
         } catch { /* 无法解析的地址由普通链接诊断处理，不猜测目标。 */ }
       }
@@ -217,7 +224,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   for (const item of parsed) if (item.document.type === 'question' && Array.isArray(item.header.metadata.targets)) {
     for (const target of item.header.metadata.targets) {
       if (typeof target !== 'string') { issue(item.file.path, 'INVALID_QUESTION_TARGET', '问题目标需要稳定条目 ID。'); continue; }
-      appendEdge({ id: `question:${item.document.id}:${target}`, source: item.document.id, target, type: 'references', note: '此问题讨论的设计条目；问题尚未决定时不表示规则已确定。' }, item.file.path);
+      appendEdge({ id: `question:${item.document.id}:${target}`, source: item.document.id, target, type: 'references', note: '此问题讨论的设计条目；问题尚未决定时不表示规则已确定。', origin: {kind:'question',path:item.file.path} }, item.file.path);
     }
   }
   // 断链保留为诊断；不把不存在端点交给渲染器，更不制造虚假的目标节点。

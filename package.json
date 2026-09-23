@@ -1,7 +1,7 @@
 {
   "name": "baige-designform",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "main": "runtime/desktop.js",
   "description": "策问 Designform — 游戏策划知识空间",
@@ -22,6 +22,8 @@
     "licenses": "node scripts/collect-licenses.mjs"
   },
   "dependencies": {
+    "@milkdown/crepe": "7.22.1",
+    "@milkdown/kit": "7.22.1",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@noble/hashes": "2.4.0",
     "buffer": "6.0.3",

@@ -4,6 +4,10 @@ import './features.css';
 import './theme.css';
 import './shell.css';
 import './authoring.css';
+import './creation-editing.css';
+import { EditingSession } from './editing-session';
+import type { GraphEdit } from '../shared/graph-editing';
+import { chooseAction, chooseRelationType, classifyDocuments, connectDocuments, editEdge } from './relation-editing';
 import { categoryColor } from './category-color';
 import { openCollaboration } from './prompt-panel';
 import { initializeTheme, mountDesktopChrome } from './theme';
@@ -123,6 +127,7 @@ mountDesktopChrome();
 await initializeTheme();
 
 let graph: KnowledgeGraph | undefined;
+let editingSession:EditingSession|undefined;
 let readingReady = false;
 let readingTimer: ReturnType<typeof setTimeout> | undefined;
 let recentNodes: string[] = [];
@@ -194,6 +199,7 @@ function renderInspector() {
     const source = nodeById.get(edge.source)!, target = nodeById.get(edge.target)!;
     const semantic = edge.type === 'depends' ? '箭头指向依赖项；修改依赖项时，应回头核对使用它的规则。' : edge.type === 'constrains' ? '箭头从约束规则指向受约束内容；建议复核不代表必须修改。' : edge.type === 'contains' ? '这是内容归属关系，不自动表示改动影响。' : '这是普通关联，存储方向不表示因果或改动传播。';
     get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">关系依据</span><button class="icon-button" id="close-relation" aria-label="返回条目详情">${icon('x')}</button></div><div class="edge-statement"><span>${escape(source.title)}</span><strong>${edge.type === 'relates' ? '↔' : '↓'} ${types.find(type => type.id === edge.type)!.label}</strong><span>${escape(target.title)}</span></div><div class="evidence-badge">${edge.note.includes('展示推断') ? '展示推断 · 待核对' : '原文依据'}</div><p class="evidence-note">${escape(edge.note)}</p><p class="edge-semantic">${semantic}</p><div class="panel-divider"></div><div class="detail-label">继续分析</div><button class="evidence-node" data-analyze="${source.id}">${escape(source.title)}${icon('arrow-up-right')}</button><button class="evidence-node" data-analyze="${target.id}">${escape(target.title)}${icon('arrow-up-right')}</button><div class="source-block"><span>两端资料</span><p>${escape(sourceName(source.source))}</p><p>${escape(sourceName(target.source))}</p></div>`;
+    if(!projectSnapshot?.historical){const button=document.createElement('button');button.className='secondary-button';button.dataset.graphCommand='edge';button.textContent=edge.origin?.kind==='markdown'?'修改正文引用':'编辑这条关系';get('inspector').append(button);const review=document.createElement('button');review.className='secondary-button';review.textContent='让 LLM 检查这条关系';review.onclick=()=>void openCollaboration('review',projectSnapshot,[source.documentId,target.documentId].filter(Boolean),{extra:`请检查「${source.title}」与「${target.title}」的关系。当前类型：${types.find(t=>t.id===edge.type)?.label}。来源：${edge.origin?.kind??'文档'}。依据：${edge.note}。区分正文提及、主要分类和真正的设计依赖，不按位置或同名词猜测关系。`,fixed:true});get('inspector').append(review);}
     refreshIcons();
     return;
   }
@@ -230,6 +236,11 @@ function renderInspector() {
       get('inspector').querySelector('.mini-check')?.replaceWith(depth);
     }
   }
+  if(selected&&selected.kind!=='system'&&!projectSnapshot?.historical){
+    const actions=document.createElement('div');actions.className='graph-selected-actions';
+    actions.innerHTML='<button data-graph-command="connect">添加手工关联</button><button data-graph-command="classify">修改分类</button>';
+    get('inspector').append(actions);
+  }
   refreshIcons();
 }
 
@@ -253,6 +264,7 @@ function renderCards() {
 function sync(updateGraph = true) {
   if (readingReady && projectSnapshot && !projectSnapshot.historical) { clearTimeout(readingTimer); const id = projectSnapshot.project.id; readingTimer = setTimeout(() => { void projectAction(id, 'reading-view', { state: { ...state }, layout: graph?.exportLayout(), recent: recentNodes }).catch(reportProjectError); }, 900); }
   renderAnalysisControls();
+  renderEditingState();
   renderDirectory();
   renderInspector();
   if (updateGraph) graph?.setState(state);
@@ -456,7 +468,10 @@ app.addEventListener('change', event => {
 });
 get('search').addEventListener('input', event => { state.query = (event.target as HTMLInputElement).value; sync(); });
 document.addEventListener('keydown', event => {
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
+  if(event.defaultPrevented||event.isComposing||document.querySelector('dialog[open]'))return;
+  const typing = !!(event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]');
+  if(!typing&&(event.ctrlKey||event.metaKey)){const key=event.key.toLowerCase();if(['s','z','y','c','x','v','a','f'].includes(key)&&!(key==='c'&&window.getSelection()?.toString())){event.preventDefault();void graphCommand(key==='s'?'save':key==='z'?(event.shiftKey?'redo':'undo'):key==='y'?'redo':key==='c'?'copy':key==='x'?'cut':key==='a'?'selectAll':key==='f'?'search':'paste').catch(reportProjectError);return;}}
+  if(!typing&&event.key==='Delete'&&state.view==='graph'&&state.relationIndex!==null){event.preventDefault();void graphCommand('edge').catch(reportProjectError);}
   if (event.key === '/' && !typing) { event.preventDefault(); if (matchMedia('(max-width:1050px)').matches) { app.classList.add('sidebar-open'); get('menu-toggle').setAttribute('aria-expanded', 'true'); } get('search').focus(); }
   if (event.key === 'Escape') {
     const menuOpen = app.classList.contains('sidebar-open');
@@ -474,6 +489,7 @@ try {
     get('graph-empty').hidden = count > 0;
     get('footer-count').textContent = `${count} / ${nodes.length} 个条目 · ${edges.length} 条关系`;
   }, selectRelation, { nodes, edges, groups }, clearOverviewSelection);
+  graph.configureEditing((edit,before,after)=>{void finishGraphGesture(edit,before,after).catch(reportProjectError);},!projectSnapshot?.historical);
   return graph;
 } catch (error) {
   get('graph-canvas').innerHTML = `<div class="webgl-error"><h2>当前浏览器未能启动三维画面</h2><p>可先在策划案或卡片库阅读，也可在支持 WebGL 的浏览器重试。</p><button class="secondary-button" data-view="document">打开策划案</button></div>`;
@@ -483,7 +499,8 @@ try {
 }
 
 /** 项目变化只更新读取模型；同拓扑正文编辑不重建画布或清空分析卡片。 */
-function applyProject(snapshot: ProjectSnapshot) {
+function applyProject(snapshot: ProjectSnapshot, projected=false) {
+  if(!projected&&editingSession)snapshot=editingSession.receive(snapshot);
   const sameProject = projectSnapshot?.project.id === snapshot.project.id;
   if (!sameProject || projectSnapshot?.revision !== snapshot.revision) readingTrail.length = 0;
   const relationId = state.relationIndex === null ? null : edges[state.relationIndex]?.id;
@@ -509,16 +526,17 @@ function applyProject(snapshot: ProjectSnapshot) {
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
   else if (snapshot.historical || !graph.updateText(snapshot)) graph.updateData(snapshot);
-  graph?.setActive(state.view === 'graph');
+  graph?.setActive(state.view === 'graph');graph?.setEditable(!snapshot.historical);
   if (nodes.length > 500) get('announcement').textContent = '大项目总览先展示系统和文档。选择系统、搜索或点击条目展开规则，也可在筛选中展开全部。';
   get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
   connectionError = '';
   updateSpaceNavigation(); sync(); refreshIcons();
   historyPanel.sync(snapshot);
-  if (!sameProject) { readingReady = false; void restoreReading().catch(reportProjectError); }
+  if (!sameProject) { readingReady = false; void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError); }
   (get('edit-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   (get('new-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   if (snapshot.historical) get('project-save-state').textContent = `${snapshot.revisionLabel} · 历史只读`;
+  renderEditingState();
 }
 
 /** 外部变化到来时只替换已读投影，正在编辑的原稿基准由工作面板独立保留。 */
@@ -528,20 +546,52 @@ async function refreshProject(verify = false) {
   const id = projectSnapshot.project.id, snapshot = await readProject(id, verify);
   if (projectSnapshot?.project.id !== id) return;
   if (snapshot.fingerprint !== projectSnapshot.fingerprint || snapshot.revision !== projectSnapshot.revision || snapshot.recoveryRequired !== projectSnapshot.recoveryRequired || JSON.stringify(snapshot.diagnostics) !== JSON.stringify(projectSnapshot.diagnostics)) applyProject(snapshot);
-  else get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
+  else if(!editingSession?.count)get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
 }
 function reportProjectError(error: unknown) { connectionError = error instanceof Error ? error.message : '本地项目操作未完成。'; get('project-save-state').textContent = connectionError; get('announcement').textContent = connectionError; renderInspector(); }
 
+editingSession=new EditingSession(snapshot=>applyProject(snapshot,true),message=>{get('project-save-state').textContent=message;get('announcement').textContent=message;renderEditingState();});
+if(projectSnapshot)editingSession.receive(projectSnapshot);
 const workbench = new ProjectWorkbench(() => projectSnapshot, applyProject);
+/** 结构草稿和正文保存共享同一个事务入口；布局始终只进入项目的私有工作区。 */
+const editBar=document.createElement('div');editBar.className='graph-draft-actions';editBar.id='graph-draft-actions';editBar.innerHTML='<button data-graph-command="undo" title="Ctrl+Z">撤销</button><button data-graph-command="redo" title="Ctrl+Y">重做</button><button data-graph-command="save" title="Ctrl+S">保存结构版本</button><button data-graph-command="reset-layout">自动排布</button><label><input id="shake-links" type="checkbox"/>晃动断开普通关联</label><span id="structure-state"></span>';document.querySelector('.space-intro')!.after(editBar);
+let canvasClipboard:{project:string;ids:string[];cut:boolean}|undefined;
+function renderEditingState(){const bar=document.getElementById('graph-draft-actions');if(!bar)return;bar.hidden=!projectSnapshot||!!projectSnapshot.historical;for(const id of ['edit-document','new-document','project-center','project-switch','project-history']){const control=document.getElementById(id) as HTMLButtonElement|null;if(control)control.disabled=!!editingSession?.busy||(['edit-document','new-document'].includes(id)&&!!projectSnapshot?.historical);}const count=editingSession?.count??0;get('structure-state').textContent=count?`${count} 份文档待保存`:state.mode==='galaxy'?'拖动仅调整摆放':'实线归属 · 虚线关联';for(const action of ['undo','redo','save']){const b=bar.querySelector<HTMLButtonElement>(`[data-graph-command="${action}"]`)!;b.disabled=action==='undo'?!editingSession?.canUndo:action==='redo'?!editingSession?.canRedo:!count;}const shake=bar.querySelector('label')!;shake.hidden=state.mode==='galaxy';if(count&&!projectSnapshot?.historical)get('project-save-state').textContent=`${count} 份文档有结构草稿 · Ctrl+S 保存版本`;}
+async function finishGraphGesture(edit:GraphEdit|undefined,before:unknown,after:unknown){
+  const current=graph,projectId=projectSnapshot?.project.id;if(!current||!editingSession)return;
+  const restore=(value:unknown)=>{if(graph===current&&projectSnapshot?.project.id===projectId){current.restoreEditingLayout(value);sync();}};
+  try{
+    if(edit?.kind==='connect'){const type=await chooseRelationType();if(!type){restore(before);return;}edit={...edit,type};}
+    if(edit?.kind==='insert'){const answer=await chooseAction('在普通关联中插入此条目',[{id:'insert',label:'替换为经过此条目的两条关联'},{id:'layout',label:'只调整摆放，保留原关联'}]);if(!answer){restore(before);return;}if(answer==='layout')edit=undefined;}
+    if(graph!==current||projectSnapshot?.project.id!==projectId)return;
+    if(edit)editingSession.apply(edit,()=>restore(before),()=>restore(after));else editingSession.layout(()=>restore(before),()=>restore(after));sync();
+  }catch(error){restore(before);throw error;}
+}
+async function graphCommand(command:string,id=state.selected){
+  if(!projectSnapshot||projectSnapshot.historical)return;let edit:GraphEdit|undefined;
+  const selected=id?[id]:graph?.selectedIds()??[],ids=id&&id!==state.selected?selected:graph?.selectedIds().length?graph.selectedIds():selected;
+  if(command==='selectAll'){graph?.selectAllNodes();return;}if(command==='search'){get('search').focus();return;}
+  if(command==='save'){try{await editingSession?.save();}finally{renderEditingState();}return;}if(command==='undo'){editingSession?.undo();sync();return;}if(command==='redo'){editingSession?.redo();sync();return;}
+  if(command==='reset-layout'){const before=graph?.exportLayout();graph?.resetPositions();const after=graph?.exportLayout();await finishGraphGesture(undefined,before,after);return;}
+  if(command==='classify')edit=await classifyDocuments(projectSnapshot,ids.filter(value=>nodeById.get(value)?.kind==='document'&&nodeById.get(value)?.documentType!=='gdd'));
+  if(command==='connect'&&id)edit=await connectDocuments(projectSnapshot,id);
+  if(command==='edge'&&state.relationIndex!==null)edit=await editEdge(projectSnapshot,edges[state.relationIndex].id);
+  if(command==='copy'||command==='cut'){const documents=[...new Set(ids.map(value=>nodeById.get(value)).filter(n=>n?.kind!=='system'&&n?.documentType!=='gdd').map(n=>n!.documentId))];if(!documents.length)return;canvasClipboard={project:projectSnapshot.project.id,ids:documents,cut:command==='cut'};await navigator.clipboard.writeText(documents.map(value=>nodeById.get(value)?.title??'').join('\n')).catch(()=>{});get('announcement').textContent=command==='cut'?'已剪切条目；选中目标分类后粘贴即可移动归属。':'已复制条目；在当前项目粘贴可创建独立副本。';return;}
+  if(command==='paste'&&canvasClipboard){if(canvasClipboard.project!==projectSnapshot.project.id)throw new Error('文档复制暂限当前项目，跨项目请使用导出与导入。');const group=nodeById.get(state.selected??'')?.group??state.group??'system-unassigned';edit=canvasClipboard.cut?{kind:'classify',ids:canvasClipboard.ids,group}:{kind:'clone',ids:canvasClipboard.ids,group};}
+  if(edit)editingSession?.apply(edit);
+}
+document.addEventListener('click',event=>{const b=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-command]');if(b)void graphCommand(b.dataset.graphCommand!).catch(reportProjectError);});
+get('shake-links').addEventListener('change',event=>graph?.setShake((event.target as HTMLInputElement).checked));
+window.addEventListener('cewen:editing-command',event=>{if(event.defaultPrevented||document.querySelector('dialog[open]')||document.activeElement?.matches('input,textarea,select,[contenteditable=true]'))return;const command=(event as CustomEvent<string>).detail;if(['save','undo','redo','cut','copy','paste','selectAll'].includes(command)){event.preventDefault();void graphCommand(command).catch(reportProjectError);}});
 /** 上下文菜单在当前画布旁出现；所有操作回到同一编辑与保存流程。 */
 const graphMenu=document.createElement('div');graphMenu.className='star-context-menu';graphMenu.hidden=true;graphMenu.setAttribute('aria-label','星图快捷操作');document.body.append(graphMenu);
 const closeGraphMenu=()=>{graphMenu.hidden=true;graph?.setContextMenuOpen(false);};
 function openGraphMenu(detail:{id?:string;x:number;y:number}){
   if(!projectSnapshot)return;const node=detail.id?nodeById.get(detail.id):undefined;
-  const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
+  const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['connect','添加手工关联'],['pin','固定 / 解除固定位置'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
   graphMenu.innerHTML=`<small>${escape(node?.title??'在星图中开始')}</small>${actions.map(([action,label])=>`<button data-star-action="${action}">${label}</button>`).join('')}`;graphMenu.hidden=false;
   graphMenu.style.left=`${Math.max(8,Math.min(detail.x,innerWidth-graphMenu.offsetWidth-8))}px`;graphMenu.style.top=`${Math.max(8,Math.min(detail.y,innerHeight-graphMenu.offsetHeight-8))}px`;graph?.setContextMenuOpen(true);
-  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'');break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'category-document':case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
+  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'');break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
   graphMenu.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
 }
 window.addEventListener('cewen:graph-context',event=>openGraphMenu((event as CustomEvent).detail));
@@ -577,7 +627,7 @@ async function restoreReading() {
 const collaborationPanel = new CollaborationPanel(() => projectSnapshot, applyProject);
 graph = mountGraph();
 sync();
-void restoreReading().catch(reportProjectError);
+void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
 refreshIcons();
 if (!projectSnapshot) void workbench.projects().catch(reportProjectError);
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
