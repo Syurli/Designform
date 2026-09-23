@@ -17,7 +17,7 @@ export function applyTheme(theme: Theme, notifyDesktop = true) {
   document.documentElement.dataset.theme = theme;
   document.documentElement.style.colorScheme = theme;
   try { localStorage.setItem('cewen-theme', theme); } catch { /* 禁止本地存储时主题仍立即生效。 */ }
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#080c18' : '#c7cfd5');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#171b20' : '#dedfdc');
   for (const image of document.querySelectorAll<HTMLImageElement>('[data-brand-icon]')) image.src = `${import.meta.env.BASE_URL}icons/cewen-${theme}.svg`;
   for (const link of document.querySelectorAll<HTMLLinkElement>('[data-theme-icon]')) link.href = `${import.meta.env.BASE_URL}icons/cewen-${theme}.svg`;
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]')) {

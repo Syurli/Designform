@@ -33,6 +33,27 @@ type LayoutTransition = {
   refocus: boolean; cards: Map<string, CardAppearance>; cardEdges: number[];
 };
 
+/** 镜头围绕目标插值：方向走最短弧，镜距始终大于控制器下限。 */
+function interpolateCamera(camera: THREE.Vector3, target: THREE.Vector3, from: THREE.Vector3, fromTarget: THREE.Vector3, to: THREE.Vector3, toTarget: THREE.Vector3, ratio: number) {
+  target.lerpVectors(fromTarget, toTarget, ratio);
+  const first = from.clone().sub(fromTarget);
+  const last = to.clone().sub(toTarget);
+  const distance = THREE.MathUtils.lerp(Math.max(first.length(), 150), Math.max(last.length(), 150), ratio);
+  const direction = first.lengthSq() > 1e-6 ? first.normalize() : new THREE.Vector3(0, 0, 1);
+  const destination = last.lengthSq() > 1e-6 ? last.normalize() : direction.clone();
+  const dot = THREE.MathUtils.clamp(direction.dot(destination), -1, 1);
+  if (dot < -.9995) {
+    // 对向视角没有唯一最短弧，固定辅助轴避免快切时随机翻转。
+    const axis = direction.clone().cross(new THREE.Vector3(0, 1, 0));
+    if (axis.lengthSq() < 1e-6) axis.set(1, 0, 0).cross(direction);
+    direction.applyAxisAngle(axis.normalize(), Math.PI * ratio);
+  } else {
+    const rotation = new THREE.Quaternion().setFromUnitVectors(direction, destination);
+    direction.applyQuaternion(new THREE.Quaternion().slerp(rotation, ratio));
+  }
+  camera.copy(target).addScaledVector(direction.normalize(), distance);
+}
+
 /** 用固定种子生成背景星点，使重新打开页面后的视觉位置保持稳定。 */
 function randomGenerator(seed: number) {
   return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
@@ -161,12 +182,15 @@ export class KnowledgeGraph {
     this.controls.maxDistance = 3400;
     this.controls.maxPolarAngle = Math.PI * .9;
     // 拖动只能接管镜头，节点继续完成变换，避免留下半三维、半分层的坐标。
-    this.controls.addEventListener('start', () => { if (this.transition) this.transition.cameraInterrupted = true; });
+    this.controls.addEventListener('start', () => {
+      if (this.transition) this.transition.cameraInterrupted = true;
+      this.controls.enableDamping = true;
+    });
     this.controls.addEventListener('change', () => { this.labelsDirty = true; });
     this.createBackground();
     const geometry = this.layout('galaxy');
     data.nodes.forEach(node => {
-      const color = data.groups.find(group => group.id === node.group)!.color;
+      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)!.color;
       const point = this.sprite(color, this.starSize(node), .98);
       const halo = this.sprite(color, this.starSize(node, true), .22);
       point.position.copy(geometry.get(node.id)!);
@@ -428,7 +452,7 @@ export class KnowledgeGraph {
   private selectEdge(id: string) { const index = this.data.edges.findIndex(edge => edge.id === id); if (index >= 0) this.selectRelation(index); }
 
   private createStar(node: KnowledgeNode, position: THREE.Vector3): StarNode {
-    const color = this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+    const color = node.id === this.coreId() ? '#CFB378' : node.color ?? this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
     const point = this.sprite(color, this.starSize(node), 0);
     const halo = this.sprite(color, this.starSize(node, true), 0);
     point.position.copy(position); halo.position.copy(position);
@@ -450,6 +474,7 @@ export class KnowledgeGraph {
 
   /** 数据版本沿用当前场景与镜头；新增从归属节点展开，删除保留到收拢完成。 */
   updateData(data: KnowledgeData) {
+    this.interaction?.flush();
     const previousCore=this.coreId();
     const before = new Map([...this.stars].map(([id, star]) => [id, star.data]));
     const from = new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()]));
@@ -476,7 +501,7 @@ export class KnowledgeGraph {
         star.label.querySelector('.analysis-card-meta')!.textContent=`${data.groups.find(group=>group.id===node.group)?.label??'未归组'} · ${{confirmed:'已确认',draft:'草稿',question:'待确认',archived:'已归档'}[node.status]}`;
       }else star.label.textContent = node.title;
       star.label.classList.toggle('version-changed', changed);
-      const color = data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
       star.point.userData.baseColor = star.halo.userData.baseColor = color;
       star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', categoryColor(color));
     }
@@ -494,6 +519,7 @@ export class KnowledgeGraph {
     this.transition = { start: performance.now(), duration: this.reduceMotion.matches ? 0 : this.mode === 'network' ? 360 : 850, from, to, cameraFrom: this.camera.position.clone(), cameraTo: this.camera.position.clone(), targetFrom: this.controls.target.clone(), targetTo: this.controls.target.clone(), cameraInterrupted: true, restoreOverview: false, analysisMorph: this.mode === 'network', appearance, lines, scaleFrom: this.currentScale, ambientFrom: this.ambient, refocus: false, cards: new Map(this.cardAppearance), cardEdges: [...this.cardEdgeOpacity] };
     // 第一份总纲出现时将新中心纳入视野；普通版本迭代继续保留用户镜头。
     if(previousCore!==this.coreId()&&this.mode==='galaxy') {const framing=this.framing(to);this.transition.cameraTo=framing.position;this.transition.targetTo=framing.target;this.transition.cameraInterrupted=false;}
+    this.controls.enableDamping=this.transition.cameraInterrupted;
     this.measureLabels(); this.advanceTransition(this.transition.start);
   }
 
@@ -687,6 +713,7 @@ export class KnowledgeGraph {
   /** 动画从当前屏幕位置出发；返回时使用保存的用户视角，不重新缩放到全图。 */
   setMode(mode: GraphMode, options: { restoreOverview?: boolean } = {}) {
     if (this.disposed) return;
+    this.interaction?.flush();
     if (this.versionChanging) this.clearRetired();
     const frame = this.navigationFrame ?? this.captureFrame() ?? this.lastValidFrame;
     this.mode = mode;
@@ -761,6 +788,8 @@ export class KnowledgeGraph {
       ambientFrom: frame?.ambient ?? this.ambient,
       refocus, cards: frame?.cards ?? new Map(), cardEdges: frame?.cardEdges ?? []
     };
+    // 程序控制镜头时暂停 OrbitControls 的残余惯性；用户接管后再恢复。
+    this.controls.enableDamping = false;
     this.container.classList.add('graph-transitioning');
     this.container.dataset.transition = refocus ? 'refocus-analysis' : mode === 'network' ? 'enter-analysis' : frame?.mode === 'network' ? 'leave-analysis' : 'layout';
     // 分析卡片采用固定像素布局，镜头抵达前暂不接收平移，避免停在错误阅读比例。
@@ -938,8 +967,9 @@ export class KnowledgeGraph {
     });
     this.selectionRing.scale.setScalar(58 * this.currentScale);
     if (!change.cameraInterrupted) {
-      this.camera.position.lerpVectors(change.cameraFrom, change.cameraTo, eased);
-      this.controls.target.lerpVectors(change.targetFrom, change.targetTo, eased);
+      interpolateCamera(this.camera.position, this.controls.target, change.cameraFrom, change.targetFrom, change.cameraTo, change.targetTo, eased);
+      // 立即同步朝向，连续快切时抓取的屏幕帧与本帧镜头保持一致。
+      this.camera.lookAt(this.controls.target);
     }
     this.ambient = THREE.MathUtils.lerp(change.ambientFrom, this.mode === 'galaxy' ? 1 : .24, eased);
     this.applyAppearance(ratio);
@@ -949,6 +979,7 @@ export class KnowledgeGraph {
     this.labelsDirty = true;
     if (ratio === 1) {
       this.transition = null;
+      this.controls.enableDamping = true;
       if (this.versionChanging) this.clearRetired();
       this.controls.enabled = true;
       this.controls.maxDistance = this.mode === 'network' ? 10000 : 3400;
@@ -1187,9 +1218,7 @@ export class KnowledgeGraph {
       this.transition.targetTo.copy(framing.target);
     }
     else if (!this.transition && (width !== this.previousSize.width || height !== this.previousSize.height)) {
-      const framing = this.framing(this.layout(this.mode));
-      this.camera.position.copy(framing.position);
-      this.controls.target.copy(framing.target);
+      // 侧栏开合只改变画布比例，保留用户正在使用的观察方向与缩放。
       this.controls.update();
     }
     this.previousSize = { width, height: this.container.clientHeight };
@@ -1207,6 +1236,12 @@ export class KnowledgeGraph {
     this.data = data;
     data.nodes.forEach(node => {
       const star = this.stars.get(node.id)!; star.data = node;
+      const color=node.id===this.coreId()?'#CFB378':node.color??data.groups.find(group=>group.id===node.group)?.color??'#94A5BC';
+      if(star.point.userData.baseColor!==color){
+        star.point.userData.baseColor=star.halo.userData.baseColor=color;
+        star.point.material.color.copy(this.graphColor(color));star.halo.material.color.copy(this.graphColor(color));
+        star.label.style.setProperty('--node-color',categoryColor(color,this.light));
+      }
       star.label.setAttribute('aria-label', `查看${node.title}`);
       if (star.label.classList.contains('analysis-card')) {
         star.label.querySelector('strong')!.textContent = node.title;

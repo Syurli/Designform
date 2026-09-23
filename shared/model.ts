@@ -53,6 +53,8 @@ export interface KnowledgeNode {
   anchor?: string;
   /** 文档类型来自 Markdown 头部，用于识别总纲；不按标题猜测核心。 */
   documentType?: ProjectDocument['type'];
+  /** 条目自定义颜色；未设置时由所属分类决定。 */
+  color?: string;
 }
 
 /** 边有独立稳定 ID；数组位置只允许作为当前绘图帧的临时索引。 */
@@ -85,6 +87,10 @@ export interface ProjectInfo {
   format: number;
   path: string;
   isExample: boolean;
+  /** 项目身份图标随 PROJECT.md 公开保存。 */
+  icon?: { kind: 'text' | 'symbol' | 'image'; value: string };
+  /** 可留空的项目共享备注。 */
+  notes?: string;
 }
 
 /** 解析诊断只描述实际问题，不在读取时自动重写用户文件。 */
@@ -106,6 +112,8 @@ export interface ProjectDocument {
   system: string;
   text: string;
   hash: string;
+  /** 文档自定义颜色；未设置时继承分类色。 */
+  color?: string;
 }
 
 /** 所有知识空间组件接收同一个显式数据对象。 */
@@ -133,6 +141,8 @@ export interface ProjectSnapshot extends KnowledgeData {
   revisionLabel?: string;
   /** 公开文件清单用于附件和完整恢复的并发校验。 */
   files?: Record<string, string>;
+  /** 受控公开排版和笔画文件；不作为 Markdown 正文解析。 */
+  companions?: Record<string, { text: string; hash: string }>;
 }
 
 /** 单个文件的乐观写入约束；null 表示创建且目标必须不存在。 */
@@ -230,5 +240,7 @@ export interface DocumentDraft {
   assets?: { path: string; text: string; encoding: 'base64' }[];
   /** 图谱编辑会话恢复包仍是私人草稿，正式内容提交使用普通文件批次。 */
   changes?: FileChange[];
+  /** 同一编辑会话尚未提交的公开伴随文件更改，仍保存在私人草稿中。 */
+  companions?: FileChange[];
   baseRevision?: string | null;
 }

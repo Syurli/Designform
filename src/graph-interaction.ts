@@ -23,7 +23,9 @@ export interface GraphSurface {
   clear:()=>void;
   commit:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void;
 }
-type Drag={id:string;pointer:number;x:number;y:number;mode:string;plane:THREE.Plane;anchor:THREE.Vector3;positions:Map<string,THREE.Vector3>;moving:Set<string>;before:unknown;port?:string;edge?:KnowledgeEdge;end?:'source'|'target';moved:boolean;target?:string;wire?:string;reversals:number;direction:number;lastX:number;lastTurn:number;targetPort?:string};
+type Follower={position:THREE.Vector3;velocity:THREE.Vector3;goal:THREE.Vector3};
+type Drag={id:string;pointer:number;x:number;y:number;mode:string;plane:THREE.Plane;anchor:THREE.Vector3;positions:Map<string,THREE.Vector3>;moving:Set<string>;followers:Map<string,Follower>;delta:THREE.Vector3;before:unknown;port?:string;edge?:KnowledgeEdge;end?:'source'|'target';moved:boolean;target?:string;wire?:string;reversals:number;direction:number;lastX:number;lastTurn:number;targetPort?:string};
+type Settling={drag:Drag;edit:GraphEdit|undefined;started:number};
 type BoxDrag={pointer:number;startX:number;startY:number;width:number;height:number;append:boolean;previous:Set<string>;base:Set<string>;moved:boolean};
 type ShiftNode={pointer:number;id:string;x:number;y:number;moved:boolean};
 
@@ -33,6 +35,10 @@ export class GraphInteraction {
   private preview=document.createElementNS('http://www.w3.org/2000/svg','svg');
   private path=document.createElementNS('http://www.w3.org/2000/svg','path');
   private drag?:Drag;
+  private settling?:Settling;
+  private motionFrame=0;
+  private lastMotion=0;
+  private reduceMotion=matchMedia('(prefers-reduced-motion: reduce)');
   private box?:BoxDrag;
   private shiftNode?:ShiftNode;
   private boxElement=document.createElement('div');
@@ -48,21 +54,24 @@ export class GraphInteraction {
     surface.container.append(this.overlay,this.preview,this.boxElement,this.feedback);
     surface.container.addEventListener('pointerdown',this.down,true);
     surface.container.addEventListener('click',this.click,true);
-    window.addEventListener('pointermove',this.move,true);window.addEventListener('pointerup',this.up,true);window.addEventListener('pointercancel',this.cancel);window.addEventListener('blur',this.cancel);
+    window.addEventListener('pointermove',this.move,true);window.addEventListener('pointerup',this.up,true);window.addEventListener('pointercancel',this.cancel);window.addEventListener('blur',this.blur);
     window.addEventListener('keydown',this.keydown,true);
   }
   setEditable(value:boolean){this.enabled=value;if(!value)this.cancel();this.signature='';this.update();}
+  /** 导航前完成待收敛手势，防止随后把旧模式坐标写进新模式布局。 */
+  flush(){if(this.drag||this.box)this.cancel();else this.finishSettling();}
   selectAll(){this.multi=new Set(this.surface.nodes().filter(n=>n.visible&&n.data.kind!=='system'&&n.data.id!==this.surface.core()).map(n=>n.data.id));this.update();}
   selectedIds(){const visible=new Set(this.surface.nodes().filter(n=>n.visible).map(n=>n.data.id));const multi=[...this.multi].filter(id=>visible.has(id));return multi.length?multi:this.surface.selected()&&visible.has(this.surface.selected()!)?[this.surface.selected()!]:[];}
   private screen(point:THREE.Vector3){const p=point.clone().project(this.surface.camera),box=this.surface.container.getBoundingClientRect();return{x:(p.x+1)*box.width/2,y:(1-p.y)*box.height/2,z:p.z};}
   private world(event:PointerEvent,plane:THREE.Plane){const box=this.surface.container.getBoundingClientRect(),ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2((event.clientX-box.left)/box.width*2-1,-(event.clientY-box.top)/box.height*2+1),this.surface.camera);return ray.ray.intersectPlane(plane,new THREE.Vector3());}
-  private hit(x:number,y:number,exclude?:string|Set<string>){
+  private hit(x:number,y:number,exclude?:string|Set<string>,stable?:Map<string,THREE.Vector3>){
     const box=this.surface.container.getBoundingClientRect();
-    return this.surface.nodes().filter(n=>n.visible&&!(typeof exclude==='string'?n.data.id===exclude:exclude?.has(n.data.id))).map(n=>{const r=n.label.getBoundingClientRect(),p=this.screen(n.point);return{n,d:p.z>=-1&&p.z<=1?Math.hypot(p.x+box.left-x,p.y+box.top-y):Infinity,inside:!n.label.hidden&&x>=r.left-8&&x<=r.right+8&&y>=r.top-8&&y<=r.bottom+8};}).filter(item=>item.inside||item.d<18).sort((a,b)=>Number(b.inside)-Number(a.inside)||a.d-b.d)[0]?.n;
+    return this.surface.nodes().filter(n=>n.visible&&!(typeof exclude==='string'?n.data.id===exclude:exclude?.has(n.data.id))).map(n=>{const r=n.label.getBoundingClientRect(),p=this.screen(stable?.get(n.data.id)??n.point),live=this.screen(n.point),shiftX=p.x-live.x,shiftY=p.y-live.y;return{n,d:p.z>=-1&&p.z<=1?Math.hypot(p.x+box.left-x,p.y+box.top-y):Infinity,inside:!n.label.hidden&&x>=r.left+shiftX-8&&x<=r.right+shiftX+8&&y>=r.top+shiftY-8&&y<=r.bottom+shiftY+8};}).filter(item=>item.inside||item.d<18).sort((a,b)=>Number(b.inside)-Number(a.inside)||a.d-b.d)[0]?.n;
   }
   private notice(text:string){this.feedback.textContent=text;this.feedback.hidden=!text;}
   private click=(event:MouseEvent)=>{if(this.blockClick){event.preventDefault();event.stopImmediatePropagation();this.blockClick=false;}else if(event.shiftKey){const id=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]')?.dataset.graphNode;if(id&&this.surface.nodes().some(n=>n.data.id===id&&n.visible&&!n.label.hidden)){event.preventDefault();event.stopImmediatePropagation();if(!this.multi.size&&this.surface.selected())this.multi.add(this.surface.selected()!);this.multi.has(id)?this.multi.delete(id):this.multi.add(id);this.update();}}};
   private down=(event:PointerEvent)=>{
+    this.finishSettling();
     if(!this.enabled||!event.isPrimary||event.button!==0||document.querySelector('dialog[open]'))return;
     const port=(event.target as HTMLElement).closest<HTMLElement>('[data-port]');
     const label=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]');
@@ -96,7 +105,7 @@ export class GraphInteraction {
     moving.delete(this.surface.core()??'');
     if(this.surface.mode()==='galaxy'&&node.data.kind==='system')this.surface.nodes().filter(n=>n.data.group===node.data.group&&n.data.id!==this.surface.core()&&!n.pinned).forEach(n=>moving.add(n.data.id));
     if(this.surface.mode()==='galaxy')moving.delete(this.surface.core()??'');
-    this.drag={id:id!,pointer:event.pointerId,x:event.clientX,y:event.clientY,mode:this.surface.mode(),plane,anchor,positions,moving,before:this.surface.capture(),port:port?.dataset.port,edge:port?.dataset.end?edge:undefined,end:port?.dataset.end as 'source'|'target'|undefined,moved:false,reversals:0,direction:0,lastX:event.clientX,lastTurn:performance.now()};
+    this.drag={id:id!,pointer:event.pointerId,x:event.clientX,y:event.clientY,mode:this.surface.mode(),plane,anchor,positions,moving,followers:new Map(),delta:new THREE.Vector3(),before:this.surface.capture(),port:port?.dataset.port,edge:port?.dataset.end?edge:undefined,end:port?.dataset.end as 'source'|'target'|undefined,moved:false,reversals:0,direction:0,lastX:event.clientX,lastTurn:performance.now()};
   };
   private move=(event:PointerEvent)=>{
     if(this.shiftNode&&this.shiftNode.pointer===event.pointerId){if(Math.hypot(event.clientX-this.shiftNode.x,event.clientY-this.shiftNode.y)>6)this.shiftNode.moved=true;return;}
@@ -107,7 +116,7 @@ export class GraphInteraction {
     drag.moved=true;event.preventDefault();event.stopImmediatePropagation();
     const point=this.world(event,drag.plane);if(!point)return;
     const hoverPort=document.elementsFromPoint(event.clientX,event.clientY).map(e=>e.closest<HTMLElement>('[data-port]')).find(e=>e&&e.dataset.node!==drag.id);
-    const target=hoverPort?this.surface.nodes().find(n=>n.data.id===hoverPort.dataset.node):this.hit(event.clientX,event.clientY,drag.moving);drag.target=target?.data.id;drag.targetPort=hoverPort?.dataset.port;drag.wire=undefined;
+    const target=hoverPort?this.surface.nodes().find(n=>n.data.id===hoverPort.dataset.node):this.hit(event.clientX,event.clientY,drag.moving,drag.positions);drag.target=target?.data.id;drag.targetPort=hoverPort?.dataset.port;drag.wire=undefined;
     this.surface.nodes().forEach(n=>{n.label.classList.toggle('graph-drop-target',n.data.id===drag.target);n.label.classList.toggle('graph-dragging',drag.moving.has(n.data.id));});
     if(drag.port){
       const origin=this.screen(drag.positions.get(drag.edge?(drag.end==='source'?drag.edge.target:drag.edge.source):drag.id)!),box=this.surface.container.getBoundingClientRect();
@@ -121,20 +130,25 @@ export class GraphInteraction {
       const ceiling=[...drag.moving].map(id=>{const item=this.surface.nodes().find(n=>n.data.id===id)?.data,start=drag.positions.get(id);return item&&start?(item.kind==='system'?-105:-210)-start.y:Infinity;});
       delta.y=Math.min(delta.y,...ceiling);
     }
-    // 每帧从按下快照计算，邻居只在局部受影响，避免拖动产生不断扩散的漂移。
-    for(const [id,start] of drag.positions)this.surface.move(id,drag.moving.has(id)?start.clone().add(delta):start);
-    const moved=this.surface.nodes().filter(n=>drag.moving.has(n.data.id));
-    for(const n of this.surface.nodes())if(n.visible&&!n.pinned&&!drag.moving.has(n.data.id)&&n.data.id!==this.surface.core()&&n.data.kind!=='system'){
-      for(const other of moved){const a=this.screen(n.point),b=this.screen(other.point),dx=a.x-b.x,dy=a.y-b.y;const distance=Math.hypot(dx,dy),radius=drag.mode==='network'?120:58;
-        if(distance<radius){const offset=n.point.clone().sub(other.point);if(offset.lengthSq()<.1)offset.set(1,.5,0);if(drag.mode!=='galaxy')offset.z=0;n.point.add(offset.normalize().multiplyScalar((radius-distance)*.8));if(drag.mode==='layers')n.point.y=Math.min(n.point.y,-210);this.surface.move(n.data.id,n.point);}
-      }
-    }
+    // 主拖节点直接取手势位置；多选共用一个位移，保证所选形状不变。
+    drag.delta.copy(delta);
+    for(const id of drag.moving){const start=drag.positions.get(id);if(start)this.surface.move(id,start.clone().add(delta));}
+    this.updateFollowerGoals(drag);
+    if(this.reduceMotion.matches)drag.followers.forEach((follower,id)=>{follower.position.copy(follower.goal);this.surface.move(id,follower.position);});
+    else this.scheduleMotion();
     if(drag.mode==='galaxy'){this.notice('调整摆放 · 不修改分类和关系');return;}
     if(drag.targetPort==='connect'){this.notice('松开：将节点接入此关联端口');return;}
     if(target?.data.kind==='system'){this.notice(`松开：将文档归入「${target.data.title}」`);return;}
     // 仅普通手工关联提供插线候选；依赖与正文引用不能凭位置推断新语义。
     const box=this.surface.container.getBoundingClientRect();
-    for(const wire of this.surface.edges())if(wire.data.origin?.kind==='manual'&&wire.data.type==='relates'&&wire.data.source!==drag.id&&wire.data.target!==drag.id&&wire.points.some(p=>{const q=this.screen(p);return Math.hypot(q.x+box.left-event.clientX,q.y+box.top-event.clientY)<12;})){drag.wire=wire.data.id;break;}
+    for(const wire of this.surface.edges())if(wire.data.origin?.kind==='manual'&&wire.data.type==='relates'&&wire.data.source!==drag.id&&wire.data.target!==drag.id){
+      // 语义命中采用按下时稳定的线端，邻居弹性位移不能把线带到指针下面。
+      const source=drag.positions.get(wire.data.source),target=drag.positions.get(wire.data.target);
+      if(!source||!target)continue;
+      const a=this.screen(source),b=this.screen(target),vx=b.x-a.x,vy=b.y-a.y;
+      const t=THREE.MathUtils.clamp(((event.clientX-box.left-a.x)*vx+(event.clientY-box.top-a.y)*vy)/Math.max(vx*vx+vy*vy,1),0,1);
+      if(Math.hypot(a.x+vx*t+box.left-event.clientX,a.y+vy*t+box.top-event.clientY)<12){drag.wire=wire.data.id;break;}
+    }
     const dx=event.clientX-drag.lastX,now=performance.now();
     if(this.shake&&Math.abs(dx)>20){const direction=Math.sign(dx);if(now-drag.lastTurn>900)drag.reversals=0;if(drag.direction&&direction!==drag.direction){drag.reversals++;drag.lastTurn=now;}drag.direction=direction;drag.lastX=event.clientX;}
     this.notice(drag.wire?'松开：选择是否插入这条普通关联':this.shake&&drag.reversals>=3?'松开：断开此节点的普通手工关联（保留分类与正文链接）':'调整摆放 · 拖到分类标题可改归属');
@@ -166,8 +180,59 @@ export class GraphInteraction {
       else if(!drag.port&&this.shake&&drag.reversals>=3){const edgeIds=this.surface.edges().filter(w=>w.data.origin?.kind==='manual'&&w.data.type==='relates'&&(w.data.source===drag.id||w.data.target===drag.id)).map(w=>w.data.id);if(edgeIds.length)edit={kind:'disconnect',edgeIds};}
     }
     if(drag.port&&!edit)return;
-    const after=this.surface.record();this.surface.commit(edit,drag.before,after);
+    if(drag.followers.size&&!this.reduceMotion.matches){
+      this.settling={drag,edit,started:performance.now()};
+      // 松手后邻居短暂回到受限目标，再将整次手势写成一条撤销记录。
+      drag.followers.forEach((follower,id)=>{const start=drag.positions.get(id);if(start)follower.goal.copy(start).add(follower.position.clone().sub(start).multiplyScalar(.65));});
+      this.scheduleMotion();
+    }else this.commitDrag(drag,edit);
   };
+  /** 只让当前布局中的局部邻居响应；分类/包含边较强，普通关联不传播位移。 */
+  private updateFollowerGoals(drag:Drag){
+    const nodes=this.surface.nodes(),moving=nodes.filter(node=>drag.moving.has(node.data.id));
+    const related=new Set(this.surface.edges().filter(edge=>edge.data.origin?.kind==='classification'||edge.data.type==='contains').flatMap(edge=>drag.moving.has(edge.data.source)?[edge.data.target]:drag.moving.has(edge.data.target)?[edge.data.source]:[]));
+    for(const node of nodes){
+      const id=node.data.id,start=drag.positions.get(id);
+      if(!start||!node.visible||node.pinned||drag.moving.has(id)||id===this.surface.core()||node.data.kind==='system')continue;
+      const nearest=Math.min(...moving.map(other=>start.distanceTo(other.point)));
+      if(!related.has(id)&&nearest>230&&!drag.followers.has(id))continue;
+      let follower=drag.followers.get(id);
+      if(!follower){follower={position:node.point.clone(),velocity:new THREE.Vector3(),goal:start.clone()};drag.followers.set(id,follower);}
+      const offset=related.has(id)?drag.delta.clone().multiplyScalar(.2):new THREE.Vector3();
+      for(const other of moving){const difference=start.clone().add(offset).sub(other.point),distance=difference.length();if(distance<90){if(distance<.01)difference.set(1,.5,0);offset.addScaledVector(difference.normalize(),(90-distance)*.55);}}
+      if(drag.mode!=='galaxy')offset.z=0;
+      offset.clampLength(0,95);
+      follower.goal.copy(start).add(offset);
+      if(drag.mode==='layers')follower.goal.y=Math.min(follower.goal.y,-210);
+    }
+  }
+  /** 固定时间上限防止回到窗口时积累巨大步长，速度和位移都有限幅。 */
+  private tickMotion=(now:number)=>{
+    this.motionFrame=0;
+    const drag=this.drag??this.settling?.drag;
+    if(!drag||!drag.followers.size){this.lastMotion=0;return;}
+    const dt=this.lastMotion?Math.min((now-this.lastMotion)/1000,.033):1/60;this.lastMotion=now;
+    let energy=0;
+    for(const [id,follower] of drag.followers){
+      const acceleration=follower.goal.clone().sub(follower.position).multiplyScalar(125);
+      follower.velocity.addScaledVector(acceleration,dt).multiplyScalar(Math.exp(-15*dt)).clampLength(0,380);
+      follower.position.addScaledVector(follower.velocity,dt);
+      const start=drag.positions.get(id)!;
+      follower.position.sub(start).clampLength(0,100).add(start);
+      if(drag.mode==='layers')follower.position.y=Math.min(follower.position.y,-210);
+      energy=Math.max(energy,follower.position.distanceTo(follower.goal),follower.velocity.length()*.02);
+      this.surface.move(id,follower.position);
+    }
+    if(this.settling&&(energy<.4||now-this.settling.started>420)){this.finishSettling();return;}
+    this.scheduleMotion();
+  };
+  private scheduleMotion(){if(!this.motionFrame)this.motionFrame=requestAnimationFrame(this.tickMotion);}
+  private commitDrag(drag:Drag,edit:GraphEdit|undefined){const after=this.surface.record();this.surface.commit(edit,drag.before,after);}
+  private finishSettling(){
+    const settling=this.settling;if(!settling)return;
+    this.settling=undefined;this.lastMotion=0;
+    this.commitDrag(settling.drag,settling.edit);
+  }
   /** 框选统一使用画布局部坐标，标签和星点取并集，过滤不可见及转场节点。 */
   private boxCandidates(left:number,top:number,right:number,bottom:number){
     const bounds=this.surface.container.getBoundingClientRect();
@@ -205,7 +270,8 @@ export class GraphInteraction {
     this.update();
   }
   private clean(){this.notice('');this.preview.style.display='none';this.surface.nodes().forEach(n=>n.label.classList.remove('graph-drop-target','graph-dragging'));this.signature='';this.update();}
-  private cancel=()=>{this.shiftNode=undefined;if(this.box){this.multi=this.box.previous;this.box=undefined;this.boxElement.hidden=true;this.surface.end();this.update();}const drag=this.drag;if(!drag)return;this.drag=undefined;this.surface.restore(drag.before);this.surface.end();this.clean();};
+  private cancel=()=>{this.shiftNode=undefined;if(this.box){this.multi=this.box.previous;this.box=undefined;this.boxElement.hidden=true;this.surface.end();this.update();}const drag=this.drag??this.settling?.drag;if(!drag)return;this.drag=undefined;this.settling=undefined;if(this.motionFrame)cancelAnimationFrame(this.motionFrame);this.motionFrame=0;this.lastMotion=0;this.surface.restore(drag.before);this.surface.end();this.clean();};
+  private blur=()=>{if(this.drag||this.box)this.cancel();else this.finishSettling();};
   private keydown=(event:KeyboardEvent)=>{if(event.key==='Escape'&&(this.drag||this.box||this.shiftNode)){event.preventDefault();event.stopImmediatePropagation();this.cancel();}};
   /** 端口与相应卡片边缘同步投影，过渡中隐藏，避免端口先于卡片跳位。 */
   update(){
@@ -221,5 +287,5 @@ export class GraphInteraction {
     this.overlay.querySelectorAll<HTMLElement>('[data-port]').forEach(port=>{const n=this.surface.nodes().find(n=>n.data.id===port.dataset.node);if(!n){port.hidden=true;return;}const r=n.label.getBoundingClientRect(),p=this.screen(n.point);port.hidden=transition||!n.visible;port.style.left=`${!n.label.hidden?r.right-box.left+14:p.x+20}px`;port.style.top=`${!n.label.hidden?(r.top+r.bottom)/2-box.top:p.y}px`;if(port.dataset.port==='classify'){port.style.left=`${!n.label.hidden?(r.left+r.right)/2-box.left:p.x}px`;port.style.top=`${!n.label.hidden?r.top-box.top-14:p.y-20}px`;}});
     this.surface.nodes().forEach(n=>n.label.classList.toggle('graph-multi-selected',this.multi.has(n.data.id)));
   }
-  dispose(){this.cancel();this.surface.container.removeEventListener('pointerdown',this.down,true);this.surface.container.removeEventListener('click',this.click,true);window.removeEventListener('pointermove',this.move,true);window.removeEventListener('pointerup',this.up,true);window.removeEventListener('pointercancel',this.cancel);window.removeEventListener('blur',this.cancel);window.removeEventListener('keydown',this.keydown,true);this.overlay.remove();this.preview.remove();this.boxElement.remove();this.feedback.remove();}
+  dispose(){this.cancel();this.surface.container.removeEventListener('pointerdown',this.down,true);this.surface.container.removeEventListener('click',this.click,true);window.removeEventListener('pointermove',this.move,true);window.removeEventListener('pointerup',this.up,true);window.removeEventListener('pointercancel',this.cancel);window.removeEventListener('blur',this.blur);window.removeEventListener('keydown',this.keydown,true);this.overlay.remove();this.preview.remove();this.boxElement.remove();this.feedback.remove();}
 }

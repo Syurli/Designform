@@ -2,11 +2,19 @@
 
 应用、文档格式、接口协议分别编号。当前文档格式与协议均为 1。问题与提案包都使用 UTF-8 JSON；软件内“资料交换”可以接收。
 
-读取入口：`PROJECT.md` → `docs/gdd/` → 所需 `docs/dd/` 与 `docs/questions/`。项目目录与工具安装目录分离。工作区布局、私人批注不属于公开正文。
+读取入口：`PROJECT.md` → `docs/gdd/` → 所需 `docs/dd/` 与 `docs/questions/`。涉及该文档的画布布局、对白节点摆放或项目共享注释时，再读取 `docs/layouts/<文档ID>.json`、`docs/annotations/<文档ID>.md` 和 `.ink.json`；缺少伴随文件表示尚未建立对应公开布局或注释，不影响 Markdown 正文。项目目录与工具安装目录分离。`.cewen/` 的个人布局、私人批注与未保存草稿不属于公开正文。
 
 0.4 的设计分类在 `PROJECT.md` 头部 `systems` 中登记，每项为稳定 `id`、`title`、十六进制 `color`，数组顺序为展示顺序。DD 的 `system` 引用该身份。`systems` 存在时（包括空数组）即为权威来源；缺少该字段才读取旧 GDD 的同名字段。分类首次编辑会将当前登记迁到 PROJECT.md，设置 `minimumAppVersion: 0.4.0`，清除当前 GDD 中的重复登记；历史不修改。分类不生成空 DD；删除分类要明确成员去向并同批更新文档。
 
 写作界面默认隐藏文件头，但公开文件仍保留必要身份。新稿与临时附件在正式保存前属于私人草稿；不得把 `.cewen/drafts` 当成已确认策划。保存时正文、附件和新增分类一起产生一个版本。
+
+## 统一文档的设计块与伴随文件（0.6）
+
+对白与色板写在原 GDD/DD 的 `cewen-dialogue`、`cewen-palette` fenced YAML 设计块中，图片与参考仍引用 `docs/assets/`；不另建图片、对白、色板或参考文档。对白正文预览可点选项，独立编辑页操作同一设计块。对话跳转只由 `to`、`next`、`then`、`else`、`target` 等显式字段决定，不从节点坐标或 YAML 顺序推断。色板的正式颜色与源图提取候选分开，不能臆造取色面积。
+
+设计块与其中节点、选项、色标的 `id` 是稳定身份，文字、布局或颜色变化时保留。公开 `docs/layouts/<文档ID>.json` 只保存块/对白节点的位置、尺寸与层级，不复制台词或正文；`docs/annotations/<文档ID>.ink.json` 保存项目共享笔画、文本、箭头及锚点，`docs/annotations/<文档ID>.md` 保存共享讨论说明。私人注释默认不进入这些路径。完整字段参见项目或软件附带的 [设计块协议](../../../../docs/protocol/DESIGN_BLOCKS_0.6.md)与[公开伴随文件协议](../../../../docs/protocol/DOCUMENT_COMPANIONS_0.6.md)。桌面发行包内对应路径为 `resources/integration/protocol/DESIGN_BLOCKS_0.6.md` 与 `DOCUMENT_COMPANIONS_0.6.md`（相对于本文件是 `../../../protocol/`）；按实际安装形态定位，不猜字段。
+
+公开伴随文件与正文同批提交并带文件哈希，版本恢复产生新修订。模型先确认当前修订及文件基准，只修改用户授权的范围；预演状态、候选配色和私人注释不自动写进正式规则。
 
 ## 问询包
 

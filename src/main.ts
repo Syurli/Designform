@@ -5,6 +5,12 @@ import './theme.css';
 import './shell.css';
 import './authoring.css';
 import './creation-editing.css';
+import './workspace-060.css';
+import { setNotebookTexture } from './notebook-style';
+import { openProjectDetails, projectIdentity } from './project-details';
+import { openContentOverview } from './content-overview';
+import { ProjectDirectory } from './project-directory';
+import { mountDocumentPresentation } from './document-presentation';
 import { EditingSession } from './editing-session';
 import type { GraphEdit } from '../shared/graph-editing';
 import { chooseAction, chooseRelationType, classifyDocuments, connectDocuments, editEdge } from './relation-editing';
@@ -77,10 +83,10 @@ app.innerHTML = `
     <div class="application-actions"><button class="llm-connection" id="llm-connection" aria-label="LLM 连接状态"><span class="connection-dot"></span><span><strong>正在检查连接</strong><small>LLM 协作</small></span></button><button class="theme-toggle icon-button" data-theme-toggle aria-label="切换浅色主题"></button></div>
   </header>
   <button class="sidebar-scrim" id="sidebar-scrim" aria-label="收起项目目录"></button>
-  <aside class="sidebar" aria-label="当前项目文档目录">
-    <button class="icon-button sidebar-close" id="sidebar-close" aria-label="关闭系统目录">${icon('x')}</button>
+  <aside class="sidebar" id="project-sidebar" aria-label="当前项目文档目录">
+    <button class="icon-button sidebar-close" id="sidebar-close" aria-label="收起项目面板" title="收起项目面板">${icon('panel-left')}</button>
     <div class="project-label">当前项目</div>
-    <button class="project project-opener" id="project-switch" aria-label="切换当前项目"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
+    <button class="project project-opener" id="project-switch" aria-label="当前项目设置"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
     <label class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索标题、规则…" autocomplete="off" aria-label="搜索策划内容"/><kbd>/</kbd></label>
     <details class="system-filter"><summary><span id="system-filter-label">全部系统</span><small><span id="system-count">${groups.length}</span> 个系统</small></summary>
     <div class="system-list">
@@ -88,6 +94,7 @@ app.innerHTML = `
       ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
     </div>
     </details>
+    <div class="project-directory-host" id="project-directory-host"></div>
     <details class="reading-options"><summary>筛选与阅读记录</summary><button id="toggle-archived">显示已归档内容</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>大型图谱展开全部规则</label><button id="recent-reading">最近浏览</button><button id="save-reading-view">保存当前阅读视图</button><button id="reset-reading-filters">清除所有筛选</button></details>
     <div class="sidebar-section entry-heading"><span id="entry-heading">策划条目</span><span id="entry-count"></span></div>
     <div id="node-directory" class="node-directory" aria-label="可选择的策划条目"></div>
@@ -96,7 +103,7 @@ app.innerHTML = `
   <div class="workspace">
     <header class="topbar">
       <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
-      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document">编辑</button><span></span><button class="secondary-button" id="project-history">版本</button><button class="secondary-button" id="organize-project">整理</button><button class="secondary-button" id="project-inquiry">问询</button><button class="secondary-button" id="project-exchange">交换</button><button class="sample-tag" id="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
+      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document">编辑</button><span></span><button class="secondary-button" id="project-statistics">统计</button><button class="secondary-button" id="project-history">版本</button><button class="secondary-button" id="organize-project">整理</button><button class="secondary-button" id="project-inquiry">问询</button><button class="secondary-button" id="project-exchange">交换</button><button class="sample-tag" id="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
     </header>
     <main class="work-area">
       <section class="graph-view" id="graph-view" aria-label="知识空间">
@@ -125,13 +132,30 @@ app.innerHTML = `
 
 mountDesktopChrome();
 await initializeTheme();
+setNotebookTexture();
 
 let graph: KnowledgeGraph | undefined;
+let projectDirectory: ProjectDirectory | undefined;
 let editingSession:EditingSession|undefined;
 let readingReady = false;
 let readingTimer: ReturnType<typeof setTimeout> | undefined;
 let recentNodes: string[] = [];
 const get = (id: string) => document.getElementById(id)!;
+/** 用户决定目录显隐；分辨率只决定并排还是抽屉，不覆盖已保存选择。 */
+let sidebarExpanded = !matchMedia('(max-width:1050px)').matches;
+try { const saved = localStorage.getItem('cewen-sidebar-expanded'); if (saved !== null) sidebarExpanded = saved === 'true'; } catch { /* 存储不可用时保留当前会话选择。 */ }
+function setSidebarExpanded(expanded: boolean) {
+  sidebarExpanded = expanded;
+  app.classList.toggle('sidebar-open', expanded);
+  app.classList.toggle('sidebar-collapsed', !expanded);
+  get('project-sidebar').inert = !expanded;
+  get('menu-toggle').setAttribute('aria-expanded', String(expanded));
+  get('menu-toggle').setAttribute('aria-controls', 'project-sidebar');
+  get('menu-toggle').setAttribute('aria-label', expanded ? '收起项目面板' : '展开项目面板');
+  get('menu-toggle').title = `${expanded ? '收起' : '展开'}项目面板 · Ctrl + \\`;
+  try { localStorage.setItem('cewen-sidebar-expanded', String(expanded)); } catch { /* 偏好不影响文档保存。 */ }
+}
+setSidebarExpanded(sidebarExpanded);
 const connectionPanel = new ConnectionPanel(get('llm-connection') as HTMLButtonElement, () => projectSnapshot);
 /** 目录展开状态按项目保留在本次阅读中，不修改任何策划文档。 */
 const directoryExpansion = new Map<string, Set<string>>();
@@ -171,6 +195,7 @@ function renderAnalysisControls() {
 }
 
 function renderDirectory() {
+  if(projectDirectory){projectDirectory.render();return;}
   const visible = filteredNodes().filter(node => node.kind !== 'system');
   const key = projectSnapshot?.project.id ?? '', expanded = directoryExpansion.get(key) ?? new Set(nodes.filter(node => node.documentType === 'gdd').map(node => node.id));
   directoryExpansion.set(key, expanded);
@@ -244,19 +269,22 @@ function renderInspector() {
   refreshIcons();
 }
 
+let readingDisposers:(()=>void)[]=[];
 function renderReading() {
+  readingDisposers.forEach(dispose=>dispose());readingDisposers=[];
   closeReadingPreview();
   const visible = filteredNodes();
   const selected = state.selected ? nodeById.get(state.selected) : undefined;
   const ids = new Set((selected ? [selected] : visible).map(node => node.documentId));
   const documents = projectSnapshot?.documents.filter(document => ids.has(document.id)).sort((a, b) => Number(b.type === 'gdd') - Number(a.type === 'gdd')) ?? [];
-  get('reading-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN DOCUMENTS</span><h1>${selected ? escape(selected.title) : escape(projectSnapshot?.project.name ?? '未命名项目') + ' · 策划案'}</h1><p>${projectSnapshot?.historical ? `${projectSnapshot.revisionLabel} · 历史策划` : '从设计正文开始阅读，悬停带下划线的词语可预览相关设计。'}</p><div class="reading-navigation">${readingTrail.length ? `<button class="text-button" id="reading-back">${icon('arrow-left')}返回上一处</button>` : ''}${selected ? `<button class="text-button" id="read-all">返回策划案总览</button>` : ''}</div></header><div class="document-content">${documents.map(document => `<article class="document-section" id="doc-${document.id}"><div class="markdown-preview">${projectMarkdown(document, projectSnapshot!)}</div><footer class="document-reading-footer"><div class="document-source">${escape(document.path)}</div><button class="text-button" data-locate="${document.id}">${icon('network')}在关系网中定位${icon('arrow-up-right')}</button></footer></article>`).join('') || '<div class="reading-empty">没有找到匹配文档。可以新建一份 GDD 或 DD。</div>'}</div>`;
+  get('reading-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN DOCUMENTS</span><h1>${selected ? escape(selected.title) : escape(projectSnapshot?.project.name ?? '未命名项目') + ' · 策划案'}</h1><p>${projectSnapshot?.historical ? `${projectSnapshot.revisionLabel} · 历史策划` : '从设计正文开始阅读，悬停带下划线的词语可预览相关设计。'}</p><div class="reading-navigation">${readingTrail.length ? `<button class="text-button" id="reading-back">${icon('arrow-left')}返回上一处</button>` : ''}${selected ? `<button class="text-button" id="read-all">返回策划案总览</button>` : ''}</div></header><div class="document-content">${documents.map(document => `<article class="document-section" id="doc-${document.id}"><div class="document-presentation-host"></div><footer class="document-reading-footer"><div class="document-source">${escape(document.path)}</div><button class="text-button" data-locate="${document.id}">${icon('network')}在关系网中定位${icon('arrow-up-right')}</button></footer></article>`).join('') || '<div class="reading-empty">没有找到匹配文档。可以新建一份 GDD 或 DD。</div>'}</div>`;
+  for(const doc of documents){const host=get('reading-view').querySelector<HTMLElement>(`#doc-${CSS.escape(doc.id)} .document-presentation-host`)!;readingDisposers.push(mountDocumentPresentation(host,doc,projectSnapshot!,{onEdit:()=>{void workbench.edit(doc.id).catch(reportProjectError);}}));}
   refreshIcons();
 }
 
 function renderCards() {
   const visible = filteredNodes();
-  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${categoryColor(groupOf(node).color)}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
+  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${categoryColor(node.color??groupOf(node).color)}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
   refreshIcons();
 }
 
@@ -285,8 +313,6 @@ function selectNode(id: string) {
   if (state.group && nodeById.get(id)!.group !== state.group) state.group = null;
   state.query = '';
   (get('search') as HTMLInputElement).value = '';
-  app.classList.remove('sidebar-open');
-  get('menu-toggle').setAttribute('aria-expanded', 'false');
   sync(!refocusing);
   if (refocusing) {
     get('graph-view').scrollTo({ top: 0, behavior: 'instant' });
@@ -307,8 +333,6 @@ function clearOverviewSelection() {
 
 /** 导航批量更新时先恢复页面尺寸，延后场景同步，由后续 setMode 一次完成过渡。 */
 function setView(view: View, deferGraph = false) {
-  app.classList.remove('sidebar-open');
-  get('menu-toggle').setAttribute('aria-expanded', 'false');
   state.view = view;
   get('graph-view').hidden = view !== 'graph';
   get('reading-view').hidden = view !== 'document';
@@ -424,7 +448,9 @@ app.addEventListener('click', event => {
   }
   if ('group' in button.dataset) { state.group = button.dataset.group || null; state.directOnly = false; if (state.mode !== 'network') { state.selected = null; state.relationIndex = null; } (document.querySelector('.system-filter') as HTMLDetailsElement).open = false; sync(); return; }
   switch (button.id) {
-    case 'project-center': case 'project-switch': void workbench.projects().catch(reportProjectError); break;
+    case 'project-center': void workbench.projects().catch(reportProjectError); break;
+    case 'project-switch': if(projectSnapshot)openProjectDetails(projectSnapshot,applyProject);else void workbench.projects().catch(reportProjectError);break;
+    case 'project-statistics': if(projectSnapshot)openContentOverview(projectSnapshot);break;
     case 'new-document': void workbench.newDocument(state.group??'').catch(reportProjectError); break;
     case 'edit-document': void workbench.edit(state.selected ? nodeById.get(state.selected)?.documentId : undefined).catch(reportProjectError); break;
     case 'item-history': if (state.selected) void historyPanel.itemHistory(state.selected, false).catch(reportProjectError); break;
@@ -454,8 +480,8 @@ app.addEventListener('click', event => {
     case 'zoom-out': graph?.zoom(1.22); break;
     case 'toggle-labels': state.labelsAll = !state.labelsAll; button.setAttribute('aria-pressed', String(state.labelsAll)); sync(); break;
     case 'toggle-motion': state.paused = !state.paused; button.setAttribute('aria-pressed', String(state.paused)); sync(); break;
-    case 'menu-toggle': app.classList.toggle('sidebar-open'); button.setAttribute('aria-expanded', String(app.classList.contains('sidebar-open'))); break;
-    case 'sidebar-close': case 'sidebar-scrim': app.classList.remove('sidebar-open'); get('menu-toggle').setAttribute('aria-expanded', 'false'); break;
+    case 'menu-toggle': setSidebarExpanded(!sidebarExpanded); break;
+    case 'sidebar-close': case 'sidebar-scrim': setSidebarExpanded(false); get('menu-toggle').focus(); break;
     case 'clear-filters': state.scopeIds = null; state.group = null; state.query = ''; state.directOnly = false; if (state.mode === 'network') state.selected = nodes[0]?.id ?? null; (get('search') as HTMLInputElement).value = ''; sync(); break;
   }
 });
@@ -470,13 +496,13 @@ get('search').addEventListener('input', event => { state.query = (event.target a
 document.addEventListener('keydown', event => {
   if(event.defaultPrevented||event.isComposing||document.querySelector('dialog[open]'))return;
   const typing = !!(event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]');
+  if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); setSidebarExpanded(!sidebarExpanded); return; }
   if(!typing&&(event.ctrlKey||event.metaKey)){const key=event.key.toLowerCase();if(['s','z','y','c','x','v','a','f'].includes(key)&&!(key==='c'&&window.getSelection()?.toString())){event.preventDefault();void graphCommand(key==='s'?'save':key==='z'?(event.shiftKey?'redo':'undo'):key==='y'?'redo':key==='c'?'copy':key==='x'?'cut':key==='a'?'selectAll':key==='f'?'search':'paste').catch(reportProjectError);return;}}
   if(!typing&&event.key==='Delete'&&state.view==='graph'&&state.relationIndex!==null){event.preventDefault();void graphCommand('edge').catch(reportProjectError);}
-  if (event.key === '/' && !typing) { event.preventDefault(); if (matchMedia('(max-width:1050px)').matches) { app.classList.add('sidebar-open'); get('menu-toggle').setAttribute('aria-expanded', 'true'); } get('search').focus(); }
+  if (event.key === '/' && !typing) { event.preventDefault(); setSidebarExpanded(true); document.querySelector<HTMLInputElement>('.project-directory-top input')?.focus(); }
   if (event.key === 'Escape') {
-    const menuOpen = app.classList.contains('sidebar-open');
-    app.classList.remove('sidebar-open');
-    get('menu-toggle').setAttribute('aria-expanded', 'false');
+    const menuOpen = sidebarExpanded && matchMedia('(max-width:1050px)').matches;
+    if (menuOpen) { setSidebarExpanded(false); get('menu-toggle').focus(); }
     if (!menuOpen && !typing && state.view === 'graph' && state.mode === 'network') leaveAnalysis();
   }
 });
@@ -517,7 +543,9 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   get('project-name').textContent = snapshot.project.name;
   if (isWebEdition) get('edition-state').textContent = snapshot.project.path.startsWith('/app/') ? '网页版 · 浏览器示例存储' : '网页版 · 已授权本机文件夹';
   get('breadcrumb-project').textContent = snapshot.project.name;
-  get('project-description').textContent = snapshot.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存';
+  get('project-description').textContent = snapshot.project.description || '项目设置';
+  document.querySelector('.project-art')!.innerHTML=projectIdentity(snapshot);
+  document.title=snapshot.project.name+' · 策问';
   get('refresh-project').textContent = snapshot.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件';
   get('system-count').textContent = String(groups.length);
   document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
@@ -553,6 +581,8 @@ function reportProjectError(error: unknown) { connectionError = error instanceof
 editingSession=new EditingSession(snapshot=>applyProject(snapshot,true),message=>{get('project-save-state').textContent=message;get('announcement').textContent=message;renderEditingState();});
 if(projectSnapshot)editingSession.receive(projectSnapshot);
 const workbench = new ProjectWorkbench(() => projectSnapshot, applyProject);
+projectDirectory=new ProjectDirectory(get('project-directory-host'),{getSnapshot:()=>projectSnapshot!,getSelected:()=>state.selected,getQuery:()=>state.query,getGroup:()=>state.group,onSelect:id=>selectNode(id),onGroup:group=>{state.group=group||null;state.scopeIds=null;sync();},onQuery:query=>{state.query=query;state.scopeIds=null;sync();},onCommit:applyProject,onError:message=>reportProjectError(new Error(message))});
+if(projectSnapshot){document.querySelector('.project-art')!.innerHTML=projectIdentity(projectSnapshot);get('project-description').textContent=projectSnapshot.project.description||'项目设置';}
 /** 结构草稿和正文保存共享同一个事务入口；布局始终只进入项目的私有工作区。 */
 const editBar=document.createElement('div');editBar.className='graph-draft-actions';editBar.id='graph-draft-actions';editBar.innerHTML='<button data-graph-command="undo" title="Ctrl+Z">撤销</button><button data-graph-command="redo" title="Ctrl+Y">重做</button><button data-graph-command="save" title="Ctrl+S">保存结构版本</button><button data-graph-command="reset-layout">自动排布</button><label><input id="shake-links" type="checkbox"/>晃动断开普通关联</label><span id="structure-state"></span>';document.querySelector('.space-intro')!.after(editBar);
 let canvasClipboard:{project:string;ids:string[];cut:boolean}|undefined;
@@ -570,7 +600,7 @@ async function finishGraphGesture(edit:GraphEdit|undefined,before:unknown,after:
 async function graphCommand(command:string,id=state.selected){
   if(!projectSnapshot||projectSnapshot.historical)return;let edit:GraphEdit|undefined;
   const selected=id?[id]:graph?.selectedIds()??[],ids=id&&id!==state.selected?selected:graph?.selectedIds().length?graph.selectedIds():selected;
-  if(command==='selectAll'){graph?.selectAllNodes();return;}if(command==='search'){get('search').focus();return;}
+  if(command==='selectAll'){graph?.selectAllNodes();return;}if(command==='search'){setSidebarExpanded(true);document.querySelector<HTMLInputElement>('.project-directory-top input')?.focus();return;}
   if(command==='save'){try{await editingSession?.save();}finally{renderEditingState();}return;}if(command==='undo'){editingSession?.undo();sync();return;}if(command==='redo'){editingSession?.redo();sync();return;}
   if(command==='reset-layout'){const before=graph?.exportLayout();graph?.resetPositions();const after=graph?.exportLayout();await finishGraphGesture(undefined,before,after);return;}
   if(command==='classify')edit=await classifyDocuments(projectSnapshot,ids.filter(value=>{const node=nodeById.get(value);return node?.kind==='rule'&&!!node.anchor||node?.kind==='document'&&node.documentType!=='gdd';}));

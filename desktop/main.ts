@@ -23,7 +23,7 @@ else {
     const root = app.isPackaged ? process.resourcesPath : path.resolve(runtimeRoot, '..');
     const preferences = app.getPath('userData'); await mkdir(preferences, { recursive: true });
     try { if (JSON.parse(await readFile(path.join(preferences, 'appearance.json'), 'utf8')).theme === 'light') theme = 'light'; } catch { /* 首次启动使用已确认的深色主题。 */ }
-    const colors = () => theme === 'dark' ? { color: '#0b101d', symbolColor: '#bdcde7', height: 36 } : { color: '#cdd4d9', symbolColor: '#2d414e', height: 36 };
+    const colors = () => theme === 'dark' ? { color: '#1d2228', symbolColor: '#d5dcd7', height: 36 } : { color: '#e5e6e2', symbolColor: '#39443f', height: 36 };
     nativeTheme.themeSource = theme;
     host = await startHost({ root, installation: app.isPackaged ? path.dirname(app.getPath('exe')) : undefined, chooseDirectory: async initial => {
       const settings: Electron.OpenDialogOptions = { title: '选择策问项目文件夹', defaultPath: initial || app.getPath('documents'), properties: ['openDirectory'] };

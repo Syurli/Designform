@@ -1,5 +1,5 @@
 import { Crepe } from '@milkdown/crepe';
-import { editorViewCtx, remarkPluginsCtx } from '@milkdown/kit/core';
+import { editorViewCtx, nodeViewCtx, prosePluginsCtx, remarkPluginsCtx } from '@milkdown/kit/core';
 import { callCommand, insert, replaceAll } from '@milkdown/kit/utils';
 import { undoCommand, redoCommand } from '@milkdown/kit/plugin/history';
 import { uploadConfig } from '@milkdown/kit/plugin/upload';
@@ -11,9 +11,14 @@ import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes, Root } from 'mdast';
 import { parseSizedImage, sizedImageMarkup } from '../shared/image-markup';
+import { stripBlockIds, transferBlockIds } from '../shared/document-blocks';
+import { anchorHtmlView, designCodeBlockView, headingFoldingPlugin } from './rich-document-plugins';
+import type { RichDesignOptions } from './rich-document-plugins';
 import '@milkdown/crepe/theme/common/style.css';
 import '@milkdown/crepe/theme/classic.css';
 import './rich-writing.css';
+
+const hasBlockIds=(text:string)=>/<!--\s*cewen:block\s+[\w-]+\s*-->/.test(text);
 
 const tree=(text:string)=>fromMarkdown(text,{extensions:[gfm()],mdastExtensions:[gfmFromMarkdown()]});
 /** Crepe 的 remark 链可能把独立 HTML 图片包装进段落；先提升到块级再交给 ProseMirror。 */
@@ -34,7 +39,7 @@ const key=(node:Nodes):string=>JSON.stringify(node,(name,value)=>{
   return typeof value==='string'?value.replace(/\r\n/g,'\n'):value;
 });
 export function richBodyParts(body:string){
-  const nodes=tree(body).children,at=nodes.findIndex(node=>node.type==='heading'&&node.depth===3&&node.children.length===1&&node.children[0].type==='text'&&node.children[0].value==='关联索引');
+  const nodes=tree(body).children.filter(node=>!(node.type==='html'&&/^<!-- cewen:block [A-Za-z0-9][A-Za-z0-9_-]{0,119} -->$/.test(node.value.trim()))),at=nodes.findIndex(node=>node.type==='heading'&&node.depth===3&&node.children.length===1&&node.children[0].type==='text'&&node.children[0].value==='关联索引');
   if(at<0)return {body,tail:''};
   const tail=nodes.slice(at);
   if(tail.some(node=>node.type!=='table'&&!(node.type==='heading'&&node.children[0]?.type==='text'&&node.children[0].value==='关联索引')))return {body,tail:''};
@@ -44,7 +49,7 @@ export function richBodyParts(body:string){
 export function richUnsupported(text:string){
   let reason='';
   const inspect=(node:Nodes,parent='root')=>{
-    if(node.type==='html'&&!(parent==='root'&&parseSizedImage(node.value))&&!/^\s*(?:<br\s*\/?>|<a\s+id=["'][\w-]+["']\s*>|<\/a>|<a\s+id=["'][\w-]+["']\s*>\s*<\/a>)\s*$/.test(node.value))reason='这份文档含有自定义 HTML，已使用源码编辑以保留原文。';
+    if(node.type==='html'&&!(parent==='root'&&parseSizedImage(node.value))&&!/^\s*<!--\s*cewen:block\s+[\w-]+\s*-->\s*$/.test(node.value)&&!/^\s*(?:<br\s*\/?>|<a\s+id=["'][\w-]+["']\s*>|<\/a>|<a\s+id=["'][\w-]+["']\s*>\s*<\/a>)\s*$/.test(node.value))reason='这份文档含有自定义 HTML，已使用源码编辑以保留原文。';
     if('children' in node)node.children.forEach(child=>inspect(child,node.type));
   };tree(text).children.forEach(node=>inspect(node));
   if(/^\[\^[^\]]+\]:|^:::/m.test(text))reason='这份文档含有扩展语法，已使用源码编辑以保留原文。';
@@ -90,11 +95,12 @@ export class RichWriting {
     const box=this.root.closest('dialog')?.querySelector<HTMLElement>('#workbench-feedback');
     if(box){box.hidden=false;box.classList.add('error');box.textContent=`图片未能加入草稿：${error instanceof Error?error.message:'请重试或改用源码编辑。'}`;}
   }
-  constructor(private root:HTMLElement,body:string,private onChange:(body:string)=>void,upload:(file:File)=>Promise<string>,resolveImage:(url:string)=>string,private onLink:()=>void){
+  private mergeMarkdown(next:string){return hasBlockIds(this.original)?transferBlockIds(this.original,preserveBlocks(stripBlockIds(this.original),next)):preserveBlocks(this.original,next);}
+  constructor(private root:HTMLElement,body:string,private onChange:(body:string)=>void,upload:(file:File)=>Promise<string>,resolveImage:(url:string)=>string,private onLink:()=>void,options:RichDesignOptions={}){
     const part=richBodyParts(body);this.original=part.body;this.tail=part.tail;
     // Crepe 浮层挂在传入 root 下；其主题 CSS 只匹配 .milkdown 的后代。
     root.classList.add('milkdown');
-    this.crepe=new Crepe({root,defaultValue:part.body,features:{[Crepe.Feature.Latex]:false,[Crepe.Feature.CodeMirror]:false},featureConfigs:{
+    this.crepe=new Crepe({root,defaultValue:stripBlockIds(part.body),features:{[Crepe.Feature.Latex]:false,[Crepe.Feature.CodeMirror]:false},featureConfigs:{
       [Crepe.Feature.Placeholder]:{text:'写下设计，输入 / 插入内容，输入 [[ 引用其他 DD',mode:'doc'},
       [Crepe.Feature.ImageBlock]:{onUpload:async file=>{try{return await upload(file);}catch(error){this.uploadError(error);throw error;}},proxyDomURL:resolveImage,inlineUploadButton:'选择图片',inlineUploadPlaceholderText:'或粘贴图片链接',blockUploadButton:'选择图片',blockConfirmButton:'插入',blockCaptionPlaceholderText:'图片说明',blockUploadPlaceholderText:'或粘贴图片链接'},
       [Crepe.Feature.LinkTooltip]:{inputPlaceholder:'粘贴网址；项目文档请按 Ctrl+K'},
@@ -103,6 +109,9 @@ export class RichWriting {
     // 图片块保留真实 alt；缩放写入公开 HTML 像素宽度，不再把倍率污染到 ![alt]。
     this.crepe.editor.config(ctx=>{
       ctx.update(remarkPluginsCtx,previous=>[...previous,{plugin:sizedImageRemarkPlugin,options:{}}]);
+      // 折叠使用装饰层；对白和色板 NodeView 只改变呈现，保存仍修改原代码块。
+      ctx.update(prosePluginsCtx,previous=>[...previous,headingFoldingPlugin()]);
+      ctx.update(nodeViewCtx,previous=>[...previous,['code_block',designCodeBlockView(options)] as [string,ReturnType<typeof designCodeBlockView>],['html',anchorHtmlView()] as [string,ReturnType<typeof anchorHtmlView>]]);
       ctx.update(imageBlockSchema.key,previous=>current=>{
         const schema=previous(current);
         return {...schema,
@@ -130,7 +139,7 @@ export class RichWriting {
     this.crepe.on(api=>api.markdownUpdated((_ctx,markdown)=>{
       if(!this.ready||this.silent||this.disposed||markdown===this.baseline)return;
       // 保留原文失败时维持旧基准，保存前 read() 仍可重新取得编辑器里的输入。
-      const body=preserveBlocks(this.original,markdown);
+      const body=this.mergeMarkdown(markdown);
       this.onChange(joinTail(body,this.tail));
       this.original=body;this.baseline=markdown;
     }));
@@ -147,7 +156,7 @@ export class RichWriting {
     root.addEventListener('load',this.onImageLoad,true);
     window.addEventListener('pointerup',this.onImagePointerUp);
   }
-  async create(){await this.crepe.create();if(this.disposed){await this.crepe.destroy();return;}this.baseline=this.crepe.getMarkdown();const semantic=(text:string)=>JSON.stringify(tree(text).children.map(key));if(semantic(this.original)!==semantic(this.baseline)){this.ready=true;throw new Error('此文档的块结构无法无损往返，请保留源码编辑。');}this.ready=true;this.root.querySelector('.ProseMirror')?.setAttribute('aria-label','策划正文');this.root.querySelector('.ProseMirror')?.setAttribute('role','textbox');this.root.querySelector('.ProseMirror')?.setAttribute('aria-multiline','true');this.root.querySelectorAll<HTMLElement>('.image-resize-handle').forEach(handle=>handle.title='拖动调整图片大小');this.root.querySelectorAll<HTMLImageElement>('.milkdown-image-block img').forEach(image=>{if(image.complete&&image.naturalWidth)this.onImageLoad({target:image} as unknown as Event);});}
+  async create(){await this.crepe.create();if(this.disposed){await this.crepe.destroy();return;}this.baseline=this.crepe.getMarkdown();const semantic=(text:string)=>JSON.stringify(tree(stripBlockIds(text)).children.map(key));if(semantic(this.original)!==semantic(this.baseline)){this.ready=true;throw new Error('此文档的块结构无法无损往返，请保留源码编辑。');}this.ready=true;this.root.querySelector('.ProseMirror')?.setAttribute('aria-label','策划正文');this.root.querySelector('.ProseMirror')?.setAttribute('role','textbox');this.root.querySelector('.ProseMirror')?.setAttribute('aria-multiline','true');this.root.querySelectorAll<HTMLElement>('.image-resize-handle').forEach(handle=>handle.title='拖动调整图片大小');this.root.querySelectorAll<HTMLImageElement>('.milkdown-image-block img').forEach(image=>{if(image.complete&&image.naturalWidth)this.onImageLoad({target:image} as unknown as Event);});}
   private keydown=(event:KeyboardEvent)=>{
     if(event.isComposing||this.composing||event.keyCode===229)return;
     if(this.candidateRange&&this.candidateBox&&!this.candidateBox.hidden){
@@ -254,13 +263,13 @@ export class RichWriting {
   focus(){if(this.ready)this.crepe.editor.action(ctx=>ctx.get(editorViewCtx).focus());}
   readonly(value:boolean){if(value)this.closeCandidates();if(this.ready)this.crepe.setReadonly(value);}
   /** 保存/退出时同步取得最新正文，不能等待输入通知的防抖计时器。 */
-  read(){if(this.ready){this.captureImageWidths();const current=this.crepe.getMarkdown();if(current!==this.baseline){this.original=preserveBlocks(this.original,current);this.baseline=current;}}return joinTail(this.original,this.tail);}
+  read(){if(this.ready){this.captureImageWidths();const current=this.crepe.getMarkdown();if(current!==this.baseline){this.original=this.mergeMarkdown(current);this.baseline=current;}}return joinTail(this.original,this.tail);}
   /** 外部属性修改仅同步投影；程序更新不触发用户输入回调。 */
   replace(body:string){const part=richBodyParts(body);this.tail=part.tail;if(part.body===this.original)return;
     // 保存可能整理首尾空行；语义未变时只更新原文基准，不制造一次看不见的撤销操作。
-    const unchanged=JSON.stringify(tree(part.body).children.map(key))===JSON.stringify(tree(this.original).children.map(key));
+    const unchanged=JSON.stringify(tree(stripBlockIds(part.body)).children.map(key))===JSON.stringify(tree(stripBlockIds(this.original)).children.map(key));
     if(!this.ready||unchanged){this.original=part.body;return;}
-    this.silent=true;try{this.crepe.editor.action(replaceAll(part.body));const baseline=this.crepe.getMarkdown();this.original=part.body;this.baseline=baseline;}finally{this.silent=false;}}
+    this.silent=true;try{this.crepe.editor.action(replaceAll(stripBlockIds(part.body)));const baseline=this.crepe.getMarkdown();this.original=part.body;this.baseline=baseline;}finally{this.silent=false;}}
   find(query:string){if(!this.ready||!query)return;this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx);let found=false;view.state.doc.descendants((node,pos)=>{if(found||!node.isText)return;const at=(node.text??'').toLocaleLowerCase().indexOf(query.toLocaleLowerCase());if(at>=0){view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc,pos+at,pos+at+query.length)).scrollIntoView());view.focus();found=true;}});});}
   dispose(){this.disposed=true;this.root.removeEventListener('keydown',this.keydown,true);this.root.removeEventListener('keyup',this.keyup);this.root.removeEventListener('input',this.onInput);this.root.removeEventListener('compositionstart',this.onCompositionStart);this.root.removeEventListener('compositionend',this.onCompositionEnd);this.root.removeEventListener('focusout',this.onFocusOut);this.root.removeEventListener('mouseup',this.onSelectionMove);document.removeEventListener('selectionchange',this.onSelectionMove);this.root.removeEventListener('pointerdown',this.onImagePointerDown,true);this.root.removeEventListener('pointerover',this.onImageHandleHover);this.root.removeEventListener('load',this.onImageLoad,true);window.removeEventListener('pointerup',this.onImagePointerUp);this.closeCandidates();this.observer?.disconnect();if(this.ready)void this.crepe.destroy();}
 }

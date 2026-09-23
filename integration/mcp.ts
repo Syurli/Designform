@@ -6,7 +6,7 @@ import type { ProjectSnapshot } from '../shared/model.ts';
 import { createPresence } from './presence.ts';
 
 /** 本地 stdio 适配器只使用公开服务；输出通道仅用于 MCP，日志走标准错误。 */
-const server = new McpServer({ name: 'baige-cewen', version: '0.4.0' }), local = new LocalClient();
+const server = new McpServer({ name: 'baige-cewen', version: '0.6.0' }), local = new LocalClient();
 const presence = createPresence(server);
 /** 记录访问的项目和时间，不把工具参数或文档正文泄露到连接面板。 */
 const client = { request<T = unknown>(route: string, input?: unknown) { presence.activity(route); return local.request<T>(route, input); } };
@@ -14,7 +14,7 @@ const project = z.string().regex(/^[A-Za-z0-9_-]+$/);
 const result = async (action: () => Promise<unknown>) => { try { return { content: [{ type: 'text' as const, text: JSON.stringify(await action()) }] }; } catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; } };
 server.registerTool('cewen_identify', { description: '报告本次会话明确已知的模型名称，仅更新连接显示；无法确认时传空字符串，不猜测厂商或型号。不会读取或修改项目文档。', inputSchema: { modelName: z.string().max(120) } }, ({ modelName }) => result(() => presence.identify(modelName)));
 server.registerTool('cewen_projects', { description: '列出已明确打开的策问项目，不扫描其他目录。', annotations: { readOnlyHint: true } }, () => result(() => client.request('/api/projects')));
-server.registerTool('cewen_context', { description: '读取选定公开 Markdown、修订和关系。私人笔记不包含；超限请缩小文档范围。', inputSchema: { projectId: project, documentIds: z.array(z.string()).default([]) }, annotations: { readOnlyHint: true } }, ({ projectId, documentIds }) => result(() => client.request(`/api/projects/${projectId}/context`, { documents: documentIds })));
+server.registerTool('cewen_context', { description: '读取选定公开 Markdown、修订、关系及对应的公开排版 JSON 与项目共享注释 JSON/Markdown。私人笔记不包含；超限请缩小文档范围。', inputSchema: { projectId: project, documentIds: z.array(z.string()).default([]) }, annotations: { readOnlyHint: true } }, ({ projectId, documentIds }) => result(() => client.request(`/api/projects/${projectId}/context`, { documents: documentIds })));
 server.registerTool('cewen_search', { description: '按标题、正文或身份搜索，返回可继续读取的文档身份。', inputSchema: { projectId: project, query: z.string().min(1), offset: z.number().int().min(0).default(0) }, annotations: { readOnlyHint: true } }, ({ projectId, query, offset }) => result(async () => { const snapshot = await client.request<ProjectSnapshot>(`/api/projects/${projectId}`), lower = query.toLowerCase(), matches = snapshot.documents.filter(document => `${document.id} ${document.title} ${document.text}`.toLowerCase().includes(lower)); return { revision: snapshot.revision, total: matches.length, offset, documents: matches.slice(offset, offset + 25).map(({ id, path, title, hash }) => ({ id, path, title, hash })) }; }));
 server.registerTool('cewen_history', { description: '列出公开版本及校验状态。', inputSchema: { projectId: project }, annotations: { readOnlyHint: true } }, ({ projectId }) => result(() => client.request(`/api/projects/${projectId}/history`)));
 server.registerTool('cewen_read_revision', { description: '读取完整历史快照，不修改当前稿。', inputSchema: { projectId: project, revision: z.string() }, annotations: { readOnlyHint: true } }, ({ projectId, revision }) => result(() => client.request(`/api/projects/${projectId}/revision?revision=${encodeURIComponent(revision)}`)));

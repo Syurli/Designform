@@ -1,6 +1,7 @@
 import { randomUUID, mkdir, readdir, rename, cp, rm, path, Buffer } from './platform.ts';
 import { DOCUMENT_FORMAT, type CommitRequest, type RevisionManifest } from '../shared/model.ts';
-import { fingerprint, hashFiles, optionalBytes, ProjectError, resolveInside, sha256, writeBytes } from './files.ts';
+import { assertPublicFilePath, fingerprint, hashFiles, optionalBytes, ProjectError, resolveInside, sha256, writeBytes } from './files.ts';
+import { companionKind, validateCompanionFile } from '../shared/document-companion.ts';
 
 /** 版本列表保留损坏条目供用户处理，不把它们混入可信版本轴。 */
 export interface HistoryEntry { manifest: RevisionManifest; valid: boolean; problem?: string }
@@ -19,8 +20,10 @@ export async function recoverPublishedSnapshots(root: string) {
     if (published && sha256(published) !== sha256(raw)) throw new ProjectError('HISTORY_DAMAGED','相同版本目录已有其他完成记录，已停止覆盖。');
     for (const [relative, hash] of Object.entries(manifest.files)) {
       if (relative !== 'PROJECT.md' && relative !== 'README.md' && !relative.startsWith('docs/')) throw new ProjectError('INVALID_PATH','版本清单包含不支持的路径。');
+      if (relative.startsWith('docs/')) assertPublicFilePath(relative);
       const source = await optionalBytes(root, `${staged}/${relative}`), existing = await optionalBytes(root, `${target}/${relative}`);
       if (!source || sha256(source) !== hash || existing && sha256(existing) !== hash) throw new ProjectError('HISTORY_DAMAGED', `暂存与目标版本校验不一致：${relative}`);
+      if (companionKind(relative)) validateCompanionFile(relative, new TextDecoder('utf-8', { fatal: true }).decode(source));
     }
     await mkdir(await resolveInside(root,target),{recursive:true});
     for (const relative of Object.keys(manifest.files)) {
@@ -49,8 +52,10 @@ export async function history(root: string, projectId: string, verify = true): P
       if (verify) {
         for (const [relative, hash] of Object.entries(manifest.files)) {
           if (relative !== 'PROJECT.md' && relative !== 'README.md' && !relative.startsWith('docs/')) throw new Error('历史文件清单包含不支持的路径。');
+          if (relative.startsWith('docs/')) assertPublicFilePath(relative);
           const content = await optionalBytes(root, `versions/${label}/${relative}`);
           if (!content || sha256(content) !== hash) throw new Error(`文件校验失败：${relative}`);
+          if (companionKind(relative)) validateCompanionFile(relative, new TextDecoder('utf-8', { fatal: true }).decode(content));
         }
         if (!manifest.files['PROJECT.md'] || !manifest.files['README.md']) throw new Error('版本快照缺少项目说明或变更说明。');
         const currentHashes = Object.fromEntries(Object.entries(manifest.files).filter(([name]) => name !== 'README.md'));

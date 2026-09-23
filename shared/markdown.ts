@@ -46,6 +46,9 @@ function tree(body: string) {
     if (!match) return [node];
     return [{ ...node, value: match[1] }, ...fromMarkdown(match[2]).children];
   });
+  // 画布稳定块标记只辅助编辑定位；知识规则仍由原始锚点紧邻的标题定义。
+  // 仅从语义节点序列排除合法标记，AST 位置继续指向原文，引用偏移不会漂移。
+  result.children = result.children.filter(node => !(node.type === 'html' && /^<!-- cewen:block [A-Za-z0-9][A-Za-z0-9_-]{0,119} -->$/.test(node.value.trim())));
   return result;
 }
 function string(value: unknown, fallback = '') { return typeof value === 'string' ? value : fallback; }
@@ -76,7 +79,10 @@ export function parseProjectInfo(file: MarkdownFile, path = ''): ProjectInfo {
   const id = identity(metadata.id);
   if (!id) throw new Error('PROJECT.md 缺少有效的稳定项目 ID。');
   if (metadata.format !== DOCUMENT_FORMAT) throw new Error(`不支持文档格式 ${String(metadata.format)}，请使用对应版本或迁移副本。`);
-  return { id, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: DOCUMENT_FORMAT, path, isExample: metadata.example === true };
+  const icon = metadata.icon;
+  const projectIcon = icon && typeof icon === 'object' && !Array.isArray(icon) && ['text', 'symbol', 'image'].includes(String((icon as Record<string, unknown>).kind)) && typeof (icon as Record<string, unknown>).value === 'string'
+    ? { kind: (icon as Record<string, unknown>).kind as 'text' | 'symbol' | 'image', value: (icon as Record<string, string>).value } : undefined;
+  return { id, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: DOCUMENT_FORMAT, path, isExample: metadata.example === true, ...(projectIcon ? { icon: projectIcon } : {}), notes: string(metadata.notes) };
 }
 
 /**
@@ -104,13 +110,14 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     }
   } catch (error) { issue('PROJECT.md','PARSE_ERROR', String(error)); }
 
-  for (const file of files.filter(file => file.path.startsWith('docs/') && /\.md$/i.test(file.path)).sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'))) {
+  for (const file of files.filter(file => file.path.startsWith('docs/') && !file.path.startsWith('docs/annotations/') && /\.md$/i.test(file.path)).sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'))) {
     try {
       const header = readHeader(file.text), children = tree(header.body).children;
       const rawType = header.metadata.type;
       const type = rawType === 'gdd' || rawType === 'dd' || rawType === 'question' ? rawType : 'guide';
       const id = identity(header.metadata.id);
-      const document: ProjectDocument = { id: id || `unidentified:${file.path}`, path: file.path, title: titleOf(children, file.path.split('/').at(-1)!), type, status: statusOf(header.metadata.status, type === 'question'), system: identity(header.metadata.system), text: file.text, hash: file.hash };
+      const color = /^#[0-9a-f]{6}$/i.test(string(header.metadata.color)) ? string(header.metadata.color) : undefined;
+      const document: ProjectDocument = { id: id || `unidentified:${file.path}`, path: file.path, title: titleOf(children, file.path.split('/').at(-1)!), type, status: statusOf(header.metadata.status, type === 'question'), system: identity(header.metadata.system), text: file.text, hash: file.hash, ...(color ? { color } : {}) };
       documents.push(document);
       if (type === 'guide') continue;
       if (!id) { issue(file.path, 'MISSING_ID', '文档缺少有效 ID；可阅读原文，补齐身份后才能建立稳定关系。'); continue; }
@@ -149,7 +156,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     const group = groups.find(group => group.id === document.system)?.id ?? 'system-unassigned';
     if (document.system && group === 'system-unassigned') issue(file.path, 'UNKNOWN_SYSTEM', `未找到主要系统 ${document.system}，暂列入未归组。`, 'warning');
     const content = paragraphs(children), line = header.bodyOffset ? file.text.slice(0, header.bodyOffset).split('\n').length : 1;
-    nodes.push({ id: document.id, title: document.title, kind: 'document', documentType: document.type, group, summary: string(header.metadata.summary) || content[0] || '尚未填写设计正文。', content, source: `${file.path}:${line}`, status: document.status, documentId: document.id, documentPath: file.path });
+    nodes.push({ id: document.id, title: document.title, kind: 'document', documentType: document.type, group, summary: string(header.metadata.summary) || content[0] || '尚未填写设计正文。', content, source: `${file.path}:${line}`, status: document.status, documentId: document.id, documentPath: file.path, ...(document.color ? { color: document.color } : {}) });
     nodeIds.add(document.id);
     if (document.id !== root?.id) appendEdge({ id: `contains:${group}:${document.id}`, source: group, target: document.id, type: 'contains', note: '来自当前文档的主要系统归属。', origin: {kind:'classification',path:file.path} }, file.path);
 
@@ -175,7 +182,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
         const status = explicitStatus?.includes('待确认') ? 'question' : explicitStatus?.includes('已确认') ? 'confirmed' : explicitStatus?.includes('已归档') ? 'archived' : document.status;
         const sourceLine = line + (child.position?.start.line ?? 1) - 1;
         const sectionGroup = groups.find(item => item.id === sectionSystems[anchor])?.id;
-        nodes.push({ id, title: plain(next), kind: 'rule', group: sectionGroup ?? group, summary: content.find(text => !/^设计状态[：:]/.test(text)) ?? '尚未填写规则正文。', content, source: `${file.path}:${sourceLine}`, status, documentId: document.id, documentPath: file.path, anchor });
+        nodes.push({ id, title: plain(next), kind: 'rule', group: sectionGroup ?? group, summary: content.find(text => !/^设计状态[：:]/.test(text)) ?? '尚未填写规则正文。', content, source: `${file.path}:${sourceLine}`, status, documentId: document.id, documentPath: file.path, anchor, ...(document.color ? { color: document.color } : {}) });
         nodeIds.add(id); owner = id;
         appendEdge({ id: `contains:${document.id}:${anchor}`, source: document.id, target: id, type: 'contains', note: '来自当前 Markdown 的规则章节。', origin: {kind:'section',path:file.path} }, file.path);
         if (sectionGroup) appendEdge({ id: `contains:${sectionGroup}:${id}`, source: sectionGroup, target: id, type: 'contains', note: '来自这个章节单独设置的设计分类。', origin: {kind:'classification',path:file.path} }, file.path);

@@ -45,7 +45,7 @@ export function markdownView(text: string, resolve: (url: string, image: boolean
       case 'emphasis': return `<em>${children}</em>`;
       case 'delete': return `<del>${children}</del>`;
       case 'inlineCode': return `<code>${escapeHtml(node.value)}</code>`;
-      case 'code': return `<pre><code>${escapeHtml(node.value)}</code></pre>`;
+      case 'code': return ['cewen-dialogue','cewen-palette'].includes(node.lang??'') ? `<div data-design-language="${escapeHtml(node.lang!)}" data-design-source="${escapeHtml(node.value)}"></div>` : `<pre><code>${escapeHtml(node.value)}</code></pre>`;
       case 'blockquote': return `<blockquote>${children}</blockquote>`;
       case 'list': return node.ordered ? `<ol start="${node.start ?? 1}">${children}</ol>` : `<ul>${children}</ul>`;
       case 'listItem': return `<li>${node.checked === null || node.checked === undefined ? '' : `<input type="checkbox" disabled ${node.checked ? 'checked' : ''}/>`}${children}</li>`;
