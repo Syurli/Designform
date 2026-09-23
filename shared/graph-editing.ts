@@ -50,8 +50,13 @@ export function graphChanges(snapshot: ProjectSnapshot, edit: GraphEdit): { chan
           change(path,setMetadata(text(path),{sectionSystems:sections}));
         }
       }else if(item.kind==='document'&&item.documentType!=='gdd'){
-        // 独立文档仍使用自己的 system 字段；相同归属不重排 YAML。
-        if((item.group==='system-unassigned'?'':item.group)!==group)change(item.documentPath,setMetadata(text(item.documentPath),{system:group}));
+        // 图谱归类把选中文档放到目标分类直属；其子文档保留父子身份并继承新分类。
+        const source=document(item.documentPath);
+        if(source.parent||(item.group==='system-unassigned'?'':item.group)!==group)change(item.documentPath,setMetadata(text(item.documentPath),{system:group,parent:''}));
+        const descendants=new Set([source.id]);
+        let found=true;
+        while(found){found=false;for(const child of snapshot.documents)if(child.parent&&descendants.has(child.parent)&&!descendants.has(child.id)){descendants.add(child.id);found=true;}}
+        for(const child of snapshot.documents)if(child.id!==source.id&&descendants.has(child.id)&&child.system!==group)change(child.path,setMetadata(text(child.path),{system:group}));
       }else throw new Error('只有专项文档、问题或有锚点的规则可以改变分类。');
     }
     label=group?`移入${snapshot.groups.find(item=>item.id===group)!.label}`:'取消归类';
@@ -77,7 +82,8 @@ export function graphChanges(snapshot: ProjectSnapshot, edit: GraphEdit): { chan
     const identities=new Map(originals.map(doc=>[doc.id,`${doc.type}-${crypto.randomUUID()}`]));
     const paths=new Map(originals.map(doc=>[doc.path,`docs/${doc.type==='question'?'questions':'dd'}/${identities.get(doc.id)}.md`]));
     for(const doc of originals){
-      let value=setTitle(setMetadata(doc.text,{id:identities.get(doc.id),...(edit.group!==undefined?{system:edit.group==='system-unassigned'?'':edit.group}:{})}),`${doc.title} · 副本`);
+      const parent=edit.group!==undefined?'':doc.parent?(identities.get(doc.parent)??doc.parent):'';
+      let value=setTitle(setMetadata(doc.text,{id:identities.get(doc.id),parent,...(edit.group!==undefined?{system:edit.group==='system-unassigned'?'':edit.group}:{})}),`${doc.title} · 副本`);
       value=rewriteLinks(value,doc.path,paths.get(doc.path)!,paths);
       // 手工关系用结构解析逐条重建，避免替换正文内恰好出现的身份字符串。
       for(const rel of snapshot.edges.filter(item=>item.origin?.kind==='manual'&&item.origin.path===doc.path)){

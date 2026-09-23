@@ -2,6 +2,8 @@
 export const DOCUMENT_FORMAT = 1;
 /** 文件交换与本地接口共用的协议号。 */
 export const PROTOCOL_VERSION = 1;
+/** 总纲以下的公开分类与文档层级上限，阅读时旧资料不会被自动改写。 */
+export const HIERARCHY_MAX_DEPTH = 5;
 
 /** 运行期连接信息不进入项目正文、版本或私人工作区。模型名称由客户端明确提供。 */
 export interface LlmConnection {
@@ -33,6 +35,8 @@ export interface KnowledgeGroup {
   id: GroupId;
   label: string;
   color: string;
+  /** 父分类身份；省略表示总纲下的顶层分类。 */
+  parent?: GroupId;
 }
 
 /** 图谱节点是 Markdown 的读取投影，不是另一份可单独修改的正文。 */
@@ -110,6 +114,8 @@ export interface ProjectDocument {
   type: 'gdd' | 'dd' | 'question' | 'guide';
   status: DesignStatus;
   system: string;
+  /** 父文档身份；省略表示直接归在主要分类下。 */
+  parent?: string;
   text: string;
   hash: string;
   /** 文档自定义颜色；未设置时继承分类色。 */
@@ -121,6 +127,8 @@ export interface KnowledgeData {
   nodes: KnowledgeNode[];
   edges: KnowledgeEdge[];
   groups: KnowledgeGroup[];
+  /** 唯一总纲的稳定 ID；空项目可省略。 */
+  rootDocumentId?: string;
   /** 项目级公开分类的修改基准，不要求用户在总纲正文维护目录字段。 */
   projectEntry?: { text: string; hash: string };
 }

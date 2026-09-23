@@ -1,0 +1,7 @@
+/* 脑图沿用关系分析卡片的同一按钮与四角展开变量，保证快切时没有 DOM 重建闪烁。 */
+.graph-view.mindmap-mode .star-label.mindmap-card{height:112px;min-height:112px;padding:9px 11px;gap:3px;border-left:3px solid var(--node-color);border-top:1px solid var(--line-soft,#6886b13b);border-radius:10px}
+.graph-view.mindmap-mode .mindmap-card strong{font-size:13px;line-height:1.35;-webkit-line-clamp:2}
+.graph-view.mindmap-mode .mindmap-card .analysis-card-summary{font-size:10px;line-height:1.35;-webkit-line-clamp:2}
+.graph-view.mindmap-mode .mindmap-card .analysis-card-role{font-size:9px}
+.graph-view.mindmap-mode .mindmap-card.system{border-left-width:6px;background:linear-gradient(110deg,color-mix(in srgb,var(--node-color) 17%,var(--surface-label,#18243b)),var(--surface-label,#101a2c))}
+.graph-view.mindmap-mode .mindmap-card.selected{outline:2px solid var(--node-color)}

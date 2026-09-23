@@ -9,7 +9,7 @@ import { collectFiles, prepareImport, readImport } from './exchange.ts';
 import { undoText } from '../shared/undo.ts';
 import { rewriteLinks, diagnoseLinks } from '../shared/links.ts';
 import { answerQuestion, inquiry, section, questionAvailable } from '../shared/inquiry.ts';
-import { questionDocument, setMetadata, putRelation, removeRelation } from '../shared/editing.ts';
+import { questionDocument, setMetadata, setTitle, putRelation, removeRelation } from '../shared/editing.ts';
 import { indexSnapshot } from './index-store.ts';
 import { companionIdPattern, companionKind, inkCompanionPath, layoutCompanionPath, validateCompanionFile, COMPANION_MAX_BYTES } from '../shared/document-companion.ts';
 
@@ -180,7 +180,7 @@ export class ProjectService {
     await this.ready;
     name = name.trim();
     if (!name || name.length > 100) throw new ProjectError('INVALID_NAME', '请输入 1～100 个字符的项目名称。');
-    if (setup && (typeof setup !== 'object' || (setup.brief !== undefined && (typeof setup.brief !== 'string' || setup.brief.length > 20000)) || (setup.categories !== undefined && (!Array.isArray(setup.categories) || setup.categories.length > 60 || setup.categories.some(group => !group || !/^[A-Za-z0-9_-]{1,120}$/.test(group.id) || typeof group.label !== 'string' || !group.label.trim() || !/^#[0-9a-f]{6}$/i.test(group.color)))))) throw new ProjectError('INVALID_SETUP','创作起点或分类内容无效，请保留草稿后重新选择。');
+    if (setup && (typeof setup !== 'object' || (setup.brief !== undefined && (typeof setup.brief !== 'string' || setup.brief.length > 20000)) || (setup.categories !== undefined && (!Array.isArray(setup.categories) || setup.categories.length > 60 || setup.categories.some(group => !group || !/^[A-Za-z0-9_-]{1,120}$/.test(group.id) || typeof group.label !== 'string' || !group.label.trim() || !/^#[0-9a-f]{6}$/i.test(group.color) || group.parent !== undefined && !/^[A-Za-z0-9_-]{1,120}$/.test(group.parent)))))) throw new ProjectError('INVALID_SETUP','创作起点或分类内容无效，请保留草稿后重新选择。');
     const id = `project-${randomUUID()}`;
     const folderName = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 65) || '新项目';
     const directory = path.join(path.resolve(parent), `${folderName}-${id.slice(-8)}`);
@@ -191,7 +191,13 @@ export class ProjectService {
     }
     const guide = await optionalBytes(this.templateRoot, 'docs/README.md');
     if (guide) await writeBytes(directory, 'docs/README.md', kind==='example'?guide:'# 策划文档\n\n总纲位于 gdd，专项设计位于 dd，待讨论问题位于 questions，图片位于 assets。\n\n正文优先满足阅读；在自然文句中链接相关设计。保留文档身份，不将未决定的建议写成正式规则。设计分类在项目入口登记，个人草稿与视图不进入正文。\n');
-    await writeBytes(directory, 'PROJECT.md', `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: kind === 'example' ? '完全虚构的教学示例，可放心修改和复制。' : '', example: kind === 'example', ...(kind !== 'example' ? { minimumAppVersion: '0.4.0', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color })) } : {}) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`);
+    // 示例的分类、排序和介绍以模板 PROJECT.md 为准；只替换新项目身份与标题。
+    // 浏览器版也通过同一个服务创建，因而与桌面版保持相同的公开目录。
+    const exampleEntry = kind === 'example' ? await optionalBytes(directory, 'PROJECT.md') : null;
+    const projectText = exampleEntry
+      ? setTitle(setMetadata(exampleEntry.toString('utf8'), { id, name, format: DOCUMENT_FORMAT, example: true, minimumAppVersion: '0.7.0' }), name)
+      : `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: '', example: false, minimumAppVersion: '0.7.0', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color, ...(group.parent ? { parent: group.parent } : {}) })) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`;
+    await writeBytes(directory, 'PROJECT.md', projectText);
     if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n## 核心循环\n\n## 首版范围\n\n## 尚未决定\n`);
     const project = await this.open(directory);
     return this.read(project.id);

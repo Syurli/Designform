@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { GraphInteraction } from './graph-interaction';
 import './graph-selection.css';
+import './graph-mindmap.css';
+import { hierarchyLayout, type GraphDirection } from './graph-hierarchy';
+export type { GraphDirection } from './graph-hierarchy';
 import type { GraphEdit } from '../shared/graph-editing';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { types, type KnowledgeData, type KnowledgeNode, type KnowledgeEdge } from './data';
@@ -8,15 +11,15 @@ import { buildAnalysis, edgeSentence, laneLabels, type AnalysisResult, type Anal
 import { currentTheme } from './theme';
 import { categoryColor } from './category-color';
 
-/** 三种空间模式共享同一场景；切换时只改变目标坐标，不重新创建节点。 */
-export type GraphMode = 'galaxy' | 'network' | 'layers';
+/** 四种空间模式共享同一场景；切换时只改变目标坐标，不重新创建节点。 */
+export type GraphMode = 'galaxy' | 'network' | 'layers' | 'mindmap';
 type DesignNode = KnowledgeNode;
 type StarNode = { data: DesignNode; point: THREE.Sprite; halo: THREE.Sprite; label: HTMLButtonElement };
 type Connection = { data: KnowledgeEdge; curve: THREE.QuadraticBezierCurve3; line: THREE.Line; material: THREE.LineBasicMaterial; particle: THREE.Sprite; path: SVGPathElement; hit: SVGPathElement; label: HTMLButtonElement };
 type NodeAppearance = { point: number; halo: number };
 /** 展开比例独立于卡片的位置；打断动画时从当前比例继续，不把整层文字清空。 */
 type CardAppearance = { open: number; opacity: number };
-type OverviewSnapshot = { mode: GraphMode; positions: Map<string, THREE.Vector3>; camera: THREE.Vector3; target: THREE.Vector3 };
+type OverviewSnapshot = { mode: GraphMode; direction: GraphDirection; width:number; height:number; positions: Map<string, THREE.Vector3>; camera: THREE.Vector3; target: THREE.Vector3 };
 /** 导航发生前的真实屏幕位置；使用视口坐标，允许工具栏与画布高度同时变化。 */
 type NavigationFrame = {
   mode: GraphMode; rect: { left: number; top: number; width: number; height: number };
@@ -70,11 +73,22 @@ export class KnowledgeGraph {
   setShake(enabled:boolean){if(this.interaction)this.interaction.shake=enabled;}
   selectAllNodes(){this.interaction?.selectAll();}
   selectedIds(){return this.interaction?.selectedIds()??[];}
-  private layoutKey(node:KnowledgeNode){return `${this.mode==='galaxy'?'galaxy-v2':this.mode==='network'?'network:'+this.selected:this.mode==='layers'?'layers-v2':this.mode}:${node.id}:${node.group}`;}
+  private layoutPrefix(mode=this.mode){
+    if(mode==='galaxy')return 'galaxy-v2';
+    if(mode==='network')return `network:${this.direction}:${this.selected}`;
+    if(mode==='layers')return `layers-v4:${this.direction}`;
+    // 筛选后的脑图重新压紧可见层级，同时不覆盖默认脑图的手工摆放。
+    const scope=JSON.stringify([this.group,this.query,this.selected,this.directOnly,this.scopeIds,this.detailedGraph,this.includeArchived]);
+    let hash=2166136261;for(const char of scope)hash=Math.imul(hash^char.charCodeAt(0),16777619);
+    return `mindmap-v5:${this.direction}:${(hash>>>0).toString(36)}`;
+  }
+  private layoutKey(node:KnowledgeNode){return `${this.layoutPrefix()}:${node.id}:${node.group}`;}
+  /** 同一场景内切换阅读方向，横纵坐标分别记忆，保留当前帧连续过渡。 */
+  setDirection(direction:GraphDirection){if(this.direction===direction)return;this.direction=direction;if(this.mode!=='galaxy')this.setMode(this.mode);}
   /** 从快照恢复时替换旧位置，撤销不会留下刚才挤开的节点。 */
   restoreEditingLayout(value:unknown){this.layoutMemory.clear();this.restoreLayout(value);}
   togglePin(id:string){const node=this.stars.get(id);if(!node||id===this.coreId())return;const key=this.layoutKey(node.data),row=this.layoutMemory.get(key);this.layoutMemory.set(key,{group:node.data.group,point:node.point.position.clone(),pinned:!row?.pinned});this.labelsDirty=true;}
-  resetPositions(){const prefix=this.mode==='galaxy'?'galaxy-v2:':this.mode==='network'?`network:${this.selected}:`:'layers-v2:';for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
+  resetPositions(){const prefix=`${this.layoutPrefix()}:`;for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
 
   private camera = new THREE.PerspectiveCamera(42, 1, 1, 8000);
   private renderer: THREE.WebGLRenderer;
@@ -93,6 +107,8 @@ export class KnowledgeGraph {
   private observer: ResizeObserver;
   private active = true;
   private mode: GraphMode = 'galaxy';
+  private direction: GraphDirection = 'vertical';
+  private hierarchyParent = new Map<string,string>();
   private selected: string | null = null;
   private group: string | null = null;
   private query = '';
@@ -143,10 +159,38 @@ export class KnowledgeGraph {
   private contextStart?: { x: number; y: number; moved: boolean };
 
   private findCore() {
+    // 公开 PROJECT.md 指定的总纲优先；旧项目未指定时才从 GDD 类型推断。
+    if(this.data.rootDocumentId && this.data.nodes.some(node=>node.id===this.data.rootDocumentId&&node.kind==='document'))return this.data.rootDocumentId;
     return this.data.nodes.filter(node => node.kind === 'document' && node.documentType === 'gdd' && node.status !== 'archived')
       .sort((a, b) => Number(/\/GDD\.md$/i.test(b.documentPath)) - Number(/\/GDD\.md$/i.test(a.documentPath)) || a.documentPath.localeCompare(b.documentPath, 'zh-CN'))[0]?.id;
   }
   private coreId() { return this.primaryGdd; }
+  /** 总纲章节继承总纲金色；其他无分类节点使用中性色，避免空 group 使场景初始化失败。 */
+  private nodeColor(node:KnowledgeNode){
+    const core=this.coreId();if(core&&(node.id===core||node.kind!=='system'&&!node.group&&node.documentId===core))return '#CFB378';
+    return node.color??this.data.groups.find(group=>group.id===node.group)?.color??'#94A5BC';
+  }
+  private nodeGroupLabel(node:KnowledgeNode){
+    const core=this.coreId();if(core&&(node.id===core||node.kind!=='system'&&!node.group&&node.documentId===core))return '游戏总纲';
+    return this.data.groups.find(group=>group.id===node.group)?.label??'未归组';
+  }
+  /** 父分类筛选包含所有下级分类，并用 visited 防止坏数据形成归属环。 */
+  private matchesGroup(groupId:string,selected:string){
+    let cursor:string|undefined=groupId;const visited=new Set<string>();
+    while(cursor&&!visited.has(cursor)){
+      if(cursor===selected)return true;
+      visited.add(cursor);cursor=this.data.groups.find(group=>group.id===cursor)?.parent;
+    }
+    return false;
+  }
+  /** 脑图默认只陈列文档层；小节在详细模式或明确筛选/关联时才展开。 */
+  private overviewNodeVisible(node:KnowledgeNode,related:Set<string>,mode=this.mode){
+    const match=!this.query||`${node.id} ${node.title} ${node.summary} ${node.content.join(' ')}`.toLowerCase().includes(this.query);
+    const showRule=mode==='mindmap'
+      ? node.kind!=='rule'||Boolean(this.detailedGraph||this.group||this.query||this.scopeIds||related.has(node.id))
+      : this.detailedGraph||this.data.nodes.length<=500||node.kind!=='rule'||Boolean(this.group||this.query||this.scopeIds||related.has(node.id));
+    return !this.retiring.has(node.id)&&(this.includeArchived||node.status!=='archived')&&showRule&&(!this.scopeIds||this.scopeIds.includes(node.id))&&(!this.group||this.matchesGroup(node.group,this.group))&&match&&(!this.directOnly||!this.selected||related.has(node.id));
+  }
   private starSize(node: KnowledgeNode, halo = false) {
     return node.id === this.coreId() ? halo ? 68 : 23 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
   }
@@ -190,7 +234,7 @@ export class KnowledgeGraph {
     this.createBackground();
     const geometry = this.layout('galaxy');
     data.nodes.forEach(node => {
-      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)!.color;
+      const color = this.nodeColor(node);
       const point = this.sprite(color, this.starSize(node), .98);
       const halo = this.sprite(color, this.starSize(node, true), .22);
       point.position.copy(geometry.get(node.id)!);
@@ -244,7 +288,7 @@ export class KnowledgeGraph {
     this.container.addEventListener('contextmenu',this.contextMenu);
     this.container.addEventListener('pointerdown',this.contextDown);
     this.container.addEventListener('pointermove',this.contextMove);
-    this.interaction=new GraphInteraction({container:this.container,canvas:this.renderer.domElement,camera:this.camera,mode:()=>this.mode,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
+    this.interaction=new GraphInteraction({container:this.container,canvas:this.renderer.domElement,camera:this.camera,mode:()=>this.mode,direction:()=>this.direction,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
       nodes:()=>[...this.stars.values()].map(star=>({data:star.data,point:star.point.position,label:star.label,pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned,visible:(this.desiredAppearance.get(star.data.id)?.point??0)>0})),
       edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.curve.getPoints(40)})),
       begin:()=>{if(this.transition)this.advanceTransition(this.transition.start+this.transition.duration+1);this.controls.enabled=false;this.pointerStart=null;},
@@ -412,32 +456,61 @@ export class KnowledgeGraph {
       coreRules.forEach((node, index) => { const angle = index / coreRules.length * Math.PI * 2 + .5; const radius = 115 + Math.floor(index / 6) * 38; result.set(node.id, new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * .7, Math.sin(angle) * 32)); });
       if (core) result.set(core, new THREE.Vector3());
     }
-    if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`network:${this.selected}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
+    if (mode === 'layers' || mode === 'mindmap') {
+      const related=mode==='mindmap'?this.neighbors():new Set<string>();
+      const visibleIds=mode==='mindmap'?new Set(this.data.nodes.filter(node=>this.overviewNodeVisible(node,related,mode)).map(node=>node.id)):undefined;
+      hierarchyLayout(this.data, coreId, this.direction, mode === 'layers', this.hierarchyParent, visibleIds).forEach((point,id)=>result.set(id,point));
+    }
+    if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`${this.layoutPrefix(mode)}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
     else {
-      const layoutKey = mode === 'galaxy' ? 'galaxy-v2' : mode === 'layers' ? 'layers-v2' : mode;
+      const layoutKey = this.layoutPrefix(mode);
       const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
       this.data.nodes.forEach(node => {
+        if(mode==='mindmap'&&!result.has(node.id)){
+          result.set(node.id,(result.get(node.documentId)??result.get(coreId??''))?.clone()??new THREE.Vector3());
+          return;
+        }
         const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key)??(mode==='galaxy'?[...this.layoutMemory].find(([k])=>k.startsWith(`${layoutKey}:${node.id}:`))?.[1]:undefined);
-        if ((mode === 'galaxy' || mode === 'layers') && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
+        if ((mode === 'galaxy' || mode === 'layers' || mode === 'mindmap') && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
         if (saved) {
           const point=saved.point.clone();
           // 导入或恢复的旧坐标同样遵守层级边界，不能让缓存覆盖总纲最高层。
-          if(mode==='layers')point.y=Math.min(point.y,node.kind==='system'?-105:-210);
+          if(mode==='layers'){const limit=node.kind==='system'?-105:-210;if(this.direction==='vertical')point.y=Math.min(point.y,limit);else point.x=Math.max(point.x,-limit);}
           result.set(node.id,point);
           if(!point.equals(saved.point))this.layoutMemory.set(key,{...saved,point});
         }
         else {
-          const point = result.get(node.id)!;
+          const point = result.get(node.id)??new THREE.Vector3();
           // 新条目避开已有槽位；旧节点始终复用自己的坐标，不随数组下标漂移。
           if (this.layoutMemory.size) for (let attempt = 0; attempt < 2000 && occupied.some(old => old.distanceToSquared(point) < 900); attempt++) {
-            if (mode === 'layers') point.y -= 92;
+            if (mode === 'layers' || mode === 'mindmap') {if(this.direction==='vertical')point.x+=92;else point.y-=92;}
             else { const angle = attempt * 2.399963; point.x += Math.cos(angle) * 35; point.y += Math.sin(angle) * 35; point.z += 12; }
           }
+          result.set(node.id,point);
           this.layoutMemory.set(key, { group: node.group, point: point.clone() }); occupied.push(point.clone());
         }
       });
     }
+    // 空分类与不完整旧项目也必须为每个节点提供坐标；构造函数会直接读取这张表。
+    this.data.nodes.forEach(node=>{
+      if(result.has(node.id))return;
+      const owner=this.data.edges.find(edge=>edge.type==='contains'&&edge.target===node.id)?.source;
+      result.set(node.id,(owner?result.get(owner)?.clone():undefined)??result.get(node.documentId)?.clone()??result.get(node.group)?.clone()??result.get(coreId??'')?.clone()??new THREE.Vector3());
+    });
     return result;
+  }
+
+  /** 转场必须覆盖场景内每个节点；筛选、旧总览快照与退出节点可能缺少目标坐标。 */
+  private completeTransitionCoordinates(from:Map<string,THREE.Vector3>,to:Map<string,THREE.Vector3>){
+    const valid=(point:THREE.Vector3|undefined)=>point&&Number.isFinite(point.x)&&Number.isFinite(point.y)&&Number.isFinite(point.z);
+    this.stars.forEach((star,id)=>{if(!valid(from.get(id)))from.set(id,star.point.position.clone());});
+    this.stars.forEach((star,id)=>{
+      if(valid(to.get(id)))return;
+      // 公开包含边是首选锚点；无父节点时沿用旧位置，避免凭空跳到画布原点。
+      const owner=this.data.edges.find(edge=>edge.type==='contains'&&edge.target===id)?.source;
+      const anchor=(owner&&to.get(owner))||to.get(star.data.documentId)||to.get(star.data.group)||from.get(id)||star.point.position;
+      to.set(id,valid(anchor)?anchor.clone():star.point.position.clone());
+    });
   }
 
   /** 自定义阅读坐标属于编辑器视图；没有此缓存仍可从公开内容重建图谱。 */
@@ -452,7 +525,7 @@ export class KnowledgeGraph {
   private selectEdge(id: string) { const index = this.data.edges.findIndex(edge => edge.id === id); if (index >= 0) this.selectRelation(index); }
 
   private createStar(node: KnowledgeNode, position: THREE.Vector3): StarNode {
-    const color = node.id === this.coreId() ? '#CFB378' : node.color ?? this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+    const color = this.nodeColor(node);
     const point = this.sprite(color, this.starSize(node), 0);
     const halo = this.sprite(color, this.starSize(node, true), 0);
     point.position.copy(position); halo.position.copy(position);
@@ -489,7 +562,7 @@ export class KnowledgeGraph {
     for (const node of data.nodes) {
       let star = this.stars.get(node.id);
       if (!star) {
-        const origin = from.get(node.group) ?? to.get(node.group) ?? to.get(node.id)!;
+        const origin = from.get(node.group) ?? to.get(node.group) ?? to.get(node.documentId) ?? to.get(node.id) ?? new THREE.Vector3();
         star = this.createStar(node, origin); this.stars.set(node.id, star); from.set(node.id, origin.clone()); appearance.set(node.id, { point: 0, halo: 0 });
       }
       const changed = before.has(node.id) && JSON.stringify(before.get(node.id)) !== JSON.stringify(node);
@@ -498,15 +571,15 @@ export class KnowledgeGraph {
       if(star.label.classList.contains('analysis-card')&&star.label.querySelector('strong')){
         star.label.querySelector('strong')!.textContent=node.title;
         star.label.querySelector('.analysis-card-summary')!.textContent=node.summary;
-        star.label.querySelector('.analysis-card-meta')!.textContent=`${data.groups.find(group=>group.id===node.group)?.label??'未归组'} · ${{confirmed:'已确认',draft:'草稿',question:'待确认',archived:'已归档'}[node.status]}`;
+        star.label.querySelector('.analysis-card-meta')!.textContent=`${this.nodeGroupLabel(node)} · ${{confirmed:'已确认',draft:'草稿',question:'待确认',archived:'已归档'}[node.status]}`;
       }else star.label.textContent = node.title;
       star.label.classList.toggle('version-changed', changed);
-      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+      const color = this.nodeColor(node);
       star.point.userData.baseColor = star.halo.userData.baseColor = color;
       star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', categoryColor(color));
     }
     const ids = new Set(data.nodes.map(node => node.id));
-    for (const [id, star] of this.stars) if (!ids.has(id)) { this.retiring.add(id); to.set(id, to.get(star.data.group)?.clone() ?? from.get(id)!.clone()); star.label.inert = true; }
+    for (const [id, star] of this.stars) if (!ids.has(id)) { this.retiring.add(id); to.set(id, to.get(star.data.group)?.clone() ?? from.get(id)?.clone() ?? star.point.position.clone()); star.label.inert = true; }
     this.connections = data.edges.map(edge => {
       const existing = oldConnections.get(edge.id); oldConnections.delete(edge.id);
       if (existing) { existing.data = edge; existing.label.textContent = types.find(type => type.id === edge.type)?.label ?? '关联'; return existing; }
@@ -516,6 +589,7 @@ export class KnowledgeGraph {
     const lines = this.connections.map(connection => connection.material.opacity);
     this.prepareAnalysis(true); this.refreshVisibility(false);
     this.versionChanging = true;
+    this.completeTransitionCoordinates(from,to);
     this.transition = { start: performance.now(), duration: this.reduceMotion.matches ? 0 : this.mode === 'network' ? 360 : 850, from, to, cameraFrom: this.camera.position.clone(), cameraTo: this.camera.position.clone(), targetFrom: this.controls.target.clone(), targetTo: this.controls.target.clone(), cameraInterrupted: true, restoreOverview: false, analysisMorph: this.mode === 'network', appearance, lines, scaleFrom: this.currentScale, ambientFrom: this.ambient, refocus: false, cards: new Map(this.cardAppearance), cardEdges: [...this.cardEdgeOpacity] };
     // 第一份总纲出现时将新中心纳入视野；普通版本迭代继续保留用户镜头。
     if(previousCore!==this.coreId()&&this.mode==='galaxy') {const framing=this.framing(to);this.transition.cameraTo=framing.position;this.transition.targetTo=framing.target;this.transition.cameraInterrupted=false;}
@@ -558,6 +632,19 @@ export class KnowledgeGraph {
         entries.forEach(entry => { result.set(entry.node.id, position(width / 2, cursor)); cursor += 170; });
         if (!entries.length) cursor += 35;
       });
+    } else if (this.direction === 'vertical') {
+      const upstream=this.analysis.entries.filter(entry=>entry.lane==='upstream');
+      const downstream=this.analysis.entries.filter(entry=>entry.lane==='downstream');
+      const context=this.analysis.entries.filter(entry=>entry.lane==='context');
+      const columns=Math.max(1,Math.min(3,Math.floor(width/250)));
+      const row=(entries:typeof upstream,top:number)=>entries.forEach((entry,index)=>result.set(entry.node.id,position(width*(index%columns+.5)/columns,top+Math.floor(index/columns)*174)));
+      if(upstream.length){this.lanePositions.set('upstream',position(width/2,22));row(upstream,110);}
+      const focusY=upstream.length?110+Math.ceil(upstream.length/columns)*174+55:114;
+      this.lanePositions.set('focus',position(width/2,focusY-85));
+      result.set(this.analysis.focus.id,position(width/2,focusY));
+      let cursor=focusY+170;
+      if(downstream.length){this.lanePositions.set('downstream',position(width/2,cursor));row(downstream,cursor+70);cursor+=70+Math.ceil(downstream.length/columns)*174+35;}
+      if(context.length){this.lanePositions.set('context',position(width/2,cursor));row(context,cursor+70);}
     } else {
       const step = width / 3;
       result.set(this.analysis.focus.id, position(width / 2, 114));
@@ -581,7 +668,9 @@ export class KnowledgeGraph {
   private prepareAnalysis(keepOutgoingCards = false) {
     this.analysis = this.selected ? buildAnalysis(this.selected, this.data.nodes, this.data.edges) : undefined;
     const enabled = this.mode === 'network';
+    const cardEnabled = enabled || this.mode === 'mindmap';
     this.container.parentElement!.classList.toggle('analysis-mode', enabled);
+    this.container.parentElement!.classList.toggle('mindmap-mode', this.mode === 'mindmap');
     this.edgeLayer.style.display = enabled || keepOutgoingCards ? '' : 'none';
     if (enabled) {
       const width = this.container.clientWidth;
@@ -591,19 +680,28 @@ export class KnowledgeGraph {
       this.renderer.domElement.style.touchAction = narrow ? 'pan-y' : 'none';
       const sideRows = Math.max(1, ...(['upstream', 'downstream'] as const).map(lane => entries.filter(entry => entry.lane === lane).length));
       const contextRows = Math.ceil(entries.filter(entry => entry.lane === 'context').length / 3);
-      const height = !this.analysis ? 450 : narrow ? 430 + entries.length * 170 + 3 * 88 : sideRows * 174 + 190 + Math.max(1, contextRows) * 174;
+      const verticalColumns=Math.max(1,Math.min(3,Math.floor(width/250)));
+      const upstreamRows=Math.ceil(entries.filter(entry=>entry.lane==='upstream').length/verticalColumns);
+      const downstreamRows=Math.ceil(entries.filter(entry=>entry.lane==='downstream').length/verticalColumns);
+      const verticalContextRows=Math.ceil(entries.filter(entry=>entry.lane==='context').length/verticalColumns);
+      const focusY=upstreamRows?110+upstreamRows*174+55:114;
+      const verticalHeight=Math.max(450,focusY+170+(downstreamRows?70+downstreamRows*174+35:0)+(verticalContextRows?70+verticalContextRows*174+35:0)+95);
+      const height = !this.analysis ? 450 : narrow ? 430 + entries.length * 170 + 3 * 88 : this.direction==='vertical' ? verticalHeight : sideRows * 174 + 190 + Math.max(1, contextRows) * 174;
       this.container.style.height = `${height}px`;
       this.container.style.setProperty('--analysis-card-width', `${narrow ? Math.min(width - 110, 260) : Math.min(226, (width - 112) / 3)}px`);
     } else {
       this.container.style.height = '';
+      if (this.mode === 'mindmap') this.container.style.setProperty('--analysis-card-width', '192px');
+      else this.container.style.removeProperty('--analysis-card-width');
       this.controls.enablePan = true;
       this.renderer.domElement.style.touchAction = 'none';
     }
     this.stars.forEach(star => {
       const wasCard = star.label.classList.contains('analysis-card');
-      if (!enabled && keepOutgoingCards && wasCard && (this.cardAppearance.get(star.data.id)?.open ?? 0) > .001) return;
-      star.label.classList.toggle('analysis-card', enabled);
-      if (!enabled) {
+      if (!cardEnabled && keepOutgoingCards && wasCard && (this.cardAppearance.get(star.data.id)?.open ?? 0) > .001) return;
+      star.label.classList.toggle('analysis-card', cardEnabled);
+      star.label.classList.toggle('mindmap-card', this.mode === 'mindmap');
+      if (!cardEnabled) {
         star.label.textContent = star.data.title;
         star.label.style.removeProperty('clip-path');
         star.label.style.removeProperty('opacity');
@@ -617,12 +715,12 @@ export class KnowledgeGraph {
       const entry = this.analysis?.entries.find(item => item.node.id === star.data.id);
       // 共同卡片沿用同一个内容元素，退出卡片也保留原说明直至收拢结束。
       if (wasCard && star.label.querySelector('.analysis-card-role')) {
-        if (entry || star.data.id === this.selected) star.label.querySelector('.analysis-card-role')!.textContent = star.data.id === this.selected ? '当前焦点' : laneLabels[entry!.lane];
+        star.label.querySelector('.analysis-card-role')!.textContent = enabled ? star.data.id === this.selected ? '当前焦点' : entry ? laneLabels[entry.lane] : '' : star.data.kind === 'system' ? '分类' : star.data.kind === 'rule' ? '小节' : '文档';
         return;
       }
       const meta = document.createElement('span');
       meta.className = 'analysis-card-meta';
-      meta.textContent = `${this.data.groups.find(group => group.id === star.data.group)!.label} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[star.data.status]}`;
+      meta.textContent = `${this.nodeGroupLabel(star.data)} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[star.data.status]}`;
       const title = document.createElement('strong');
       title.textContent = star.data.title;
       const summary = document.createElement('span');
@@ -630,12 +728,12 @@ export class KnowledgeGraph {
       summary.textContent = star.data.summary;
       const role = document.createElement('span');
       role.className = 'analysis-card-role';
-      role.textContent = star.data.id === this.selected ? '当前焦点' : entry ? laneLabels[entry.lane] : '';
+      role.textContent = enabled ? star.data.id === this.selected ? '当前焦点' : entry ? laneLabels[entry.lane] : '' : star.data.kind === 'system' ? '分类' : star.data.kind === 'rule' ? '小节' : '文档';
       star.label.replaceChildren(meta, title, summary, role);
     });
     this.laneHeadings.forEach((heading, lane) => {
-      heading.hidden = !enabled || !this.analysis;
       const count = this.analysis?.entries.filter(entry => entry.lane === lane).length ?? 0;
+      heading.hidden = !enabled || !this.analysis || this.direction==='vertical'&&lane!=='focus'&&count===0;
       heading.textContent = lane === 'focus' ? '当前分析条目' : `${laneLabels[lane as AnalysisLane]} · ${count}${count ? '' : ' / 暂无记录'}`;
     });
     this.measureLabels();
@@ -645,18 +743,28 @@ export class KnowledgeGraph {
   private framing(positions: Map<string, THREE.Vector3>) {
     // 分析坐标按可读像素设计，默认一场景单位对应一个屏幕像素，超出视口的内容可滚动。
     if (this.mode === 'network') return { target: new THREE.Vector3(), position: new THREE.Vector3(0, 0, this.container.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))) };
+    if (this.mode === 'mindmap') {
+      // 初始按 85% 投影，五张首层卡片可完整横排；总纲卡片顶部至少留出 72px。
+      const height=this.container.clientHeight;
+      const scale=.85;
+      const distance=height/(2*Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2))*scale);
+      const core=positions.get(this.coreId()??'')??new THREE.Vector3();
+      const target=core.clone().add(this.direction==='vertical'?new THREE.Vector3(0,-(height/2-72)/scale,0):new THREE.Vector3((this.container.clientWidth/2-110)/scale,0,0));
+      return {target,position:target.clone().add(new THREE.Vector3(0,0,distance))};
+    }
     if (this.mode === 'layers') {
       // 分层目录可向下很长：默认只取总纲、分类和首层内容取景，深层通过平移阅读。
       const visible=[...positions].filter(([id])=>(this.desiredAppearance.get(id)?.point??Number(this.stars.get(id)?.point.visible))>0);
-      const upper=visible.filter(([id,point])=>id===this.coreId()||this.stars.get(id)?.data.kind==='system'||point.y>=-315);
+      const upper=visible.filter(([id,point])=>id===this.coreId()||this.stars.get(id)?.data.kind==='system'||(this.direction==='vertical'?point.y>=-340:point.x<=640));
       const points=(upper.length?upper:visible.length?visible:[...positions]).map(([,point])=>point);
       if(!points.length)return {target:new THREE.Vector3(),position:new THREE.Vector3(0,0,650)};
       const frame=new THREE.Box3().setFromPoints(points);
       const size=frame.getSize(new THREE.Vector3()),aspect=Math.max(this.container.clientWidth/Math.max(this.container.clientHeight,1),.45);
       const tangent=Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2));
       // 1300×720 窗口内的实际画布约 1300×510，五列系统约占画布宽度的 75%。
-      const distance=Math.min(1200,Math.max(620,(size.x+160)/(2*tangent*aspect*.86)));
-      const target=new THREE.Vector3(frame.getCenter(new THREE.Vector3()).x,frame.max.y-160,0);
+      const distance=Math.min(2200,Math.max(620,(size.x+300)/(2*tangent*aspect*.86),(size.y+230)/(2*tangent*.86)));
+      const center=frame.getCenter(new THREE.Vector3());
+      const target=this.direction==='vertical'?new THREE.Vector3(center.x,frame.max.y-175,0):new THREE.Vector3(frame.min.x+240,center.y,0);
       return {target,position:target.clone().add(new THREE.Vector3(0,0,distance))};
     }
     // 只对当前可见对象取景；没有结果时使用完整布局，空状态由界面负责显示。
@@ -677,7 +785,7 @@ export class KnowledgeGraph {
     // 返回动画尚未结束又进入分析时，继续保留原总览，避免把半途坐标当成新的基线。
     if (this.transition?.restoreOverview && this.overview?.mode === this.mode) return;
     this.overview = {
-      mode: this.mode,
+      mode: this.mode, direction:this.direction,width:this.container.clientWidth,height:this.container.clientHeight,
       positions: new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()])),
       camera: this.camera.position.clone(), target: this.controls.target.clone()
     };
@@ -762,20 +870,23 @@ export class KnowledgeGraph {
       return [id, point] as const;
     }));
     this.refreshVisibility(false);
-    const saved = options.restoreOverview && this.overview?.mode === mode ? this.overview : undefined;
+    const saved = options.restoreOverview && this.overview?.mode === mode && this.overview.direction===this.direction ? this.overview : undefined;
     const to = saved ? new Map([...saved.positions].map(([id, point]) => [id, point.clone()])) : this.layout(mode);
-    const framing = saved ? { position: saved.camera.clone(), target: saved.target.clone() } : this.framing(to);
-    const analysisMorph = mode === 'network' || frame?.mode === 'network';
+    // 返回焦点前若窗口尺寸变了，沿用原位置但重新取景，避免旧镜距裁掉卡片。
+    const resizedOverview=saved && (Math.abs(saved.width-width)>4 || Math.abs(saved.height-height)>4);
+    const framing = saved && !resizedOverview ? { position: saved.camera.clone(), target: saved.target.clone() } : this.framing(to);
+    const analysisMorph = mode === 'network' || mode === 'mindmap' || frame?.mode === 'network' || frame?.mode === 'mindmap';
     const refocus = mode === 'network' && frame?.mode === 'network';
     if (refocus) {
       this.stars.forEach((_, id) => {
         const previous = frame?.cards.get(id)?.open ?? 0;
         const visible = this.analysis?.visibleIds.has(id);
         // 新邻居从被选中的知识节点向外出现；旧卡片在自己的节点处收拢，不飞回隐藏布局。
-        if (visible && previous < .001 && this.selected) from.set(id, from.get(this.selected)!.clone());
-        if (!visible && previous > 0) to.set(id, from.get(id)!.clone());
+        if (visible && previous < .001 && this.selected) from.set(id,(from.get(this.selected)??from.get(id)??this.stars.get(id)!.point.position).clone());
+        if (!visible && previous > 0) to.set(id,(from.get(id)??this.stars.get(id)!.point.position).clone());
       });
     }
+    this.completeTransitionCoordinates(from,to);
     // 较长分析页的镜头可能远于总览缩放上限；迁移期间放宽范围，防止控制器截断动画起点。
     this.controls.maxDistance = Math.max(mode === 'network' ? 10000 : 3400, this.camera.position.distanceTo(this.controls.target), framing.position.distanceTo(framing.target)) + 1;
     this.transition = {
@@ -800,8 +911,9 @@ export class KnowledgeGraph {
 
   /** 选择、查询与分组过滤只影响可见性，始终保留稳定的节点 ID 和布局坐标。 */
   setState(state: { selected: string | null; group: string | null; query: string; directOnly: boolean; labelsAll: boolean; paused: boolean; relationIndex?: number | null; scopeIds?: string[] | null; includeArchived?: boolean; detailedGraph?: boolean }, options: { deferLayout?: boolean; preserveCamera?: boolean } = {}) {
+    const detailChanged=this.detailedGraph!== (state.detailedGraph===true) || this.includeArchived!== (state.includeArchived===true) || JSON.stringify(this.scopeIds)!==JSON.stringify(state.scopeIds??null);
     this.detailedGraph = state.detailedGraph === true; this.scopeIds = state.scopeIds ?? null; this.includeArchived = state.includeArchived === true;
-    const scopeChanged = this.group !== state.group || this.query !== state.query.trim().toLowerCase() || this.directOnly !== state.directOnly || (state.directOnly && this.selected !== state.selected);
+    const scopeChanged = detailChanged || this.group !== state.group || this.query !== state.query.trim().toLowerCase() || this.directOnly !== state.directOnly || (state.directOnly && this.selected !== state.selected);
     const focusChanged = this.selected !== state.selected;
     this.selected = state.selected;
     this.group = state.group;
@@ -812,7 +924,7 @@ export class KnowledgeGraph {
     this.relationIndex = state.relationIndex ?? null;
     // 导航会紧接着调用 setMode，避免先用旧页面模式生成一次过渡布局。
     if (options.deferLayout) return;
-    if (!options.preserveCamera && (this.mode === 'network' ? focusChanged : scopeChanged)) this.reset();
+    if (!options.preserveCamera && (this.mode === 'network' ? focusChanged : scopeChanged || (this.mode==='mindmap'&&focusChanged))) this.reset();
     else this.refreshVisibility();
   }
 
@@ -830,8 +942,7 @@ export class KnowledgeGraph {
     const related = this.neighbors();
     let count = 0;
     this.stars.forEach(star => {
-      const match = !this.query || `${star.data.id} ${star.data.title} ${star.data.summary} ${star.data.content.join(' ')}`.toLowerCase().includes(this.query);
-      const visible = !this.retiring.has(star.data.id) && (this.mode === 'network' ? Boolean(this.analysis?.visibleIds.has(star.data.id)) : (this.includeArchived || star.data.status !== 'archived') && (this.detailedGraph || this.data.nodes.length <= 500 || star.data.kind !== 'rule' || Boolean(this.group || this.query || this.scopeIds || related.has(star.data.id))) && (!this.scopeIds || this.scopeIds.includes(star.data.id)) && (!this.group || star.data.group === this.group) && match && (!this.directOnly || !this.selected || related.has(star.data.id)));
+      const visible = !this.retiring.has(star.data.id) && (this.mode === 'network' ? Boolean(this.analysis?.visibleIds.has(star.data.id)) : this.overviewNodeVisible(star.data,related));
       const core = star.data.id === this.coreId();
       const highlighted = core || !this.selected || related.has(star.data.id);
       star.label.classList.toggle('galaxy-core', core && this.mode === 'galaxy');
@@ -847,7 +958,8 @@ export class KnowledgeGraph {
       const { source, target } = connection.data;
       // 分层视图按分类展示已归类规则；GDD→章节的真实目录边仍保留在数据及关系分析中。
       const supersededSection = this.mode === 'layers' && connection.data.origin?.kind === 'section' && classifiedRules.has(target);
-      const overviewVisible = !supersededSection && currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
+      const hierarchyVisible = this.mode !== 'mindmap' || connection.data.type === 'contains' && this.hierarchyParent.get(target) === source;
+      const overviewVisible = hierarchyVisible && !supersededSection && currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
       connection.path.classList.toggle('selected', index === this.relationIndex);
       connection.label.setAttribute('aria-pressed', String(index === this.relationIndex));
       const focused = source === this.selected || target === this.selected;
@@ -913,7 +1025,7 @@ export class KnowledgeGraph {
     const outCubic = (value: number) => 1 - (1 - THREE.MathUtils.clamp(value, 0, 1)) ** 3;
     this.stars.forEach((star, id) => {
       if (!star.label.classList.contains('analysis-card')) return;
-      const desired = this.mode === 'network' && Boolean(this.analysis?.visibleIds.has(id));
+      const desired = this.mode === 'network' ? Boolean(this.analysis?.visibleIds.has(id)) : this.mode === 'mindmap' && (this.desiredAppearance.get(id)?.point ?? 0) > 0;
       const source = change?.cards.get(id) ?? { open: desired && !change ? 1 : 0, opacity: desired && !change ? 1 : 0 };
       const closingShare = Math.min(.68, 240 / Math.max(change?.duration ?? 1, 1));
       const progress = outCubic(ratio / (desired ? .92 : closingShare));
@@ -927,9 +1039,9 @@ export class KnowledgeGraph {
       // 即使仍在收拢，旧卡片也不再接收点击；共同卡片不锁定，允许继续追踪。
       star.label.inert = !desired || open < .3;
       star.label.hidden = open < .001;
-      if (this.mode !== 'network' && open < .001) {
+      if (this.mode !== 'network' && this.mode !== 'mindmap' && open < .001) {
         // 收拢到节点后立即接回总览标签，不在动画末尾再突然补上一整批标题。
-        star.label.classList.remove('analysis-card');
+        star.label.classList.remove('analysis-card','mindmap-card');
         star.label.textContent = star.data.title;
         star.label.style.removeProperty('opacity');
         star.label.inert = false;
@@ -960,7 +1072,12 @@ export class KnowledgeGraph {
     const eased = change.analysisMorph ? 1 - (1 - ratio) ** 3 : ratio < .5 ? 4 * ratio ** 3 : 1 - (-2 * ratio + 2) ** 3 / 2;
     this.currentScale = THREE.MathUtils.lerp(change.scaleFrom, 1, eased);
     this.stars.forEach((star, id) => {
-      star.point.position.lerpVectors(change.from.get(id)!, change.to.get(id)!, eased);
+      const start=change.from.get(id)??star.point.position.clone();
+      const end=change.to.get(id)??start;
+      // 数据变更或旧总览快照留下缺项时只停在当前稳定点，不在每帧抛错。
+      if(!change.from.has(id))change.from.set(id,start.clone());
+      if(!change.to.has(id))change.to.set(id,end.clone());
+      star.point.position.lerpVectors(start,end,eased);
       star.halo.position.copy(star.point.position);
       star.point.scale.setScalar(this.starSize(star.data) * this.currentScale);
       star.halo.scale.setScalar(this.starSize(star.data, true) * this.currentScale);
@@ -984,7 +1101,7 @@ export class KnowledgeGraph {
       this.controls.enabled = true;
       this.controls.maxDistance = this.mode === 'network' ? 10000 : 3400;
       this.setContentOpacity(1);
-      if (this.mode !== 'network' && change.analysisMorph) this.prepareAnalysis();
+      if (this.mode !== 'network' && this.mode !== 'mindmap' && change.analysisMorph) this.prepareAnalysis();
       this.container.classList.remove('graph-transitioning');
       delete this.container.dataset.transition;
       this.container.style.removeProperty('--graph-content-opacity');
@@ -1019,7 +1136,7 @@ export class KnowledgeGraph {
     this.camera.updateMatrixWorld();
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
-    if (this.mode === 'network') { this.updateAnalysisLabels(width, height); this.labelsDirty = false; return; }
+    if (this.mode === 'network' || this.mode === 'mindmap') { this.updateAnalysisLabels(width, height, this.mode === 'mindmap'); this.labelsDirty = false; return; }
     if ([...this.stars.values()].some(star => star.label.classList.contains('analysis-card'))) this.updateAnalysisLabels(width, height, true);
     const related = this.neighbors();
     const bounds: { x: number; y: number; width: number; height: number }[] = [];
@@ -1069,10 +1186,15 @@ export class KnowledgeGraph {
       const point = star.point.position.clone().project(this.camera);
       const size = this.labelSizes.get(star.data.id)!;
       const x = (point.x + 1) * width / 2, y = (1 - point.y) * height / 2;
+      // 脑图缩放时卡片与节点间距同倍率投影，缩远也不会变成一片重叠的固定像素卡片。
+      const defaultDistance=height/(2*Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2)));
+      const cardScale=this.mode==='mindmap'?THREE.MathUtils.clamp(defaultDistance/Math.max(this.camera.position.distanceTo(this.controls.target),150),.08,1.25):1;
+      const cardWidth=size.width*cardScale,cardHeight=size.height*cardScale;
       star.label.hidden = point.z > 1 || point.z < -1;
-      star.label.style.transform = `translate(${x - size.width / 2}px, ${y - size.height / 2}px)`;
+      star.label.style.transformOrigin='top left';
+      star.label.style.transform = `translate(${x - cardWidth / 2}px, ${y - cardHeight / 2}px) scale(${cardScale})`;
       // 线的端点追随正在展开的四角边界，不悬在尚未长成的完整卡片边缘。
-      projected.set(star.data.id, { x, y, width: size.width * open, height: size.height * open });
+      projected.set(star.data.id, { x, y, width: cardWidth * open, height: cardHeight * open });
     });
     this.laneHeadings.forEach((heading, lane) => {
       const anchor = this.lanePositions.get(lane);
@@ -1232,11 +1354,11 @@ export class KnowledgeGraph {
     if (data.nodes.length !== this.data.nodes.length || data.edges.length !== this.data.edges.length || data.groups.length !== this.data.groups.length) return false;
     if (data.nodes.some((node, index) => node.id !== this.data.nodes[index]?.id || node.group !== this.data.nodes[index]?.group || node.kind !== this.data.nodes[index]?.kind || node.documentType !== this.data.nodes[index]?.documentType || node.status !== this.data.nodes[index]?.status)) return false;
     if (data.edges.some((edge, index) => edge.id !== this.data.edges[index]?.id || edge.source !== this.data.edges[index]?.source || edge.target !== this.data.edges[index]?.target || edge.type !== this.data.edges[index]?.type)) return false;
-    if (data.groups.some((group, index) => group.id !== this.data.groups[index]?.id || group.color !== this.data.groups[index]?.color)) return false;
+    if (data.rootDocumentId!==this.data.rootDocumentId||data.groups.some((group, index) => group.id !== this.data.groups[index]?.id || group.color !== this.data.groups[index]?.color || group.parent!==this.data.groups[index]?.parent || group.label!==this.data.groups[index]?.label)) return false;
     this.data = data;
     data.nodes.forEach(node => {
       const star = this.stars.get(node.id)!; star.data = node;
-      const color=node.id===this.coreId()?'#CFB378':node.color??data.groups.find(group=>group.id===node.group)?.color??'#94A5BC';
+      const color=this.nodeColor(node);
       if(star.point.userData.baseColor!==color){
         star.point.userData.baseColor=star.halo.userData.baseColor=color;
         star.point.material.color.copy(this.graphColor(color));star.halo.material.color.copy(this.graphColor(color));
@@ -1246,7 +1368,7 @@ export class KnowledgeGraph {
       if (star.label.classList.contains('analysis-card')) {
         star.label.querySelector('strong')!.textContent = node.title;
         star.label.querySelector('.analysis-card-summary')!.textContent = node.summary;
-        star.label.querySelector('.analysis-card-meta')!.textContent = `${data.groups.find(group => group.id === node.group)!.label} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[node.status]}`;
+        star.label.querySelector('.analysis-card-meta')!.textContent = `${this.nodeGroupLabel(node)} · ${{ confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' }[node.status]}`;
       } else star.label.textContent = node.title;
     });
     data.edges.forEach((edge, index) => { this.connections[index].data = edge; this.connections[index].label.setAttribute('aria-label', `查看关系依据：${edgeSentence(edge, data.nodes, data.edges)}`); });
@@ -1278,7 +1400,7 @@ export class KnowledgeGraph {
     this.container.style.removeProperty('--graph-content-opacity');
     this.container.style.removeProperty('--analysis-card-width');
     this.container.style.height = '';
-    this.container.parentElement?.classList.remove('analysis-mode');
+    this.container.parentElement?.classList.remove('analysis-mode','mindmap-mode');
     delete this.container.dataset.mode;
     this.controls.dispose();
     document.removeEventListener('visibilitychange', this.visibilityChanged);

@@ -43,7 +43,15 @@ export function headingFoldingPlugin() {
           hidden.push([heading.position + heading.size, next?.position ?? state.doc.content.size]);
         }
         const isHidden = (position: number) => hidden.some(([from, to]) => position >= from && position < to);
-        state.doc.forEach((node, position) => { if (isHidden(position)) decorations.push(Decoration.node(position, position + node.nodeSize, { class: 'cewen-folded-content' })); });
+        state.doc.forEach((node, position) => {
+          if (isHidden(position)) decorations.push(Decoration.node(position, position + node.nodeSize, { class: 'cewen-folded-content' }));
+          // 锚点行的样式由 ProseMirror 装饰维护，NodeView 不直接修改父段落 DOM。
+          if (node.type.name === 'paragraph' && /^(?:◇\s*知识条目)?$/.test(node.textContent.trim())) {
+            let hasAnchor = false;
+            node.descendants(child => { if (child.type.name === 'html' && /^<\/?a(?:\s+id=["'][A-Za-z0-9_-]+["'])?\s*>\s*(?:<\/a>)?\s*$/i.test(String(child.attrs.value ?? '').trim())) hasAnchor = true; });
+            if (hasAnchor) decorations.push(Decoration.node(position, position + node.nodeSize, { class: 'cewen-anchor-label-row' }));
+          }
+        });
         for (const heading of headings) {
           if (isHidden(heading.position)) continue;
           decorations.push(Decoration.widget(heading.position + 1, view => {
@@ -77,17 +85,27 @@ export interface RichDesignOptions {
 export function anchorHtmlView() {
   return (initial: ProseNode): NodeView => {
     const dom = document.createElement('span');
+    let renderedValue: string | undefined;
     const render = (node: ProseNode) => {
       const value = String(node.attrs.value ?? '');
+      // 编辑相邻正文会反复调用 update；相同 HTML 不再写 DOM，避免观察器回读。
+      if (value === renderedValue) return;
+      renderedValue = value;
       const match = /^<a\s+id=["']([A-Za-z0-9_-]+)["']\s*>\s*(?:<\/a>)?\s*$/i.exec(value.trim());
       if (match) {
         dom.className = 'cewen-anchor-token'; dom.id = match[1]; dom.dataset.anchorId = match[1]; dom.title = `知识锚点：${match[1]}`; dom.setAttribute('aria-label', `知识锚点：${match[1]}`); dom.textContent = '';
-        queueMicrotask(() => { const paragraph = dom.closest('p'); if (paragraph && /^◇\s*知识条目\s*$/.test(paragraph.textContent?.trim() ?? '')) paragraph.classList.add('cewen-anchor-label-row'); });
-      } else if(/^<\/a>\s*$/i.test(value.trim())) { dom.className='cewen-anchor-token';dom.removeAttribute('id');dom.removeAttribute('data-anchor-id');dom.textContent='';queueMicrotask(()=>{const paragraph=dom.closest('p');if(paragraph&&/^(?:◇\s*知识条目\s*)?$/.test(paragraph.textContent?.trim()??''))paragraph.classList.add('cewen-anchor-label-row');});
+      } else if(/^<\/a>\s*$/i.test(value.trim())) { dom.className='cewen-anchor-token';dom.removeAttribute('id');dom.removeAttribute('data-anchor-id');dom.textContent='';
       } else { dom.className = 'cewen-other-html'; dom.removeAttribute('id'); dom.removeAttribute('data-anchor-id'); dom.title = ''; dom.textContent = value; }
     };
     render(initial);
-    return { dom, update(node) { if (node.type.name !== 'html') return false; render(node); return true; }, stopEvent: () => true };
+    return {
+      dom,
+      update(node) { if (node.type.name !== 'html') return false; render(node); return true; },
+      stopEvent: () => true,
+      // 锚点没有 contentDOM；类名、属性和占位文字都由 NodeView 自己维护。
+      // 不回传给 ProseMirror 解析，否则 DOM 更新可触发再次 update。
+      ignoreMutation: () => true,
+    };
   };
 }
 
@@ -133,7 +151,8 @@ export function designCodeBlockView(options: RichDesignOptions = {}) {
         render(node); return true;
       },
       stopEvent(event) { return !!(event.target instanceof Element && event.target.closest('.cewen-dialogue-preview,.cewen-palette-preview')); },
-      ignoreMutation(mutation) { return !contentDOM || mutation.type === 'attributes' && mutation.target === dom; },
+      // 只有普通代码的真实编辑区交给 ProseMirror 观察；预览与包装 DOM 由 NodeView 维护。
+      ignoreMutation(mutation) { return !contentDOM || !(mutation.target === contentDOM || contentDOM.contains(mutation.target)); },
       destroy() { disposePreview?.(); },
     };
   };

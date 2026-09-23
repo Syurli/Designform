@@ -39,6 +39,8 @@ sectionSystems:
 
 `PROJECT.systems` 字段存在（包括空列表）时即为唯一分类来源，缺少该字段才读取旧 `GDD.systems`。首次修改旧项目的分类，在同一版本中迁移登记、去掉当前 GDD 重复字段并写入 `minimumAppVersion: 0.4.0`；旧快照不修改。迁移后的项目使用 0.4 或更新的软件打开。
 
+0.7 起 `systems[]` 可含父分类 `parent`，专项文档头部可含父文档 `parent`。项目总纲是唯一根，旧总纲的 `system`/`parent` 仅保留原文而不参与投影；子文档的主要分类继承父文档。直属文档顺序继续放在 `documentOrder[分类ID]`，子文档顺序放在 `documentOrder["document:<父文档ID>"]`。完整移动、深度和循环约束见[层级协议](HIERARCHY_0.7.md)。
+
 普通段落不必拥有 ID。需要引用的规则使用锚点和标题：
 
 ```markdown

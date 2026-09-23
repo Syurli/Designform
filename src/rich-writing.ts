@@ -14,6 +14,7 @@ import { parseSizedImage, sizedImageMarkup } from '../shared/image-markup';
 import { stripBlockIds, transferBlockIds } from '../shared/document-blocks';
 import { anchorHtmlView, designCodeBlockView, headingFoldingPlugin } from './rich-document-plugins';
 import type { RichDesignOptions } from './rich-document-plugins';
+import { DOCUMENT_DRAG_TYPE, readDocumentDrag, type DocumentDrag } from './document-drag';
 import '@milkdown/crepe/theme/common/style.css';
 import '@milkdown/crepe/theme/classic.css';
 import './rich-writing.css';
@@ -91,12 +92,16 @@ export class RichWriting {
   private skipCandidateKeyup=false;
   private composing=false;
   private resizeHost?:HTMLElement;
+  private dropCaret?:HTMLElement;
+  private resolveDocumentDrop?: (item:DocumentDrag)=>{href:string;title:string}|undefined;
   private uploadError(error:unknown){
     const box=this.root.closest('dialog')?.querySelector<HTMLElement>('#workbench-feedback');
     if(box){box.hidden=false;box.classList.add('error');box.textContent=`图片未能加入草稿：${error instanceof Error?error.message:'请重试或改用源码编辑。'}`;}
   }
   private mergeMarkdown(next:string){return hasBlockIds(this.original)?transferBlockIds(this.original,preserveBlocks(stripBlockIds(this.original),next)):preserveBlocks(this.original,next);}
-  constructor(private root:HTMLElement,body:string,private onChange:(body:string)=>void,upload:(file:File)=>Promise<string>,resolveImage:(url:string)=>string,private onLink:()=>void,options:RichDesignOptions={}){
+  constructor(private root:HTMLElement,body:string,private onChange:(body:string)=>void,upload:(file:File)=>Promise<string>,resolveImage:(url:string)=>string,private onLink:()=>void,options:RichDesignOptions & {resolveDocumentDrop?:(item:DocumentDrag)=>{href:string;title:string}|undefined}={}){
+    this.resolveDocumentDrop=options.resolveDocumentDrop;
+    root.addEventListener('dragover',this.documentDragOver,true);root.addEventListener('drop',this.documentDrop,true);root.addEventListener('dragleave',this.documentDragLeave);window.addEventListener('cewen:document-drag-end',this.clearDocumentDrop);
     const part=richBodyParts(body);this.original=part.body;this.tail=part.tail;
     // Crepe 浮层挂在传入 root 下；其主题 CSS 只匹配 .milkdown 的后代。
     root.classList.add('milkdown');
@@ -253,6 +258,26 @@ export class RichWriting {
   private chooseCandidate(index:number){const item=this.visibleCandidates[index],range=this.candidateRange;if(!item||!range)return;this.closeCandidates();this.selection=range;this.link(item.href,item.title);}
   private closeCandidates(){this.candidateRange=undefined;this.visibleCandidates=[];this.candidateBox?.remove();const editor=this.root.querySelector('.ProseMirror');editor?.removeAttribute('aria-expanded');editor?.removeAttribute('aria-controls');editor?.removeAttribute('aria-activedescendant');}
   rememberSelection(){if(!this.ready)return;this.crepe.editor.action(ctx=>{const {from,to}=ctx.get(editorViewCtx).state.selection;this.selection={from,to};});}
+  /** 只处理文档身份拖放；图片上传、块排序继续走编辑器自己的事件。 */
+  private documentDragOver=(event:DragEvent)=>{
+    if(!this.ready||!event.dataTransfer?.types.includes(DOCUMENT_DRAG_TYPE))return;
+    event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='copy';
+    this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx),hit=view.posAtCoords({left:event.clientX,top:event.clientY});if(!hit)return;
+      const cursor=TextSelection.near(view.state.doc.resolve(hit.pos)),rect=view.coordsAtPos(cursor.from);
+      if(!this.dropCaret){this.dropCaret=document.createElement('span');this.dropCaret.className='document-link-drop-caret';this.root.append(this.dropCaret);}
+      Object.assign(this.dropCaret.style,{left:`${rect.left}px`,top:`${rect.top}px`,height:`${Math.max(20,rect.bottom-rect.top)}px`});this.root.classList.add('document-link-dragover');
+    });
+  };
+  private documentDrop=(event:DragEvent)=>{
+    if(!event.dataTransfer?.types.includes(DOCUMENT_DRAG_TYPE))return;
+    event.preventDefault();event.stopPropagation();this.clearDocumentDrop();if(!this.ready)return;
+    const payload=readDocumentDrag(event.dataTransfer),link=payload&&this.resolveDocumentDrop?.(payload);if(!link)return;
+    this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx),hit=view.posAtCoords({left:event.clientX,top:event.clientY});if(!hit)return;
+      const tr=view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(hit.pos)));tr.replaceSelectionWith(view.state.schema.text(link.title,[view.state.schema.marks.link.create({href:link.href})]),false);view.dispatch(tr.scrollIntoView());view.focus();this.selection=undefined;
+    });
+  };
+  private documentDragLeave=(event:DragEvent)=>{if(!this.root.contains(event.relatedTarget as Node|null))this.clearDocumentDrop();};
+  private clearDocumentDrop=()=>{this.dropCaret?.remove();this.dropCaret=undefined;this.root.classList.remove('document-link-dragover');};
   selectedText(){if(!this.ready)return '';return this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx),range=this.selection??view.state.selection;return view.state.doc.textBetween(range.from,range.to);});}
   /** 插入实际 Markdown 链接，选择器中的标题与身份不会混入正文。 */
   link(url:string,label:string){if(!this.ready)return;this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx),range=this.selection??view.state.selection,mark=view.state.schema.marks.link.create({href:url});const tr=view.state.tr.replaceWith(range.from,range.to,view.state.schema.text(label,[mark]));view.dispatch(tr);view.focus();});this.selection=undefined;}
@@ -271,5 +296,5 @@ export class RichWriting {
     if(!this.ready||unchanged){this.original=part.body;return;}
     this.silent=true;try{this.crepe.editor.action(replaceAll(stripBlockIds(part.body)));const baseline=this.crepe.getMarkdown();this.original=part.body;this.baseline=baseline;}finally{this.silent=false;}}
   find(query:string){if(!this.ready||!query)return;this.crepe.editor.action(ctx=>{const view=ctx.get(editorViewCtx);let found=false;view.state.doc.descendants((node,pos)=>{if(found||!node.isText)return;const at=(node.text??'').toLocaleLowerCase().indexOf(query.toLocaleLowerCase());if(at>=0){view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc,pos+at,pos+at+query.length)).scrollIntoView());view.focus();found=true;}});});}
-  dispose(){this.disposed=true;this.root.removeEventListener('keydown',this.keydown,true);this.root.removeEventListener('keyup',this.keyup);this.root.removeEventListener('input',this.onInput);this.root.removeEventListener('compositionstart',this.onCompositionStart);this.root.removeEventListener('compositionend',this.onCompositionEnd);this.root.removeEventListener('focusout',this.onFocusOut);this.root.removeEventListener('mouseup',this.onSelectionMove);document.removeEventListener('selectionchange',this.onSelectionMove);this.root.removeEventListener('pointerdown',this.onImagePointerDown,true);this.root.removeEventListener('pointerover',this.onImageHandleHover);this.root.removeEventListener('load',this.onImageLoad,true);window.removeEventListener('pointerup',this.onImagePointerUp);this.closeCandidates();this.observer?.disconnect();if(this.ready)void this.crepe.destroy();}
+  dispose(){this.disposed=true;this.root.removeEventListener('dragover',this.documentDragOver,true);this.root.removeEventListener('drop',this.documentDrop,true);this.root.removeEventListener('dragleave',this.documentDragLeave);window.removeEventListener('cewen:document-drag-end',this.clearDocumentDrop);this.clearDocumentDrop();this.root.removeEventListener('keydown',this.keydown,true);this.root.removeEventListener('keyup',this.keyup);this.root.removeEventListener('input',this.onInput);this.root.removeEventListener('compositionstart',this.onCompositionStart);this.root.removeEventListener('compositionend',this.onCompositionEnd);this.root.removeEventListener('focusout',this.onFocusOut);this.root.removeEventListener('mouseup',this.onSelectionMove);document.removeEventListener('selectionchange',this.onSelectionMove);this.root.removeEventListener('pointerdown',this.onImagePointerDown,true);this.root.removeEventListener('pointerover',this.onImageHandleHover);this.root.removeEventListener('load',this.onImageLoad,true);window.removeEventListener('pointerup',this.onImagePointerUp);this.closeCandidates();this.observer?.disconnect();if(this.ready)void this.crepe.destroy();}
 }
