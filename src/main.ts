@@ -113,7 +113,7 @@ app.innerHTML = `
         <div id="graph-canvas" class="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
         <div class="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
-        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">拖动旋转 · 滚轮缩放 · 点击阅读</span></div>
+        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">空白旋转 · Shift 框选 · 滚轮缩放</span></div>
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
       <section class="cards-view" id="cards-view" hidden aria-label="策划卡片库"></section>
@@ -336,7 +336,7 @@ function setGraphMode(mode: OverviewMode) {
 function updateSpaceNavigation() {
   const mode = state.mode;
   document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(item => { item.classList.toggle('active', item.dataset.mode === mode); item.setAttribute('aria-pressed', String(item.dataset.mode === mode)); });
-  get('gesture').textContent = mode === 'galaxy' ? '拖动旋转 · 滚轮缩放 · 点击阅读' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '拖动平移 · 滚轮缩放 · 点击阅读';
+  get('gesture').textContent = mode === 'galaxy' ? '空白旋转 · Shift 框选 · 滚轮缩放' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '空白拖动框选 · 右键平移 · 滚轮缩放';
   get('space-intro').textContent = { galaxy: '在系统之间，发现设计的联系', network: '从规则出发，核对前提、约束与关联依据', layers: '按系统归位，从方向逐层阅读到规则' }[mode];
 }
 
@@ -573,7 +573,7 @@ async function graphCommand(command:string,id=state.selected){
   if(command==='selectAll'){graph?.selectAllNodes();return;}if(command==='search'){get('search').focus();return;}
   if(command==='save'){try{await editingSession?.save();}finally{renderEditingState();}return;}if(command==='undo'){editingSession?.undo();sync();return;}if(command==='redo'){editingSession?.redo();sync();return;}
   if(command==='reset-layout'){const before=graph?.exportLayout();graph?.resetPositions();const after=graph?.exportLayout();await finishGraphGesture(undefined,before,after);return;}
-  if(command==='classify')edit=await classifyDocuments(projectSnapshot,ids.filter(value=>nodeById.get(value)?.kind==='document'&&nodeById.get(value)?.documentType!=='gdd'));
+  if(command==='classify')edit=await classifyDocuments(projectSnapshot,ids.filter(value=>{const node=nodeById.get(value);return node?.kind==='rule'&&!!node.anchor||node?.kind==='document'&&node.documentType!=='gdd';}));
   if(command==='connect'&&id)edit=await connectDocuments(projectSnapshot,id);
   if(command==='edge'&&state.relationIndex!==null)edit=await editEdge(projectSnapshot,edges[state.relationIndex].id);
   if(command==='copy'||command==='cut'){const documents=[...new Set(ids.map(value=>nodeById.get(value)).filter(n=>n?.kind!=='system'&&n?.documentType!=='gdd').map(n=>n!.documentId))];if(!documents.length)return;canvasClipboard={project:projectSnapshot.project.id,ids:documents,cut:command==='cut'};await navigator.clipboard.writeText(documents.map(value=>nodeById.get(value)?.title??'').join('\n')).catch(()=>{});get('announcement').textContent=command==='cut'?'已剪切条目；选中目标分类后粘贴即可移动归属。':'已复制条目；在当前项目粘贴可创建独立副本。';return;}

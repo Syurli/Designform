@@ -19,11 +19,23 @@ id: dd-resources
 type: dd
 status: draft
 system: system-resources
+aliases:
+  - 资源循环
+  - Economy
+sectionSystems:
+  rest-cost: system-time
+  crafting-choice: system-unassigned
 ```
 
 `type` 为 `gdd`、`dd`、`question`；普通说明文件不需要进入图谱。`status` 为 `draft`（草稿）、`question`（待确认）、`confirmed`（已确认）、`archived`（已归档）。问题文档也可用 `open` / `answered` / `partially-decided` / `decided` 表示问询进度，图谱仅把尚未落实的问题标为待确认，不把答案自动变成正式规则。
 
 应用 0.4 起在 `PROJECT.md` 的头部声明 `systems` 列表，每项包含稳定 `id`、`title`、可选十六进制 `color`；数组顺序即分类顺序。DD 的 `system` 指定主要归属；普通工作分组保存在编辑器工作区，不写入此字段。没有 GDD 也可以登记分类和写 DD。
+
+`aliases` 是公开的文档缩写与别名列表，每项为普通文字；标题和别名只帮助用户寻找链接候选，不能单凭同名自动写入正式引用。选择候选后才写入相对 Markdown 链接。修改标题或别名不改变稳定文档 ID。
+
+`sectionSystems` 是“规则锚点 → 分类 ID”的公开映射，可在 GDD 或 DD 的 YAML 头部为有锚点的章节单独指定分类。未列出的章节继承所在文档的主要分类；值为 `system-unassigned` 表示明确放入“未归组”，不会因所在文档有分类而重新继承。移除映射项表示恢复继承；映射为空时可省略整个字段。锚点必须与正文 `<a id="…"></a>` 一致，分类 ID 必须存在于项目分类目录，`system-unassigned` 为保留的未归组标识。
+
+章节始终属于原 GDD / DD，文档到章节的目录关系不会因单独分类而消失；另外以分类归属关系供知识视图检索。重命名分类保留 ID，因此映射无需改写。删除分类时，必须在同一提交中迁移引用它的文档 `system` 和所有 `sectionSystems` 项，不能留下悬空分类 ID；原始正文与历史版本保持不变。
 
 `PROJECT.systems` 字段存在（包括空列表）时即为唯一分类来源，缺少该字段才读取旧 `GDD.systems`。首次修改旧项目的分类，在同一版本中迁移登记、去掉当前 GDD 重复字段并写入 `minimumAppVersion: 0.4.0`；旧快照不修改。迁移后的项目使用 0.4 或更新的软件打开。
 
@@ -81,6 +93,8 @@ system: system-resources
 分类实线来自 DD 的 `system`、总纲目录及 DD 内部章节归属。只有主要分类可以通过改接归属端口调整；目录和章节不能被当作普通关联随意断开。关联虚线区分手工关系索引、正文链接、问询目标等来源。同一端点对允许并存手工关系与正文引用；多处正文提及聚合为一条展示线，修改时选择具体出现位置。
 
 正文编辑采用 Milkdown/Crepe，最终文件仍为 Markdown。文件头和文末关联索引由工作台保留；普通表格、图片相对路径和规则锚点仍在公开文件中。不能可靠往返的自定义 HTML 或扩展结构回退到源码；打开后不编辑，不应重排文件。图片附件先随私人草稿保留，正式保存时与正文一起提交。
+
+0.5.1 的缩放图片使用标准 HTML 子集，例如 `<img src="../assets/map.png" alt="地图草图" width="480">`。`width` 为像素整数，保持纵横比，并受阅读容器宽度限制；仅支持 `src`、`alt`、可选 `title`、`width` 四类带引号属性。未缩放图片仍可使用普通 Markdown 图片。相对附件路径随导入、复制和迁移一起重写；其他自定义 HTML 不会静默转写。
 
 保留身份，核对相对链接，不改历史目录；报告修改文件、设计理由和未决问题。涉及多文件时以明确批次提交，或在全部落盘后告知完成；不要把中间文件状态声称为整批已完成。
 

@@ -132,7 +132,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   }
 
   // 未指定主归属的内容仍可阅读；该分组是明确标注的导航容器，不是新增玩法。
-  if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => !groups.some(group => group.id === item.document.system))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
+  if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => !groups.some(group => group.id === item.document.system) || Object.values(item.header.metadata.sectionSystems && typeof item.header.metadata.sectionSystems==='object' ? item.header.metadata.sectionSystems : {}).includes('system-unassigned'))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
   const root = parsed.filter(item => item.document.type === 'gdd' && item.document.status !== 'archived').sort((a, b) => Number(/\/GDD\.md$/i.test(b.file.path)) - Number(/\/GDD\.md$/i.test(a.file.path)))[0]?.document;
   for (const group of groups) {
     nodes.push({ id: group.id, title: group.label, group: group.id, kind: 'system', summary: group.id === 'system-unassigned' ? '尚未指定主要系统的文档。' : `查看${group.label}的文档与规则。`, content: ['设计分类来自公开项目目录；私人工作分组不会修改此结构。'], source: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', status: 'draft', documentId: root?.id ?? '', documentPath: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md' });
@@ -155,6 +155,13 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
 
     let owner = document.id;
     const anchors = children.flatMap((node, index) => anchorOf(node) ? [{ index, id: anchorOf(node)! }] : []);
+    // 章节仍属于原文档；单独分类只影响知识视图，公开元数据可被其他编辑器与 LLM 读取。
+    const sectionSystems = header.metadata.sectionSystems && typeof header.metadata.sectionSystems === 'object' && !Array.isArray(header.metadata.sectionSystems) ? header.metadata.sectionSystems as Record<string, unknown> : {};
+    if(Object.hasOwn(header.metadata,'sectionSystems') && (!header.metadata.sectionSystems || typeof header.metadata.sectionSystems!=='object' || Array.isArray(header.metadata.sectionSystems))) issue(file.path,'INVALID_SECTION_SYSTEM','sectionSystems 应为章节锚点到分类身份的映射，请修正后再调整章节分类。','warning');
+    for (const [anchor, system] of Object.entries(sectionSystems)) {
+      if (!anchors.some(item => item.id === anchor)) issue(file.path, 'UNKNOWN_SECTION', `章节分类 ${anchor} 未找到对应锚点。`, 'warning');
+      if (typeof system !== 'string' || !groups.some(item => item.id === system)) issue(file.path, 'UNKNOWN_SYSTEM', `章节 ${anchor} 的分类无效，暂沿用文档分类。`, 'warning');
+    }
     for (let index = 0; index < children.length; index++) {
       const child = children[index], anchor = anchorOf(child);
       if (anchor) {
@@ -167,9 +174,11 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
         const explicitStatus = content.find(text => /^设计状态[：:]/.test(text));
         const status = explicitStatus?.includes('待确认') ? 'question' : explicitStatus?.includes('已确认') ? 'confirmed' : explicitStatus?.includes('已归档') ? 'archived' : document.status;
         const sourceLine = line + (child.position?.start.line ?? 1) - 1;
-        nodes.push({ id, title: plain(next), kind: 'rule', group, summary: content.find(text => !/^设计状态[：:]/.test(text)) ?? '尚未填写规则正文。', content, source: `${file.path}:${sourceLine}`, status, documentId: document.id, documentPath: file.path, anchor });
+        const sectionGroup = groups.find(item => item.id === sectionSystems[anchor])?.id;
+        nodes.push({ id, title: plain(next), kind: 'rule', group: sectionGroup ?? group, summary: content.find(text => !/^设计状态[：:]/.test(text)) ?? '尚未填写规则正文。', content, source: `${file.path}:${sourceLine}`, status, documentId: document.id, documentPath: file.path, anchor });
         nodeIds.add(id); owner = id;
         appendEdge({ id: `contains:${document.id}:${anchor}`, source: document.id, target: id, type: 'contains', note: '来自当前 Markdown 的规则章节。', origin: {kind:'section',path:file.path} }, file.path);
+        if (sectionGroup) appendEdge({ id: `contains:${sectionGroup}:${id}`, source: sectionGroup, target: id, type: 'contains', note: '来自这个章节单独设置的设计分类。', origin: {kind:'classification',path:file.path} }, file.path);
       }
       if (child.type !== 'table') continue;
       const headers = child.children[0]?.children.map(cell => plain(cell).trim()) ?? [];
