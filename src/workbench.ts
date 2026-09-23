@@ -1,4 +1,6 @@
 import { RichWriting, richBodyParts, richUnsupported } from './rich-writing';
+import './workbench-polish.css';
+import { documentAliases } from '../shared/document-aliases';
 import { pickDocument } from './document-picker';
 import { relativeLink, linkTarget } from '../shared/links';
 import { projectAssetUrl } from './project-client';
@@ -81,11 +83,12 @@ export class ProjectWorkbench {
 
   private shell(title: string, description: string, content: string, wide = false) {
     this.rich?.dispose(); this.rich=undefined; this.richGeneration++;
-    this.dialog.classList.remove('writing-dialog');
+    this.dialog.classList.remove('writing-dialog', 'library-dialog', 'creation-dialog', 'reading-preview');
     this.dialog.classList.toggle('editor-dialog', wide);
     this.dialog.innerHTML = `<header class="project-dialog-header"><div><span class="eyebrow">DESIGNFORM WORKSPACE</span><h1>${html(title)}</h1><p>${html(description)}</p></div><button class="icon-button" type="button" data-action="close" aria-label="关闭工作面板">×</button></header><div class="workbench-feedback" id="workbench-feedback" role="status" hidden></div>${content}`;
     prepareDirectoryFields(this.dialog);
     if (!this.dialog.open) this.dialog.showModal();
+    this.dialog.scrollTop=0;
   }
   private message(message: string, error = false) {
     const box = this.dialog.querySelector<HTMLElement>('#workbench-feedback');
@@ -94,21 +97,27 @@ export class ProjectWorkbench {
   private error(error: unknown) { this.message(error instanceof Error ? error.message : '操作尚未完成，内容已保留。', true); }
   private async close() { if(this.saving)return;this.flushRich();await this.flushDraft();this.rich?.dispose();this.rich=undefined;this.richGeneration++;this.draft=null; this.dialog.close(); }
 
-  /** 项目中心始终能手工新建，不要求先连接模型或拥有模板。 */
+  /** 项目库只负责找到与打开项目；创作向导有独立页面和返回路径。 */
   async projects() {
-    await this.flushDraft(); this.draft = null;
+    this.flushRich(); await this.flushDraft(); this.draft = null; this.setup = undefined;
     try { this.library = await listProjects(); } catch { this.library = await connectProjects(); }
-    this.shell('项目中心', '从设想开始，或继续已有的独立策划文件夹。', `<div id="creation-composer"></div>
-      <details class="empty-project-entry"><summary>直接创建空项目 / 打开最近项目</summary><div class="project-center-grid"><section class="workbench-section"><h2>新建空项目</h2>
-      <form data-form="create" class="workbench-form"><label>项目名称<input name="name" required maxlength="100" placeholder="我的游戏" autocomplete="off"/></label>
-      <label>起点<select name="kind"><option value="blank">空白项目</option><option value="basic">基础 GDD 模板</option></select></label>
-      <details><summary>项目保存位置</summary><label>父目录<input name="directory" value="${html(this.library.defaultDirectory)}" required/></label><p class="quiet">会在这里创建新的独立文件夹，不覆盖已有项目。</p></details>
-      <button class="primary-button" type="submit">创建项目</button></form>
-      <button class="example-button" data-action="example"><strong>体验虚构示例</strong><span>纸上远行 · 学习关系、文档与问询</span></button></section>
-      <section class="workbench-section"><h2>最近项目</h2><div class="recent-projects">${this.library.projects.map(project => `<div class="recent-project-row"><button data-project-path="${html(project.path)}"><strong>${html(project.name)}</strong><small>${project.isExample ? '虚构示例 · ' : ''}${html(project.path)}</small></button><div><button data-copy-project="${project.id}">复制为新项目</button><button data-forget-project="${project.id}">移除最近记录</button></div></div>`).join('') || '<p class="quiet">还没有项目，可以先从左侧新建。</p>'}</div>
-      <form data-form="open" class="workbench-form open-project-form"><label>打开已有项目目录<input name="path" required placeholder="选择包含 PROJECT.md 的文件夹"/></label><button class="secondary-button" type="submit">打开文件夹</button></form></section></div></details>`, true);
-    this.setup=undefined;
-    mountCreationComposer(this.dialog.querySelector('#creation-composer')!, setup=>{this.setup=setup;this.shell('为你的游戏建立项目','设想将保留为待细化的创作起点，之后可直接写总纲或 DD。',`<form data-form="create" class="workbench-form"><label>项目名称<input name="name" required maxlength="100" placeholder="我的游戏"/></label><input type="hidden" name="kind" value="blank"/><label>保存父目录<input name="directory" required value="${html(this.library.defaultDirectory)}"/></label><p class="quiet">将在所选位置创建独立文件夹。取消选择不会丢失设想。</p><details><summary>将保存的创作起点</summary><pre class="brief-preview">${html(setup.brief)}</pre></details><button class="primary-button" type="submit">创建并开始写作</button></form>`);});
+    this.shell('项目库', '继续你的设计，或为一个新想法留出空间。', `<div class="library-heading"><h2>最近项目 <span>${this.library.projects.length}</span></h2><button class="primary-button" data-action="create-project">＋ 新建项目</button></div>
+      <div class="library-projects">${this.library.projects.map(project => `<article class="library-project"><button class="library-project-open" data-project-path="${html(project.path)}"><span class="library-project-mark">${project.isExample?'◇':'▤'}</span><strong>${html(project.name)}</strong><small>${project.isExample?'虚构示例 · ':''}${html(project.path)}</small><span class="library-enter">打开项目 →</span></button><details class="library-project-menu"><summary aria-label="${html(project.name)}的更多操作">···</summary><div><button data-copy-project="${project.id}">复制为新项目</button><button data-forget-project="${project.id}">移除最近记录</button></div></details></article>`).join('') || '<div class="library-empty"><h3>从第一个游戏想法开始</h3><p>创建独立的策划文件夹，或打开已有项目。</p><button class="primary-button" data-action="create-project">新建项目</button></div>'}</div>
+      <div class="library-footer"><form data-form="open" class="workbench-form open-project-form"><label>打开本机项目<input name="path" required placeholder="选择包含 PROJECT.md 的文件夹"/></label><button class="secondary-button" type="submit">打开项目</button></form><button class="example-button" data-action="example"><strong>体验基础示例 →</strong><span>用虚构内容熟悉星图、文档与关系</span></button></div>`, true);
+    this.dialog.classList.add('library-dialog');
+  }
+
+  /** 新建项目不预设必须使用 LLM，可构思、复制开场白或直接开始写作。 */
+  private creation() {
+    this.setup = undefined;
+    this.shell('新建项目', '先整理设想，也可以直接建立空白项目。', '<nav class="creation-nav"><button data-action="projects">← 项目库</button><button class="secondary-button" data-action="blank-project">直接创建空白项目</button></nav><div id="creation-composer"></div>', true);
+    this.dialog.classList.add('creation-dialog');
+    mountCreationComposer(this.dialog.querySelector('#creation-composer')!, setup => { this.setup=setup; this.projectDetails(); });
+  }
+
+  /** 目录只通过系统选择器授权；这里只填写项目身份，不再次混入开场白。 */
+  private projectDetails() {
+    this.shell('建立项目文件夹', '策划正文与版本保存在独立目录，随时可用其他编辑器打开。', `<button class="creation-back" data-action="create-project">← 返回游戏设想</button><form data-form="create" class="workbench-form"><label>项目名称<input name="name" required maxlength="100" placeholder="我的游戏" autocomplete="off"/></label>${this.setup?'<input type="hidden" name="kind" value="blank"/>':'<label>起点<select name="kind"><option value="blank">空白项目</option><option value="basic">基础 GDD 模板</option></select></label>'}<label>保存父目录<input name="directory" required value="${html(this.library.defaultDirectory)}"/></label>${this.setup?`<details><summary>将保存的创作起点</summary><pre class="brief-preview">${html(this.setup.brief)}</pre></details>`:''}<button class="primary-button" type="submit">创建项目</button></form>`);
   }
 
   /** 读取原始 Markdown；已有未提交草稿显式提示，不直接覆盖磁盘文件。 */
@@ -132,14 +141,24 @@ export class ProjectWorkbench {
     const snapshot = this.getSnapshot()!;
     const parts=writingParts(this.draft!.text), metadata=readHeader(this.draft!.text).metadata;
     const groups=[...snapshot.groups.filter(group=>group.id!=='system-unassigned'),...categoryPresets.filter(group=>!snapshot.groups.some(current=>current.id===group.id))];
-    this.shell('写作工作台', '', `
-      <div class="editor-actions"><button class="secondary-button" data-action="new-document">＋ 新建</button><button class="secondary-button" data-action="drafts">未完成草稿</button><button class="secondary-button" data-action="collaborate">与 LLM 完善</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>
-      ${recovered ? `<div class="draft-recovery">发现未提交草稿（${html(new Date(recovered.updatedAt).toLocaleString())}）<button class="secondary-button" data-action="recover-draft">恢复这份草稿</button></div>` : ''}
-      <div class="writing-paper"><input id="writing-title" aria-label="文档标题" maxlength="160" placeholder="给这份设计起个名字" value="${html(parts.title)}"/><div class="writing-properties"><span>${metadata.type==='gdd'?'游戏总纲':metadata.type==='question'?'设计问题':'专项设计 DD'}</span><select id="writing-system" aria-label="设计分类"><option value="">暂不分类</option>${groups.map(group=>`<option value="${group.id}" ${metadata.system===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select><button data-action="categories">管理分类</button><select id="writing-outline" aria-label="可选写作大纲"><option value="">套用大纲…</option>${Object.keys(writingOutlines).map(title=>`<option>${title}</option>`).join('')}</select></div>
-      <div class="format-toolbar" role="group" aria-label="正文格式工具"><button data-action="undo">撤销</button><button data-action="redo">重做</button><button data-format="heading">标题</button><button data-format="bold">加粗</button><button data-format="list">列表</button><button data-format="quote">引用</button><button data-format="table">表格</button><label class="asset-upload">图片<input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden/></label><button data-action="insert-link">链接 DD / 网页</button><button data-action="relationships">关系与引用</button><button data-action="find-text">查找</button><button data-action="rewrite-selection">让 LLM 讨论选区</button><button data-action="preview">阅读预览</button><button data-action="source-mode">完整源码</button></div>
+    this.shell('写作', '', `
+      <div class="writing-toolbar format-toolbar" role="toolbar" aria-label="文档工具">
+        <div class="writing-tool-group"><button data-action="undo" title="撤销 Ctrl+Z" aria-label="撤销">↶</button><button data-action="redo" title="重做 Ctrl+Shift+Z" aria-label="重做">↷</button></div>
+        <details class="writing-menu"><summary>格式</summary><div><button data-format="heading">二级标题</button><button data-format="bold">加粗</button><button data-format="list">列表</button><button data-format="quote">引用</button><label>套用大纲<select id="writing-outline" aria-label="可选写作大纲"><option value="">选择大纲…</option>${Object.keys(writingOutlines).map(title=>`<option>${title}</option>`).join('')}</select></label></div></details>
+        <details class="writing-menu"><summary>插入</summary><div><label class="asset-upload" tabindex="0">图片<input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden/></label><button data-format="table">表格</button><button data-action="insert-link">文档或网页链接 <kbd>Ctrl K</kbd></button><button data-format="rule">知识条目</button></div></details>
+        <button data-action="find-text">查找</button><button data-action="preview" aria-pressed="false">阅读预览</button><span class="writing-tool-spacer"></span><button data-action="source-mode" aria-pressed="false">Markdown</button>
+        <details class="writing-menu writing-menu-end"><summary>更多 ···</summary><div><button data-action="document-settings">文档属性与别名</button><button data-action="relationships">关系与引用</button><button data-action="structure">章节与路径</button><button data-action="categories">管理分类</button><hr/><button data-action="rewrite-selection">与 LLM 讨论选中文字</button><button data-action="new-document">新建文档</button><button data-action="drafts">未完成草稿</button><label>切换文档<select id="document-picker">${this.draft!.baseHash===null?'<option value="">未保存的新稿</option>':''}${snapshot.documents.map(item=>`<option value="${html(item.id)}" ${item.path===document.path?'selected':''}>${html(item.title)}</option>`).join('')}</select></label><label>版本备注<input id="commit-reason" placeholder="默认使用文档标题" maxlength="200"/></label></div></details>
+      </div>
+      ${recovered ? `<div class="draft-recovery">有一份未保存的草稿 · ${html(new Date(recovered.updatedAt).toLocaleString())}<button class="secondary-button" data-action="recover-draft">恢复草稿</button></div>` : ''}
+      <div class="writing-content"><div class="writing-paper"><input id="writing-title" aria-label="文档标题" maxlength="160" placeholder="给这份设计起个名字" value="${html(parts.title)}"/><div class="writing-properties"><span>${metadata.type==='gdd'?'游戏总纲':metadata.type==='question'?'设计问题':'专项设计 DD'}</span><span class="writing-meta-dot">·</span><select id="writing-system" aria-label="设计分类"><option value="">暂不分类</option>${groups.map(group=>`<option value="${group.id}" ${metadata.system===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select><span class="writing-meta-dot">·</span><button data-action="document-settings">${html(({draft:'草稿',confirmed:'已确认',question:'待确认',archived:'已归档'} as Record<string,string>)[String(metadata.status)]??'草稿')}</button></div>
       <div id="rich-writing" class="rich-writing"></div><textarea id="document-editor" class="markdown-editor body-editor" aria-label="策划正文" placeholder="从你想写的第一句话开始……" spellcheck="false">${html(parts.body)}</textarea><div id="editor-preview" class="markdown-preview editor-preview" hidden></div></div>
-      <details class="writing-more"><summary>文档信息与更多操作</summary><label>切换文档<select id="document-picker">${this.draft!.baseHash===null?'<option value="">未保存的新稿</option>':''}${snapshot.documents.map(item=>`<option value="${html(item.id)}" ${item.path===document.path?'selected':''}>${html(item.title)}</option>`).join('')}</select></label><p class="editor-file-path">${html(document.path)}</p><div class="prompt-actions"><button data-action="document-settings">标题与状态</button><button data-action="relationships">管理关系</button><button data-action="structure">章节与路径</button><button data-format="rule">知识条目</button></div><label>本次修改说明<input id="commit-reason" placeholder="自动根据文档标题填写" maxlength="200"/></label></details><div id="conflict-details"></div>`, true);
-    this.dialog.classList.add('writing-dialog');this.sourceMode=false;void this.mountRich();
+      <aside class="writing-inspector"><button class="writing-inspector-close" data-action="close-inspector" aria-label="收起文档面板">×</button><div id="conflict-details"></div></aside></div>`, true);
+    this.dialog.classList.add('writing-dialog');
+    // 标题栏承担文档身份与保存，正文工具收在紧邻纸张的一条工具栏。
+    this.dialog.querySelector('.project-dialog-header')!.innerHTML=`<div class="writing-breadcrumb"><button data-action="close" aria-label="返回知识空间">←</button><span>${html(snapshot.project.name)}</span><span>/</span><strong class="writing-document-name">${html(parts.title || '未命名文档')}</strong></div><div class="writing-header-actions"><button class="secondary-button" data-action="collaborate">与 LLM 完善</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>`;
+    this.sourceMode=false;void this.mountRich();
+    // 工具菜单互斥，选择后收起，不长期盖住写作位置。
+    this.dialog.querySelectorAll<HTMLDetailsElement>('.writing-menu').forEach(menu=>menu.addEventListener('toggle',()=>{if(menu.open)this.dialog.querySelectorAll<HTMLDetailsElement>('.writing-menu').forEach(other=>{if(other!==menu)other.open=false;});}));
     if (recovered) this.dialog.querySelector('[data-action="recover-draft"]')?.addEventListener('click', () => {
       // 恢复使用新草稿身份，避免修改另一窗口仍在维护的原草稿。
       this.draft = { ...recovered, id: crypto.randomUUID() }; this.dirty = true;
@@ -155,6 +174,7 @@ export class ProjectWorkbench {
     if(!this.draft)return;const parts=writingParts(this.draft.text),editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor');
     if(editor)editor.value=this.sourceMode?this.draft.text:parts.body;
     if(this.rich&&!this.sourceMode)this.rich.replace(parts.body);
+    const breadcrumb=this.dialog.querySelector('.writing-document-name');if(breadcrumb)breadcrumb.textContent=parts.title||'未命名文档';
     const title=this.dialog.querySelector<HTMLInputElement>('#writing-title');if(title){title.value=parts.title;title.hidden=this.sourceMode;}
     const category=this.dialog.querySelector<HTMLSelectElement>('#writing-system');if(category)category.value=String(readHeader(this.draft.text).metadata.system??'');
     editor?.classList.toggle('body-editor',!this.sourceMode);this.preview();
@@ -204,8 +224,11 @@ export class ProjectWorkbench {
       return target.path.startsWith('docs/assets/')?projectAssetUrl(this.getSnapshot()!,target.path):'';
     },()=>{void this.insertLink().catch(error=>this.error(error));});
     this.rich=rich;
-    try{await rich.create();if(generation!==this.richGeneration)rich.dispose();}
-    catch(error){if(generation!==this.richGeneration)return;rich.dispose();this.rich=undefined;root.hidden=true;editor.hidden=false;this.message('块编辑器未能打开，已保留原文并切换到正文源码。',true);}
+    try{await rich.create();if(generation!==this.richGeneration)rich.dispose();else {
+      const current=this.getSnapshot()!;
+      rich.setLinkCandidates(current.documents.filter(doc=>doc.path!==this.draft!.documentPath&&(doc.type==='dd'||doc.type==='gdd')&&doc.status!=='archived').map(doc=>({id:doc.id,title:doc.title,aliases:documentAliases(readHeader(doc.text).metadata.aliases),href:relativeLink(this.draft!.documentPath,doc.path),summary:current.nodes.find(node=>node.id===doc.id)?.summary})));
+    }}
+    catch(error){if(generation!==this.richGeneration)return;console.warn('正文编辑器初始化未完成',error);rich.dispose();this.rich=undefined;root.hidden=true;editor.hidden=false;this.message('块编辑器未能打开，已保留原文并切换到正文源码。',true);}
   }
   private async insertLink(){
     if(!this.draft)return;const draftId=this.draft.id,editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
@@ -222,7 +245,7 @@ export class ProjectWorkbench {
     this.flushRich();
     const snapshot = this.getSnapshot()!, document = parseKnowledge([{ path: this.draft!.documentPath, text: this.draft!.text, hash: this.draft!.baseHash ?? '' }]).documents[0];
     const container = this.dialog.querySelector('#conflict-details')!;
-    container.innerHTML = `<form data-form="settings" class="workbench-form"><h2>文档设置</h2><label>标题<input name="title" required value="${html(document.title)}"/></label><div class="form-columns"><label>设计状态<select name="status">${[['draft','草稿'],['confirmed','已确认'],['question','待确认'],['archived','已归档']].map(([id,title]) => `<option value="${id}" ${document.status === id ? 'selected' : ''}>${title}</option>`).join('')}</select></label><label>主要系统<select name="system"><option value="">未归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${group.id}" ${document.system === group.id ? 'selected' : ''}>${html(group.label)}</option>`).join('')}</select></label></div><p class="quiet">归档保留文档与引用。关联此文档的关系有 ${snapshot.edges.filter(edge => edge.target === document.id || edge.target.startsWith(document.id + '/')).length} 条，默认总览会隐藏归档条目。</p><button class="secondary-button" type="submit">更新草稿，稍后统一保存版本</button></form>`;
+    container.innerHTML = `<form data-form="settings" class="workbench-form"><h2>文档设置</h2><label>标题<input name="title" required value="${html(document.title)}"/></label><label>缩写与别名<input name="aliases" value="${html(documentAliases(readHeader(this.draft!.text).metadata.aliases).join('，'))}" placeholder="例如：战斗、Combat，用逗号分隔" maxlength="1600"/></label><p class="quiet">在其他文档中输入标题或别名可选择补全。重名时会列出候选，由你确认。</p><div class="form-columns"><label>设计状态<select name="status">${[['draft','草稿'],['confirmed','已确认'],['question','待确认'],['archived','已归档']].map(([id,title]) => `<option value="${id}" ${document.status === id ? 'selected' : ''}>${title}</option>`).join('')}</select></label><label>主要系统<select name="system"><option value="">未归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${group.id}" ${document.system === group.id ? 'selected' : ''}>${html(group.label)}</option>`).join('')}</select></label></div><p class="quiet">归档保留文档与引用。关联此文档的关系有 ${snapshot.edges.filter(edge => edge.target === document.id || edge.target.startsWith(document.id + '/')).length} 条，默认总览会隐藏归档条目。</p><button class="secondary-button" type="submit">更新草稿，稍后统一保存版本</button></form>`;
     container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
@@ -306,6 +329,7 @@ export class ProjectWorkbench {
       const document = updated.documents.find(item => item.path === draft.documentPath)!;
       this.draft = { id: draft.id, documentPath: document.path, baseHash: document.hash||null, baseText: document.text, text: document.text, updatedAt: new Date().toISOString() };
       this.dirty = false;this.syncEditor();
+      this.dialog.querySelector('.draft-recovery')?.remove();
       const picker=this.dialog.querySelector<HTMLSelectElement>('#document-picker');if(picker)picker.innerHTML=updated.documents.map(item=>`<option value="${html(item.id)}" ${item.id===document.id?'selected':''}>${html(item.title)}</option>`).join('');
       this.message(updated.revision === snapshot.revision ? '内容未变化，未创建重复版本。' : '已保存到 Markdown，并记录正式版本。');
       this.dialog.querySelector('#conflict-details')?.replaceChildren();
@@ -335,7 +359,17 @@ export class ProjectWorkbench {
     const old=before.documents.find(doc=>doc.path===this.draft!.documentPath),updated=after.documents.find(doc=>doc.path===this.draft!.documentPath);
     // 只接续本次分类操作造成的元数据变化；外部修改仍交给原有冲突处理。
     if(old&&updated&&old.hash===this.draft.baseHash&&old.hash!==updated.hash){
-      this.draft.text=setMetadata(this.draft.text,{...(readHeader(old.text).metadata.system!==readHeader(updated.text).metadata.system?{system:updated.system}:{}),...(Object.hasOwn(readHeader(old.text).metadata,'systems')?{systems:undefined}:{})});
+      const oldMeta=readHeader(old.text).metadata,newMeta=readHeader(updated.text).metadata;
+      // 分类删除只迁移被删去的映射，草稿里其他尚未保存的章节分类仍予保留。
+      const draftSections=readHeader(this.draft.text).metadata.sectionSystems;
+      let sectionPatch:Record<string,unknown>={};
+      if(JSON.stringify(oldMeta.sectionSystems)!==JSON.stringify(newMeta.sectionSystems)){
+        const before=oldMeta.sectionSystems as Record<string,unknown>|undefined,after=newMeta.sectionSystems as Record<string,unknown>|undefined;
+        const merged=draftSections&&typeof draftSections==='object'&&!Array.isArray(draftSections)?{...draftSections as Record<string,unknown>}:{};
+        for(const key of new Set([...Object.keys(before??{}),...Object.keys(after??{})]))if(before?.[key]!==after?.[key]&&merged[key]===before?.[key]){if(after?.[key]===undefined)delete merged[key];else merged[key]=after[key];}
+        sectionPatch={sectionSystems:Object.keys(merged).length?merged:undefined};
+      }
+      this.draft.text=setMetadata(this.draft.text,{...(oldMeta.system!==newMeta.system?{system:updated.system}:{}),...(Object.hasOwn(oldMeta,'systems')?{systems:undefined}:{}),...sectionPatch});
       this.draft.baseHash=updated.hash;this.draft.baseText=updated.text;this.dirty=true;
     }
   }
@@ -377,7 +411,13 @@ export class ProjectWorkbench {
       if(button.hasAttribute('data-category-remove')) {
         if(!confirm(`删除“${groups[index].label}”分类？其中的文档会移入“未归组”，正文和历史都会保留。`))return;
         groups.splice(index,1);
-        snapshot.documents.filter(doc=>doc.system===id).forEach(doc=>changes.push({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{system:undefined})}));
+        for(const doc of snapshot.documents){
+          const raw=readHeader(doc.text).metadata.sectionSystems;
+          const sections=raw&&typeof raw==='object'&&!Array.isArray(raw)?{...raw as Record<string,unknown>}:{};
+          let sectionChanged=false;
+          for(const anchor of Object.keys(sections))if(sections[anchor]===id){sections[anchor]='system-unassigned';sectionChanged=true;}
+          if(doc.system===id||sectionChanged)changes.push({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{...(doc.system===id?{system:undefined}:{}),...(sectionChanged?{sectionSystems:sections}:{})})});
+        }
       } else {
         const next=index+Number(button.dataset.categoryMove);if(next<0||next>=groups.length)return;
         [groups[index],groups[next]]=[groups[next],groups[index]];
@@ -395,9 +435,14 @@ export class ProjectWorkbench {
     if (button.dataset.copyProject) { this.shell('复制为新项目', '复制当前公开文档，使用新项目身份与初始版本；原项目和历史完整保留。', `<form data-form="copy-project" data-project="${button.dataset.copyProject}" class="workbench-form"><label>新项目名称<input name="name" required maxlength="100"/></label><label>保存父目录<input name="directory" required value="${html(this.library.defaultDirectory)}"/></label><button class="primary-button" type="submit">创建独立副本</button></form>`); return; }
     if (button.dataset.removeRelation && this.draft) { this.draft.text = removeRelation(this.draft.text, button.dataset.removeRelation); this.syncEditor(); this.dirty = true; await this.flushDraft(); this.message('关系已从草稿移除，保存版本后正式生效。'); return; }
     if (button.dataset.projectPath) { await this.flushDraft(); this.onChange(await openProject(button.dataset.projectPath)); this.dialog.close(); return; }
+    if (button.closest('.writing-menu') && (button.dataset.action || button.dataset.format)) (button.closest('.writing-menu') as HTMLDetailsElement).open=false;
     if (button.dataset.format) { this.format(button.dataset.format); return; }
     switch (button.dataset.action) {
       case 'close': await this.close(); break;
+      case 'projects': await this.projects(); break;
+      case 'create-project': this.creation(); break;
+      case 'blank-project': this.setup=undefined;this.projectDetails();break;
+      case 'close-inspector': this.dialog.querySelector('#conflict-details')!.replaceChildren();break;
       case 'example': button.disabled = true; try { this.onChange(await createProject('纸上远行 · 基础示例', 'example', this.library.defaultDirectory)); this.dialog.close(); } finally { button.disabled = false; } break;
       case 'new-document': await this.flushDraft(); this.draft = null; this.newDocument(); break;
       case 'handoff': await openCollaboration('handoff',this.getSnapshot());break;
@@ -405,11 +450,11 @@ export class ProjectWorkbench {
       case 'categories': await this.categories(); break;
       case 'rewrite-selection': {this.rich?.rememberSelection();const selection=this.rich?.selectedText()??window.getSelection()?.toString()??'';if(!selection.trim())throw new Error('请先选中需要讨论的正文。');await openCollaboration('write',this.getSnapshot(),[String(readHeader(this.draft!.text).metadata.id)],{title:'与 LLM 讨论这段设计',extra:`以下为用户当前选中的草稿，可能尚未写入正式版本：\n\n${selection}\n\n请先理解设计意图，提出可审阅的修改建议；不要擅自覆盖原文。`,fixed:true});break;}
       case 'collaborate': await openCollaboration('write',this.getSnapshot(),this.draft?.baseHash ? [String(readHeader(this.draft.text).metadata.id)] : []); break;
-      case 'source-mode': this.flushRich();this.sourceMode=!this.sourceMode;this.syncEditor();await this.mountRich();button.textContent=this.sourceMode?'返回正文':'完整源码';break;
+      case 'source-mode': this.flushRich();this.sourceMode=!this.sourceMode;this.syncEditor();await this.mountRich();button.textContent=this.sourceMode?'返回正文':'Markdown';button.setAttribute('aria-pressed',String(this.sourceMode));break;
       case 'insert-link': this.rich?.rememberSelection();await this.insertLink();break;
       case 'find-text': this.findText();break;
       case 'save-document': button.disabled = true; try { await this.save(); } finally { button.disabled = false; } break;
-      case 'preview': { const pane = this.dialog.querySelector<HTMLElement>('#editor-preview')!; pane.hidden = !pane.hidden; this.preview(); break; }
+      case 'preview': { const pane = this.dialog.querySelector<HTMLElement>('#editor-preview')!; pane.hidden = !pane.hidden;this.dialog.classList.toggle('reading-preview',!pane.hidden);button.setAttribute('aria-pressed',String(!pane.hidden));this.preview(); break; }
       case 'document-settings': this.settings(); break;
       case 'structure': this.structure(); break;
       case 'relationships': this.relationships(); break;
@@ -440,7 +485,7 @@ export class ProjectWorkbench {
       if ((form.dataset.form === 'settings' || form.dataset.form === 'relation') && this.draft) {
         this.undoStack.push(this.draft.text); this.redoStack = [];
         if (form.dataset.form === 'settings') {
-          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), system: String(data.get('system')) }), String(data.get('title')));
+          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), system: String(data.get('system')), aliases: documentAliases(data.get('aliases')) }), String(data.get('title')));
         } else {
           const source = parseKnowledge([{path:this.draft.documentPath,text:this.draft.text,hash:''}]).nodes.find(node => node.id === data.get('source'));
           if (!source) throw new Error('请选择有效的来源条目。');

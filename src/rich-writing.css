@@ -1,0 +1,11 @@
+/* Crepe 将块菜单挂到编辑器外层 root；root 保持主题作用域，候选框按光标定位。 */
+.rich-writing.milkdown{position:relative;--crepe-color-background:var(--surface-panel,#101a2c);--crepe-color-on-background:var(--text-strong,#dce3f4);--crepe-color-surface:var(--surface-raised,#182439);--crepe-color-on-surface:var(--text-strong,#dce3f4);--crepe-color-on-surface-variant:var(--text-body,#a7b5ce);--crepe-color-outline:var(--line-active,#728caf);--crepe-color-primary:var(--accent-strong,#a3bff2);--crepe-color-hover:var(--surface-tint,#25334b);--crepe-color-selected:var(--surface-tint,#25334b);--crepe-font-default:inherit}
+.rich-writing .rich-link-candidates{position:absolute;z-index:30;width:min(340px,calc(100% - 16px));max-height:280px;overflow:auto;padding:5px;border:1px solid var(--line-active,#728caf);border-radius:10px;background:var(--surface-raised,#182439);box-shadow:0 12px 32px #0007;color:var(--text-strong,#dce3f4)}
+.rich-writing .rich-link-candidates[hidden]{display:none}
+.rich-writing .rich-link-candidates button{display:grid;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:6px;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.rich-writing .rich-link-candidates button:hover,.rich-writing .rich-link-candidates button[aria-selected=true]{background:var(--surface-tint,#25334b)}
+.rich-writing .rich-link-candidates small{overflow:hidden;color:var(--text-body,#a7b5ce);text-overflow:ellipsis;white-space:nowrap}
+/* 扩大图片拖拽命中区，仍用伪元素保留细线外观。 */
+.rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle{z-index:4;bottom:-7px;height:14px;max-width:180px;background:transparent;opacity:1;touch-action:none}
+.rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle::after{content:'';position:absolute;left:0;right:0;top:5px;height:4px;border-radius:4px;background:var(--crepe-color-outline);opacity:.55;transition:opacity .2s}
+.rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle:hover::after,.rich-writing.milkdown .milkdown-image-block.selected .image-wrapper .image-resize-handle::after{opacity:1}

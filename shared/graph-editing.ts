@@ -34,12 +34,26 @@ export function graphChanges(snapshot: ProjectSnapshot, edit: GraphEdit): { chan
   };
   let label='编辑关系';
   if(edit.kind==='classify') {
-    if(!edit.ids.length)throw new Error('请选择专项 DD；总纲与分类本身不能改变归属。');
+    if(!edit.ids.length)throw new Error('请选择专项 DD、问题或有锚点的规则；总纲与分类本身不能改变归属。');
     const group=edit.group==='system-unassigned'?'':edit.group;
     if(group&&!snapshot.groups.some(item=>item.id===group))throw new Error('分类不存在。');
-    for(const id of edit.ids){const item=node(id);if(item.kind!=='document'||item.documentType==='gdd')throw new Error('只有专项文档或问题可以改变主要分类。');
-      // 相同归属是无操作，避免 YAML 重排和重复版本。
-      if((item.group==='system-unassigned'?'':item.group)!==group)change(item.documentPath,setMetadata(text(item.documentPath),{system:group}));}
+    for(const id of edit.ids){const item=node(id);
+      if(item.kind==='rule'&&item.anchor){
+        // 章节归类写在公开文档的锚点映射里；保留它属于原 GDD / DD 的真实目录关系。
+        const path=item.documentPath,raw=readHeader(text(path)).metadata.sectionSystems;
+        if(raw!==undefined&&(!raw||typeof raw!=='object'||Array.isArray(raw)))throw new Error('章节分类元数据格式无效，请先修正文档头部。');
+        const sections=raw&&typeof raw==='object'&&!Array.isArray(raw)?{...raw as Record<string,unknown>}:{};
+        // 缺少锚点键表示继承文档分类；用户明确取消归类必须写入未归组。
+        const sectionGroup=group||'system-unassigned';
+        if(sections[item.anchor]!==sectionGroup){
+          sections[item.anchor]=sectionGroup;
+          change(path,setMetadata(text(path),{sectionSystems:sections}));
+        }
+      }else if(item.kind==='document'&&item.documentType!=='gdd'){
+        // 独立文档仍使用自己的 system 字段；相同归属不重排 YAML。
+        if((item.group==='system-unassigned'?'':item.group)!==group)change(item.documentPath,setMetadata(text(item.documentPath),{system:group}));
+      }else throw new Error('只有专项文档、问题或有锚点的规则可以改变分类。');
+    }
     label=group?`移入${snapshot.groups.find(item=>item.id===group)!.label}`:'取消归类';
   } else if(edit.kind==='connect') {connect(edit.source,edit.target,edit.type,edit.note);label='建立设计关联';}
   else if(edit.kind==='disconnect') {edit.edgeIds.forEach(id=>remove(edge(id)));label=`解除 ${edit.edgeIds.length} 条手工关联`;}
