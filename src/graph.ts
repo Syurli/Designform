@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { GraphInteraction } from './graph-interaction';
+import type { GraphEdit } from '../shared/graph-editing';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { types, type KnowledgeData, type KnowledgeNode, type KnowledgeEdge } from './data';
 import { buildAnalysis, edgeSentence, laneLabels, type AnalysisResult, type AnalysisLane } from './analysis';
@@ -38,6 +40,20 @@ function randomGenerator(seed: number) {
 /** 星空是知识节点的背景，实际规则使用可聚焦的原生按钮承载文字。 */
 export class KnowledgeGraph {
   private scene = new THREE.Scene();
+  private interaction?:GraphInteraction;
+  private editHandler?:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void;
+  /** 编辑适配器只发出动作，写入和版本统一交给应用的编辑会话。 */
+  configureEditing(handler:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void,enabled=true){this.editHandler=handler;this.interaction?.setEditable(enabled);}
+  setEditable(enabled:boolean){this.interaction?.setEditable(enabled);}
+  setShake(enabled:boolean){if(this.interaction)this.interaction.shake=enabled;}
+  selectAllNodes(){this.interaction?.selectAll();}
+  selectedIds(){return this.interaction?.selectedIds()??[];}
+  private layoutKey(node:KnowledgeNode){return `${this.mode==='galaxy'?'galaxy-v2':this.mode==='network'?'network:'+this.selected:this.mode}:${node.id}:${node.group}`;}
+  /** 从快照恢复时替换旧位置，撤销不会留下刚才挤开的节点。 */
+  restoreEditingLayout(value:unknown){this.layoutMemory.clear();this.restoreLayout(value);}
+  togglePin(id:string){const node=this.stars.get(id);if(!node||id===this.coreId())return;const key=this.layoutKey(node.data),row=this.layoutMemory.get(key);this.layoutMemory.set(key,{group:node.data.group,point:node.point.position.clone(),pinned:!row?.pinned});this.labelsDirty=true;}
+  resetPositions(){const prefix=this.mode==='galaxy'?'galaxy-v2:':this.mode==='network'?`network:${this.selected}:`:'layers:';for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
+
   private camera = new THREE.PerspectiveCamera(42, 1, 1, 8000);
   private renderer: THREE.WebGLRenderer;
   private controls: OrbitControls;
@@ -89,7 +105,7 @@ export class KnowledgeGraph {
   private pointerStart: { x: number; y: number; id: number; moved: boolean } | null = null;
   private disposed = false;
   /** 历史布局按稳定身份复用，版本增删不让已有节点重新洗牌。 */
-  private layoutMemory = new Map<string, { group: string; point: THREE.Vector3 }>();
+  private layoutMemory = new Map<string, { group: string; point: THREE.Vector3; pinned?:boolean }>();
   private retiring = new Set<string>();
   private versionChanging = false;
   private light = currentTheme() === 'light';
@@ -166,7 +182,7 @@ export class KnowledgeGraph {
     });
     data.edges.forEach((edge, index) => {
       const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3());
-      const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: .19, depthWrite: false });
+      const material = new (edge.type==='contains'?THREE.LineBasicMaterial:THREE.LineDashedMaterial)({ color: '#769cc1', transparent: true, opacity: .19, depthWrite: false, ...(edge.type==='contains'?{}:{dashSize:9,gapSize:7}) });
       const line = new THREE.Line(new THREE.BufferGeometry(), material);
       this.scene.add(line);
       const particle = this.sprite('#b8e5ff', 8, .85);
@@ -203,6 +219,16 @@ export class KnowledgeGraph {
     this.container.addEventListener('contextmenu',this.contextMenu);
     this.container.addEventListener('pointerdown',this.contextDown);
     this.container.addEventListener('pointermove',this.contextMove);
+    this.interaction=new GraphInteraction({container:this.container,camera:this.camera,mode:()=>this.mode,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
+      nodes:()=>[...this.stars.values()].map(star=>({data:star.data,point:star.point.position,label:star.label,pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned,visible:(this.desiredAppearance.get(star.data.id)?.point??0)>0})),
+      edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.curve.getPoints(40)})),
+      begin:()=>{if(this.transition)this.advanceTransition(this.transition.start+this.transition.duration+1);this.controls.enabled=false;this.pointerStart=null;},
+      end:()=>{this.controls.enabled=this.mode!=='network';},
+      move:(id,point)=>{const star=this.stars.get(id);if(star){star.point.position.copy(point);star.halo.position.copy(point);this.labelsDirty=true;}},
+      capture:()=>this.exportLayout(),restore:value=>this.restoreEditingLayout(value),
+      record:()=>{this.stars.forEach(star=>{this.layoutMemory.set(this.layoutKey(star.data),{group:star.data.group,point:star.point.position.clone(),pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned});});this.updateConnections();return this.exportLayout();},
+      select:id=>this.select(id),commit:(edit,before,after)=>this.editHandler?.(edit,before,after),
+    });
     document.addEventListener('visibilitychange', this.visibilityChanged);
     window.addEventListener('cewen-theme-change', this.themeChanged);
     this.resize();
@@ -356,12 +382,12 @@ export class KnowledgeGraph {
       coreRules.forEach((node, index) => { const angle = index / coreRules.length * Math.PI * 2 + .5; const radius = 115 + Math.floor(index / 6) * 38; result.set(node.id, new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * .7, Math.sin(angle) * 32)); });
       if (core) result.set(core, new THREE.Vector3());
     }
-    if (mode === 'network') this.analysisLayout(result);
+    if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`network:${this.selected}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
     else {
       const layoutKey = mode === 'galaxy' ? 'galaxy-v2' : mode;
       const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
       this.data.nodes.forEach(node => {
-        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key);
+        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key)??(mode==='galaxy'?[...this.layoutMemory].find(([k])=>k.startsWith(`${layoutKey}:${node.id}:`))?.[1]:undefined);
         if (mode === 'galaxy' && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
         if (saved) result.set(node.id, saved.point.clone());
         else {
@@ -379,10 +405,10 @@ export class KnowledgeGraph {
   }
 
   /** 自定义阅读坐标属于编辑器视图；没有此缓存仍可从公开内容重建图谱。 */
-  exportLayout() { return [...this.layoutMemory].map(([key, value]) => ({ key, group: value.group, point: value.point.toArray() })); }
+  exportLayout() { return [...this.layoutMemory].map(([key, value]) => ({ key, group: value.group, point: value.point.toArray(), pinned:value.pinned===true })); }
   restoreLayout(value: unknown) {
     if (!Array.isArray(value) || value.length > 20000) return;
-    for (const row of value) if (row && typeof row.key === 'string' && typeof row.group === 'string' && Array.isArray(row.point) && row.point.length === 3 && row.point.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 1000000)) this.layoutMemory.set(row.key, { group: row.group, point: new THREE.Vector3(...row.point as [number,number,number]) });
+    for (const row of value) if (row && typeof row.key === 'string' && typeof row.group === 'string' && Array.isArray(row.point) && row.point.length === 3 && row.point.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 1000000)) this.layoutMemory.set(row.key, { group: row.group, point: new THREE.Vector3(...row.point as [number,number,number]),pinned:row.pinned===true });
     this.setMode(this.mode);
   }
 
@@ -401,7 +427,7 @@ export class KnowledgeGraph {
   }
 
   private createConnection(edge: KnowledgeEdge): Connection {
-    const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: 0, depthWrite: false });
+    const material = new (edge.type==='contains'?THREE.LineBasicMaterial:THREE.LineDashedMaterial)({ color: '#769cc1', transparent: true, opacity: 0, depthWrite: false, ...(edge.type==='contains'?{}:{dashSize:9,gapSize:7}) });
     const line = new THREE.Line(new THREE.BufferGeometry(), material); this.scene.add(line);
     const particle = this.sprite('#b8e5ff', 8, 0); particle.visible = false;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.classList.add('analysis-edge', edge.type);
@@ -430,7 +456,14 @@ export class KnowledgeGraph {
         star = this.createStar(node, origin); this.stars.set(node.id, star); from.set(node.id, origin.clone()); appearance.set(node.id, { point: 0, halo: 0 });
       }
       const changed = before.has(node.id) && JSON.stringify(before.get(node.id)) !== JSON.stringify(node);
-      star.data = node; star.label.inert = false; star.label.textContent = node.title; star.label.classList.toggle('version-changed', changed);
+      star.data = node; star.label.inert = false;
+      // 结构编辑时沿用完整卡片，不能清空子元素后仍保留 analysis-card 状态。
+      if(star.label.classList.contains('analysis-card')&&star.label.querySelector('strong')){
+        star.label.querySelector('strong')!.textContent=node.title;
+        star.label.querySelector('.analysis-card-summary')!.textContent=node.summary;
+        star.label.querySelector('.analysis-card-meta')!.textContent=`${data.groups.find(group=>group.id===node.group)?.label??'未归组'} · ${{confirmed:'已确认',draft:'草稿',question:'待确认',archived:'已归档'}[node.status]}`;
+      }else star.label.textContent = node.title;
+      star.label.classList.toggle('version-changed', changed);
       const color = data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
       star.point.userData.baseColor = star.halo.userData.baseColor = color;
       star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', categoryColor(color));
@@ -545,7 +578,7 @@ export class KnowledgeGraph {
       }
       const entry = this.analysis?.entries.find(item => item.node.id === star.data.id);
       // 共同卡片沿用同一个内容元素，退出卡片也保留原说明直至收拢结束。
-      if (wasCard) {
+      if (wasCard && star.label.querySelector('.analysis-card-role')) {
         if (entry || star.data.id === this.selected) star.label.querySelector('.analysis-card-role')!.textContent = star.data.id === this.selected ? '当前焦点' : laneLabels[entry!.lane];
         return;
       }
@@ -907,6 +940,8 @@ export class KnowledgeGraph {
       connection.curve.v2.copy(to);
       connection.curve.v1.copy(from).lerp(to, .5);
       connection.curve.v1.z += this.mode === 'galaxy' ? Math.min(from.distanceTo(to) * .15, 70) : 0;
+      // 同一端点对可以同时有手工关联与正文引用，二维分开走线，避免来源不可点选。
+      if(this.mode!=='galaxy'){const siblings=this.connections.filter(c=>(c.data.source===connection.data.source&&c.data.target===connection.data.target)||(c.data.source===connection.data.target&&c.data.target===connection.data.source));if(siblings.length>1){const slot=siblings.indexOf(connection)-(siblings.length-1)/2,normal=new THREE.Vector3(-(to.y-from.y),to.x-from.x,0).normalize();connection.curve.v1.addScaledVector(normal,slot*48);}}
       const points = connection.curve.getPoints(28);
       const existing = connection.line.geometry.getAttribute('position');
       if (existing) {
@@ -914,6 +949,7 @@ export class KnowledgeGraph {
         existing.needsUpdate = true;
         connection.line.geometry.computeBoundingSphere();
       } else connection.line.geometry.setFromPoints(points);
+      if(connection.material instanceof THREE.LineDashedMaterial)connection.line.computeLineDistances();
     });
     if (this.selected) this.selectionRing.position.copy(this.stars.get(this.selected)!.point.position);
   }
@@ -1010,6 +1046,9 @@ export class KnowledgeGraph {
         c1x = horizontal ? (sx + tx) / 2 : sx; c2x = horizontal ? (sx + tx) / 2 : tx;
         c1y = horizontal ? sy : (sy + ty) / 2; c2y = horizontal ? ty : (sy + ty) / 2;
       }
+      const siblings=this.connections.filter(c=>(c.data.source===connection.data.source&&c.data.target===connection.data.target)||(c.data.source===connection.data.target&&c.data.target===connection.data.source));
+      const laneOffset=(siblings.indexOf(connection)-(siblings.length-1)/2)*54;
+      if(siblings.length>1){if(Math.abs(tx-sx)>Math.abs(ty-sy)){c1y+=laneOffset;c2y+=laneOffset;}else{c1x+=laneOffset;c2x+=laneOffset;}}
       const d = `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${tx} ${ty}`;
       connection.path.setAttribute('d', d); connection.hit.setAttribute('d', d);
       connection.path.setAttribute('marker-end', connection.data.type === 'relates' ? '' : 'url(#analysis-arrow)');
@@ -1020,7 +1059,7 @@ export class KnowledgeGraph {
       const y = u ** 3 * sy + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t ** 3 * ty;
       connection.label.hidden = false;
       connection.label.style.left = `${x}px`;
-      connection.label.style.top = `${y}px`;
+      connection.label.style.top = `${y+laneOffset*.5}px`;
     });
   }
 
@@ -1040,6 +1079,7 @@ export class KnowledgeGraph {
     const delta=this.lastMotionFrame?Math.min((now-this.lastMotionFrame)/1000,.05):0;this.lastMotionFrame=now;
     if(!this.motionPaused&&!this.reduceMotion.matches)this.motionTime+=delta;
     this.advanceTransition(now);
+    if(this.labelsDirty)this.updateConnections();
     this.controls.update();
     this.backgrounds.forEach((field, index) => {
       (field.material as THREE.PointsMaterial).opacity = this.ambient * (this.light ? index ? .25 : .13 : index ? .85 : .6);
@@ -1058,7 +1098,7 @@ export class KnowledgeGraph {
     this.connections.forEach((connection, index) => {
       if (connection.particle.visible) connection.particle.position.copy(connection.curve.getPoint(this.motionPaused || this.reduceMotion.matches ? .52 : (now * .00012 + index * .2) % 1));
     });
-    if (this.labelsDirty) { this.updateLabels(); this.captureFrame(); }
+    if (this.labelsDirty) { this.updateLabels(); this.captureFrame(); this.interaction?.update(); }
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -1087,7 +1127,7 @@ export class KnowledgeGraph {
     const targets = [...this.stars.values()].filter(star => star.point.visible && this.desiredAppearance.get(star.data.id)?.point);
     const hit = this.raycaster.intersectObjects(targets.map(star => star.point))[0];
     if (hit) this.select(targets.find(star => star.point === hit.object)!.data.id);
-    else if (this.mode !== 'network') this.clearSelection();
+    else if (this.mode !== 'network') {this.raycaster.params.Line.threshold=6;const wires=this.connections.filter(c=>c.line.visible&&c.material.opacity>.05),edgeHit=this.raycaster.intersectObjects(wires.map(c=>c.line))[0];const edge=wires.find(c=>c.line===edgeHit?.object);if(edge)this.selectEdge(edge.data.id);else this.clearSelection();}
   };
   private visibilityChanged = () => { if (!document.hidden) this.controls.update(); };
 
@@ -1173,6 +1213,7 @@ export class KnowledgeGraph {
     this.controls.dispose();
     document.removeEventListener('visibilitychange', this.visibilityChanged);
     window.removeEventListener('cewen-theme-change', this.themeChanged);
+    this.interaction?.dispose();
     this.renderer.domElement.removeEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.removeEventListener('pointerup', this.pointerUp);
     this.renderer.domElement.removeEventListener('pointermove', this.pointerMove);

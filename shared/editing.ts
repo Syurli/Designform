@@ -43,7 +43,10 @@ export function removeRelation(text: string, id: string) {
   const { body, bodyOffset } = readHeader(text);
   for (const table of astOf(body).children) {
     if (table.type !== 'table') continue;
-    const index = table.children[0].children.findIndex(cell => plain(cell).trim() === '关系 ID');
+    const headers = table.children[0].children.map(cell => plain(cell).trim());
+    // 只处理可识别的关系表；普通设计表即使碰巧有“关系 ID”列也原样保留。
+    if (!['关系 ID', '类型', '目标身份', '依据'].every(name => headers.includes(name))) continue;
+    const index = headers.indexOf('关系 ID');
     if (index < 0) continue;
     const row = table.children.slice(1).find(row => plain(row.children[index]).trim() === id);
     if (!row?.position) continue;
@@ -53,18 +56,25 @@ export function removeRelation(text: string, id: string) {
   return text;
 }
 
-/** 功能关系放在文末，显式保留来源身份；正文不再穿插关系清单。 */
+/** 功能关系放在文末，显式保留来源身份；已有标准索引直接追加行。 */
 export function putRelation(text: string, anchor: string | undefined, relation: { id: string; type: string; target: string; note: string }) {
   text = removeRelation(text, relation.id);
   const { body, bodyOffset } = readHeader(text), ast = astOf(body);
   const anchors = ast.children.map(node => ({ node, match: /^\s*<a\s+id=["']([A-Za-z0-9_-]+)["']\s*>\s*<\/a>\s*$/.exec(plain(node)) })).filter(item => item.match);
   const position = anchor ? anchors.findIndex(item => item.match![1] === anchor) : -1;
   if (anchor && position < 0) throw new Error('找不到规则锚点，请重新读取文档。');
-  const at = text.length;
   const source = String(readHeader(text).metadata.id) + (anchor ? `/${anchor}` : '');
   const cell = (value: string) => value.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
-  const row = `\n\n### 关联索引\n\n| 关系 ID | 来源身份 | 类型 | 目标身份 | 依据 |\n|---|---|---|---|---|\n| ${cell(relation.id)} | ${cell(source)} | ${cell(relation.type)} | ${cell(relation.target)} | ${cell(relation.note)} |\n\n`;
-  return text.slice(0, at) + row + text.slice(at);
+  const row = `| ${cell(relation.id)} | ${cell(source)} | ${cell(relation.type)} | ${cell(relation.target)} | ${cell(relation.note)} |`;
+  const nodes = ast.children, table = nodes.at(-1), heading = nodes.at(-2);
+  const headers = table?.type === 'table' ? table.children[0].children.map(item => plain(item).trim()) : [];
+  // 仅复用文末紧邻标题的标准五列表；未知尾部内容与非标准表不移动、不改写。
+  if (table?.type === 'table' && heading?.type === 'heading' && heading.depth === 3 && plain(heading).trim() === '关联索引' &&
+      headers.length === 5 && headers.every((value, index) => value === ['关系 ID', '来源身份', '类型', '目标身份', '依据'][index])) {
+    const at = bodyOffset + table.position!.end.offset!;
+    return text.slice(0, at) + `\n${row}` + text.slice(at);
+  }
+  return text + `\n\n### 关联索引\n\n| 关系 ID | 来源身份 | 类型 | 目标身份 | 依据 |\n|---|---|---|---|---|\n${row}\n\n`;
 }
 
 /** 问题模板可直接交给其他模型，不依赖私有表单结构。 */

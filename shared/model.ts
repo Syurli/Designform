@@ -62,6 +62,8 @@ export interface KnowledgeEdge {
   target: string;
   type: RelationType;
   note: string;
+  /** 修改关系时精确定位其公开来源；不把派生关系误当手工关系删除。 */
+  origin?: { kind: 'classification' | 'section' | 'catalog' | 'manual' | 'markdown' | 'question'; path: string; occurrences?: { start: number; end: number; label: string; url: string; reference: boolean }[] };
 }
 
 /** 各视图共用的中文关系图例。 */
@@ -218,7 +220,7 @@ export interface ApiError { code: string; message: string; details?: unknown }
 export interface DocumentDraft {
   id: string;
   /** 问询表单草稿不能误当成 Markdown 编辑草稿。 */
-  purpose?: 'document' | 'answers';
+  purpose?: 'document' | 'answers' | 'graph';
   documentPath: string;
   baseHash: string | null;
   baseText: string | null;
@@ -226,4 +228,7 @@ export interface DocumentDraft {
   updatedAt: string;
   /** 新稿附件跟随私人草稿，正式保存时与正文一起提交。 */
   assets?: { path: string; text: string; encoding: 'base64' }[];
+  /** 图谱编辑会话恢复包仍是私人草稿，正式内容提交使用普通文件批次。 */
+  changes?: FileChange[];
+  baseRevision?: string | null;
 }
