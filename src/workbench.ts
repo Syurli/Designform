@@ -1,8 +1,29 @@
+import { DocumentCanvas } from './document-canvas';
+import { setNotebookTexture } from './notebook-style';
+import { AnnotationLayer } from './annotation-layer';
+import { ensureBlockIds } from '../shared/document-blocks';
+import { layoutCompanionPath, inkCompanionPath, parseLayoutCompanion, parseInkCompanion, type LayoutCompanion, type InkCompanion, type InkItem } from '../shared/document-companion';
+import { documentContentSummary } from './content-overview';
+import { openDialogueEditor } from './dialogue-editor';
+import { openPaletteEditor } from './palette-editor';
+import { mountDesignBlocks } from './rich-document-plugins';
+import { parseDesignBlock, serializeDesignBlock, type DesignBlock } from '../shared/design-blocks';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { readWorkspace, updateWorkspace } from './project-client';
+import { RichWriting, richBodyParts, richUnsupported } from './rich-writing';
+import './workbench-polish.css';
+import { documentAliases } from '../shared/document-aliases';
+import { pickDocument } from './document-picker';
+import { relativeLink, linkTarget } from '../shared/links';
+import { projectAssetUrl } from './project-client';
 import type { DocumentDraft, ProjectDocument, ProjectSnapshot, WorkspaceItem } from '../shared/model.ts';
 import { prepareDirectoryFields } from './edition';
 import { readHeader, parseKnowledge } from '../shared/markdown.ts';
 import { documentSections, moveSection, setMetadata, setTitle, putRelation, removeRelation, questionDocument } from '../shared/editing.ts';
 import { projectMarkdown } from './document-reading';
+import { categoryPresets, writingParts, replaceWriting, writingOutlines } from '../shared/authoring.ts';
+import { mountCreationComposer, openCollaboration } from './prompt-panel';
+import type { KnowledgeGroup, FileChange } from '../shared/model.ts';
 import { cacheDraft, ClientError, commitProject, connectProjects, createProject, deleteDraft, listProjects, openProject, projectDrafts, projectHistory, recoverProject, saveDraft, projectAction, type ProjectLibrary } from './project-client';
 
 /** 文件名、标题和正文都是用户数据，进入模板前统一转义。 */
@@ -18,6 +39,18 @@ export class ProjectWorkbench {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private draftWrite: Promise<unknown> = Promise.resolve();
   private saving = false;
+  private sourceMode = false;
+  private rich?: RichWriting;
+  private richGeneration = 0;
+  private canvas?:DocumentCanvas;
+  private ink?:AnnotationLayer;
+  private canvasMode=false;
+  private inkMode=false;
+  private companionBases:Record<string,{text:string;hash:string}>={};
+  private personalInk:InkItem[]=[];
+  private personalWrite:Promise<unknown>=Promise.resolve();
+  private previewDisposer?:()=>void;
+  private setup?: { brief: string; categories: KnowledgeGroup[] };
   private undoStack: string[] = [];
   private redoStack: string[] = [];
   private undoAt = 0;
@@ -32,11 +65,12 @@ export class ProjectWorkbench {
     this.dialog.addEventListener('click', event => { void this.click(event).catch(error => this.error(error)); });
     this.dialog.addEventListener('submit', event => { event.preventDefault(); void this.submit(event).catch(error => this.error(error)); });
     this.dialog.addEventListener('input', event => {
-      if ((event.target as HTMLElement).id !== 'document-editor' || !this.draft) return;
+      if (!['document-editor','writing-title'].includes((event.target as HTMLElement).id) || !this.draft) return;
       if (Date.now() - this.undoAt > 700) { this.undoStack.push(this.draft.text); if (this.undoStack.length > 50) this.undoStack.shift(); this.undoAt = Date.now(); }
       this.redoStack = [];
-      this.draft.text = (event.target as HTMLTextAreaElement).value; this.dirty = true; cacheDraft(this.draftProject!, this.draft);
-      this.preview();
+      const editor = this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
+      this.draft.text = this.sourceMode ? editor.value : replaceWriting(this.draft.text, this.dialog.querySelector<HTMLInputElement>('#writing-title')!.value, editor.value); this.dirty = true; cacheDraft(this.draftProject!, this.draft);
+      this.preview();this.updateStatistics();
       this.message('正在保留草稿…');
       clearTimeout(this.timer);
       this.timer = setTimeout(() => { void this.flushDraft().catch(error => this.error(error)); }, 650);
@@ -44,40 +78,67 @@ export class ProjectWorkbench {
     this.dialog.addEventListener('change', event => {
       const input = event.target as HTMLSelectElement;
       if (input.id === 'document-picker') void this.edit(input.value).catch(error => this.error(error));
+      if (input.id === 'writing-system' && this.draft) { this.draft.text = setMetadata(this.draft.text,{ system: input.value }); this.dirty = true; void this.flushDraft().catch(error=>this.error(error)); }
+      if (input.id === 'writing-outline' && this.draft && input.value) {
+        const editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
+        if (writingParts(this.draft.text).body.trim()) { this.message('正文已有内容，未覆盖。可以用标题工具继续添加章节。'); input.value=''; return; }
+        this.draft.text=replaceWriting(this.draft.text,writingParts(this.draft.text).title,writingOutlines[input.value].map(title=>`## ${title}\n\n`).join(''));this.syncEditor();this.dirty=true;void this.flushDraft().catch(error=>this.error(error));
+      }
+    });
+    window.addEventListener('cewen:editing-command',event=>{
+      if(!this.dialog.open||!this.draft)return;const command=(event as CustomEvent<string>).detail;
+      if(command==='save'){event.preventDefault();void this.save().catch(error=>this.error(error));}
+      if((command==='undo'||command==='redo')&&this.rich&&!this.sourceMode&&!document.activeElement?.matches('input,textarea,select')){event.preventDefault();command==='undo'?this.rich.undo():this.rich.redo();}
     });
     this.dialog.addEventListener('keydown', event => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && this.draft) { event.preventDefault(); void this.save().catch(error => this.error(error)); }
+      if(event.defaultPrevented||event.isComposing)return;
+      if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='f'&&this.draft){event.preventDefault();event.stopPropagation();this.findText();return;}
+      if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'&&this.draft){event.preventDefault();event.stopPropagation();void this.insertLink().catch(error=>this.error(error));return;}
+
+      if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && this.draft) { event.preventDefault(); event.stopPropagation(); void this.save().catch(error => this.error(error)); }
     });
     // 尚未成功落盘的草稿需要离开提醒；已保存草稿不阻止正常切换页面。
     window.addEventListener('beforeunload', event => { if (this.dirty) { event.preventDefault(); event.returnValue = ''; } });
   }
 
   private shell(title: string, description: string, content: string, wide = false) {
+    this.disposeDocumentTools();this.canvasMode=false;this.inkMode=false;
+    this.rich?.dispose(); this.rich=undefined; this.richGeneration++;
+    this.dialog.classList.remove('writing-dialog', 'library-dialog', 'creation-dialog', 'reading-preview');
     this.dialog.classList.toggle('editor-dialog', wide);
     this.dialog.innerHTML = `<header class="project-dialog-header"><div><span class="eyebrow">DESIGNFORM WORKSPACE</span><h1>${html(title)}</h1><p>${html(description)}</p></div><button class="icon-button" type="button" data-action="close" aria-label="关闭工作面板">×</button></header><div class="workbench-feedback" id="workbench-feedback" role="status" hidden></div>${content}`;
     prepareDirectoryFields(this.dialog);
     if (!this.dialog.open) this.dialog.showModal();
+    this.dialog.scrollTop=0;
   }
   private message(message: string, error = false) {
     const box = this.dialog.querySelector<HTMLElement>('#workbench-feedback');
     if (box) { box.hidden = false; box.classList.toggle('error', error); box.textContent = message; }
   }
   private error(error: unknown) { this.message(error instanceof Error ? error.message : '操作尚未完成，内容已保留。', true); }
-  private async close() { await this.flushDraft(); this.dialog.close(); }
+  private async close() { if(this.saving)return;this.flushRich();await this.flushDraft();await this.personalWrite;this.disposeDocumentTools();this.rich?.dispose();this.rich=undefined;this.richGeneration++;this.draft=null; this.dialog.close(); }
 
-  /** 项目中心始终能手工新建，不要求先连接模型或拥有模板。 */
+  /** 项目库只负责找到与打开项目；创作向导有独立页面和返回路径。 */
   async projects() {
-    await this.flushDraft(); this.draft = null;
+    this.flushRich(); await this.flushDraft(); this.draft = null; this.setup = undefined;
     try { this.library = await listProjects(); } catch { this.library = await connectProjects(); }
-    this.shell('项目中心', '从空白开始，或打开独立的策划文件夹。每个项目都有自己的文档和版本。', `
-      <div class="project-center-grid"><section class="workbench-section"><h2>新建项目</h2>
-      <form data-form="create" class="workbench-form"><label>项目名称<input name="name" required maxlength="100" placeholder="我的游戏" autocomplete="off"/></label>
-      <label>起点<select name="kind"><option value="blank">空白项目</option><option value="basic">基础 GDD 模板</option></select></label>
-      <details><summary>项目保存位置</summary><label>父目录<input name="directory" value="${html(this.library.defaultDirectory)}" required/></label><p class="quiet">会在这里创建新的独立文件夹，不覆盖已有项目。</p></details>
-      <button class="primary-button" type="submit">创建项目</button></form>
-      <button class="example-button" data-action="example"><strong>体验虚构示例</strong><span>纸上远行 · 学习关系、文档与问询</span></button></section>
-      <section class="workbench-section"><h2>最近项目</h2><div class="recent-projects">${this.library.projects.map(project => `<div class="recent-project-row"><button data-project-path="${html(project.path)}"><strong>${html(project.name)}</strong><small>${project.isExample ? '虚构示例 · ' : ''}${html(project.path)}</small></button><div><button data-copy-project="${project.id}">复制为新项目</button><button data-forget-project="${project.id}">移除最近记录</button></div></div>`).join('') || '<p class="quiet">还没有项目，可以先从左侧新建。</p>'}</div>
-      <form data-form="open" class="workbench-form open-project-form"><label>打开已有项目目录<input name="path" required placeholder="填写包含 PROJECT.md 的文件夹路径"/></label><button class="secondary-button" type="submit">打开文件夹</button></form></section></div>`);
+    this.shell('项目库', '继续你的设计，或为一个新想法留出空间。', `<div class="library-heading"><h2>最近项目 <span>${this.library.projects.length}</span></h2><button class="primary-button" data-action="create-project">＋ 新建项目</button></div>
+      <div class="library-projects">${this.library.projects.map(project => `<article class="library-project"><button class="library-project-open" data-project-path="${html(project.path)}"><span class="library-project-mark">${project.isExample?'◇':'▤'}</span><strong>${html(project.name)}</strong><small>${project.isExample?'虚构示例 · ':''}${html(project.path)}</small><span class="library-enter">打开项目 →</span></button><details class="library-project-menu"><summary aria-label="${html(project.name)}的更多操作">···</summary><div><button data-copy-project="${project.id}">复制为新项目</button><button data-forget-project="${project.id}">移除最近记录</button></div></details></article>`).join('') || '<div class="library-empty"><h3>从第一个游戏想法开始</h3><p>创建独立的策划文件夹，或打开已有项目。</p><button class="primary-button" data-action="create-project">新建项目</button></div>'}</div>
+      <div class="library-footer"><form data-form="open" class="workbench-form open-project-form"><label>打开本机项目<input name="path" required placeholder="选择包含 PROJECT.md 的文件夹"/></label><button class="secondary-button" type="submit">打开项目</button></form><button class="example-button" data-action="example"><strong>体验基础示例 →</strong><span>用虚构内容熟悉星图、文档与关系</span></button></div>`, true);
+    this.dialog.classList.add('library-dialog');
+  }
+
+  /** 新建项目不预设必须使用 LLM，可构思、复制开场白或直接开始写作。 */
+  private creation() {
+    this.setup = undefined;
+    this.shell('新建项目', '先整理设想，也可以直接建立空白项目。', '<nav class="creation-nav"><button data-action="projects">← 项目库</button><button class="secondary-button" data-action="blank-project">直接创建空白项目</button></nav><div id="creation-composer"></div>', true);
+    this.dialog.classList.add('creation-dialog');
+    mountCreationComposer(this.dialog.querySelector('#creation-composer')!, setup => { this.setup=setup; this.projectDetails(); });
+  }
+
+  /** 目录只通过系统选择器授权；这里只填写项目身份，不再次混入开场白。 */
+  private projectDetails() {
+    this.shell('建立项目文件夹', '策划正文与版本保存在独立目录，随时可用其他编辑器打开。', `<button class="creation-back" data-action="create-project">← 返回游戏设想</button><form data-form="create" class="workbench-form"><label>项目名称<input name="name" required maxlength="100" placeholder="我的游戏" autocomplete="off"/></label>${this.setup?'<input type="hidden" name="kind" value="blank"/>':'<label>起点<select name="kind"><option value="blank">空白项目</option><option value="basic">基础 GDD 模板</option></select></label>'}<label>保存父目录<input name="directory" required value="${html(this.library.defaultDirectory)}"/></label>${this.setup?`<details><summary>将保存的创作起点</summary><pre class="brief-preview">${html(this.setup.brief)}</pre></details>`:''}<button class="primary-button" type="submit">创建项目</button></form>`);
   }
 
   /** 读取原始 Markdown；已有未提交草稿显式提示，不直接覆盖磁盘文件。 */
@@ -87,68 +148,149 @@ export class ProjectWorkbench {
     if (!snapshot) { await this.projects(); return; }
     if (snapshot.historical) throw new Error('当前正在阅读历史版本，请先回到最新再编辑。');
     const document = snapshot.documents.find(item => item.id === documentId) ?? snapshot.documents.find(item => item.type === 'gdd') ?? snapshot.documents.find(item => item.type !== 'guide') ?? snapshot.documents[0];
-    if (!document) { this.newDocument(); return; }
+    if (!document) { await this.newDocument(); return; }
     this.draftProject = snapshot.project.id;
-    this.draft = { id: crypto.randomUUID(), documentPath: document.path, baseHash: document.hash, baseText: document.text, text: document.text, updatedAt: new Date().toISOString() };
+    this.companionBases=structuredClone(snapshot.companions??{});this.personalInk=[];
+    this.sourceMode=false;
+    this.draft = { id: crypto.randomUUID(), documentPath: document.path, baseHash: document.hash||null, baseText: document.text, text: document.text, updatedAt: new Date().toISOString() };
     this.dirty = false;
     this.undoStack = []; this.redoStack = [];
-    const recovered = (await projectDrafts(snapshot.project.id)).find(item => item.purpose !== 'answers' && item.documentPath === document.path && item.text !== document.text);
+    const recovered = (await projectDrafts(snapshot.project.id)).find(item => item.purpose !== 'answers' && item.purpose !== 'graph' && item.documentPath === document.path && (item.text !== document.text || !!item.companions?.length));
     this.renderEditor(document, recovered);
   }
 
   private renderEditor(document: Pick<ProjectDocument, 'title' | 'path'>, recovered?: DocumentDraft) {
     const snapshot = this.getSnapshot()!;
-    this.shell(document.title, '编辑当前 Markdown。草稿自动保留，保存后写入正式文件并建立版本。', `
-      <div class="editor-actions"><label>文档<select id="document-picker" aria-label="切换编辑文档">${snapshot.documents.map(item => `<option value="${html(item.id)}" ${item.path === document.path ? 'selected' : ''}>${html(item.title)}</option>`).join('')}</select></label><button class="secondary-button" data-action="new-document">新建文档</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>
-      ${recovered ? `<div class="draft-recovery">发现未提交草稿（${html(new Date(recovered.updatedAt).toLocaleString())}）<button class="secondary-button" data-action="recover-draft">恢复这份草稿</button></div>` : ''}
-      <div class="format-toolbar" role="group" aria-label="Markdown 格式工具"><button data-action="undo">撤销</button><button data-action="redo">重做</button><button data-format="heading">标题</button><button data-format="bold">加粗</button><button data-format="list">列表</button><button data-format="quote">引用</button><button data-format="table">表格</button><button data-format="rule">知识条目</button><button data-action="preview">预览正文</button><button data-action="document-settings">标题与归属</button><button data-action="relationships">管理关系</button><button data-action="structure">章节与路径</button><label class="asset-upload">添加图片<input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden/></label></div>
-      <label class="editor-file-path" for="document-editor">${html(document.path)}</label>
-      <textarea id="document-editor" class="markdown-editor" aria-label="Markdown 正文" spellcheck="false">${html(this.draft!.text)}</textarea><div id="editor-preview" class="markdown-preview editor-preview" hidden></div>
-      <div class="editor-bottom"><label>本次修改说明<input id="commit-reason" value="编辑${html(document.title)}" maxlength="200"/></label><span class="quiet">正文与图谱共用同一份文件</span></div><div id="conflict-details"></div>`, true);
+    const parts=writingParts(this.draft!.text), metadata=readHeader(this.draft!.text).metadata;
+    const groups=[...snapshot.groups.filter(group=>group.id!=='system-unassigned'),...categoryPresets.filter(group=>!snapshot.groups.some(current=>current.id===group.id))];
+    this.shell('写作', '', `
+      <div class="writing-toolbar format-toolbar" role="toolbar" aria-label="文档工具">
+        <div class="writing-tool-group"><button data-action="undo" title="撤销 Ctrl+Z" aria-label="撤销">↶</button><button data-action="redo" title="重做 Ctrl+Shift+Z" aria-label="重做">↷</button></div>
+        <details class="writing-menu"><summary>格式</summary><div><button data-format="heading">二级标题</button><button data-format="bold">加粗</button><button data-format="list">列表</button><button data-format="quote">引用</button><label>套用大纲<select id="writing-outline" aria-label="可选写作大纲"><option value="">选择大纲…</option>${Object.keys(writingOutlines).map(title=>`<option>${title}</option>`).join('')}</select></label></div></details>
+        <details class="writing-menu"><summary>插入</summary><div><label class="asset-upload" tabindex="0">图片<input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden/></label><button data-format="table">表格</button><button data-action="insert-dialogue">互动对白</button><button data-action="insert-palette">色卡与图片取色</button><button data-action="insert-link">文档或网页链接 <kbd>Ctrl K</kbd></button><button data-format="rule">知识条目</button></div></details>
+        <div class="writing-tool-group writing-mode-tabs"><button data-action="writing-mode" aria-pressed="true">正文</button><button data-action="canvas-mode" aria-pressed="false">排版</button><button data-action="ink-mode" aria-pressed="false">注释</button></div><button data-action="find-text">查找</button><button data-action="preview" aria-pressed="false">阅读预览</button><span class="writing-tool-spacer"></span><button data-action="source-mode" aria-pressed="false">Markdown</button>
+        <details class="writing-menu writing-menu-end"><summary>更多 ···</summary><div><button data-action="document-settings">文档属性与别名</button><button data-action="relationships">关系与引用</button><button data-action="structure">章节与路径</button><button data-action="categories">管理分类</button><hr/><button data-action="rewrite-selection">与 LLM 讨论选中文字</button><button data-action="new-document">新建文档</button><button data-action="drafts">未完成草稿</button><label>切换文档<select id="document-picker">${this.draft!.baseHash===null?'<option value="">未保存的新稿</option>':''}${snapshot.documents.map(item=>`<option value="${html(item.id)}" ${item.path===document.path?'selected':''}>${html(item.title)}</option>`).join('')}</select></label><label>版本备注<input id="commit-reason" placeholder="默认使用文档标题" maxlength="200"/></label></div></details>
+      </div>
+      ${recovered ? `<div class="draft-recovery">有一份未保存的草稿 · ${html(new Date(recovered.updatedAt).toLocaleString())}<button class="secondary-button" data-action="recover-draft">恢复草稿</button></div>` : ''}
+      <div id="ink-tools"></div><div class="writing-content"><div class="writing-paper"><input id="writing-title" aria-label="文档标题" maxlength="160" placeholder="给这份设计起个名字" value="${html(parts.title)}"/><div class="writing-properties"><span>${metadata.type==='gdd'?'游戏总纲':metadata.type==='question'?'设计问题':'专项设计 DD'}</span><span class="writing-meta-dot">·</span><select id="writing-system" aria-label="设计分类"><option value="">暂不分类</option>${groups.map(group=>`<option value="${group.id}" ${metadata.system===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select><span class="writing-meta-dot">·</span><button data-action="document-settings">${html(({draft:'草稿',confirmed:'已确认',question:'待确认',archived:'已归档'} as Record<string,string>)[String(metadata.status)]??'草稿')}</button></div>
+      <div id="document-canvas" hidden></div><div id="rich-writing" class="rich-writing"></div><textarea id="document-editor" class="markdown-editor body-editor" aria-label="策划正文" placeholder="从你想写的第一句话开始……" spellcheck="false">${html(parts.body)}</textarea><div id="editor-preview" class="markdown-preview editor-preview" hidden></div></div>
+      <aside class="writing-inspector"><button class="writing-inspector-close" data-action="close-inspector" aria-label="收起文档面板">×</button><div id="conflict-details"></div></aside></div><footer class="writing-statusbar"><span id="writing-statistics"></span><label>纸张 <select id="paper-texture" aria-label="纸张底纹"><option value="grid">方格</option><option value="lines">横线</option><option value="dots">点阵</option><option value="plain">素纸</option></select></label><span>当前草稿 · 保存后进入版本</span></footer>`, true);
+    this.dialog.classList.add('writing-dialog');
+    // 标题栏承担文档身份与保存，正文工具收在紧邻纸张的一条工具栏。
+    this.dialog.querySelector('.project-dialog-header')!.innerHTML=`<div class="writing-breadcrumb"><button data-action="close" aria-label="返回知识空间">←</button><span>${html(snapshot.project.name)}</span><span>/</span><strong class="writing-document-name">${html(parts.title || '未命名文档')}</strong></div><div class="writing-header-actions"><button class="secondary-button" data-action="collaborate">与 LLM 完善</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>`;
+    this.sourceMode=false;void this.mountRich();this.updateStatistics();
+    const texture=this.dialog.querySelector<HTMLSelectElement>('#paper-texture')!;texture.value=setNotebookTexture();texture.addEventListener('change',()=>setNotebookTexture(texture.value));
+    // 工具菜单互斥，选择后收起，不长期盖住写作位置。
+    this.dialog.querySelectorAll<HTMLDetailsElement>('.writing-menu').forEach(menu=>menu.addEventListener('toggle',()=>{if(menu.open)this.dialog.querySelectorAll<HTMLDetailsElement>('.writing-menu').forEach(other=>{if(other!==menu)other.open=false;});}));
     if (recovered) this.dialog.querySelector('[data-action="recover-draft"]')?.addEventListener('click', () => {
       // 恢复使用新草稿身份，避免修改另一窗口仍在维护的原草稿。
       this.draft = { ...recovered, id: crypto.randomUUID() }; this.dirty = true;
-      this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!.value = recovered.text;
+      this.syncEditor();void this.mountRich();
       this.dialog.querySelector('.draft-recovery')?.remove();
       void this.flushDraft().catch(error => this.error(error));
     });
     this.dialog.querySelector('#asset-input')?.addEventListener('change', event => { void this.attachImage((event.target as HTMLInputElement).files?.[0]).catch(error => this.error(error)); });
   }
 
+  /** 身份和元数据保留原文，默认编辑区只呈现标题与正文。 */
+  private syncEditor() {
+    if(!this.draft)return;const parts=writingParts(this.draft.text),editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor');
+    if(editor)editor.value=this.sourceMode?this.draft.text:parts.body;
+    if(this.rich&&!this.sourceMode)this.rich.replace(parts.body);
+    if(this.canvasMode)void this.mountCanvas();this.updateStatistics();
+    const breadcrumb=this.dialog.querySelector('.writing-document-name');if(breadcrumb)breadcrumb.textContent=parts.title||'未命名文档';
+    const title=this.dialog.querySelector<HTMLInputElement>('#writing-title');if(title){title.value=parts.title;title.hidden=this.sourceMode;}
+    const category=this.dialog.querySelector<HTMLSelectElement>('#writing-system');if(category)category.value=String(readHeader(this.draft.text).metadata.system??'');
+    editor?.classList.toggle('body-editor',!this.sourceMode);this.preview();
+  }
+
   /** 预览与最终阅读采用同一安全渲染器，图片定位到当前项目附件。 */
   private preview() {
     const pane = this.dialog.querySelector<HTMLElement>('#editor-preview'); if (!pane || pane.hidden || !this.draft) return;
-    const snapshot = this.getSnapshot(), document = snapshot?.documents.find(doc => doc.path === this.draft!.documentPath);
-    if (snapshot && document) pane.innerHTML = projectMarkdown({ ...document, text: this.draft.text }, snapshot);
+    const snapshot = this.getSnapshot(), document = this.draft && parseKnowledge([{path:this.draft.documentPath,text:this.draft.text,hash:''}]).documents[0];
+    if (snapshot && document){this.previewDisposer?.();pane.innerHTML = projectMarkdown(document, snapshot, this.draft?.assets);this.previewDisposer=mountDesignBlocks(pane,{onEdit:block=>this.editDesign(block)});}
   }
 
-  private async attachImage(file?: File) {
-    if (!file || !this.draft) return;
+  private async storeImage(file:File) {
+    if(!this.draft)throw new Error('请先打开文档。');
     if (file.size > 3 * 1024 * 1024 || !/^image\/(png|jpeg|webp|gif)$/.test(file.type)) throw new Error('请选择 3 MB 以内的 PNG、JPEG、WebP 或 GIF 图片。');
-    const snapshot = this.getSnapshot()!, extension = file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1], path = `docs/assets/image-${crypto.randomUUID()}.${extension}`;
+    const draftId=this.draft.id;
+    const extension = file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1], path = `docs/assets/image-${crypto.randomUUID()}.${extension}`;
     const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
-    this.onChange(await commitProject({ projectId: snapshot.project.id, requestId: crypto.randomUUID(), baseRevision: snapshot.revision, reason: `添加附件 ${file.name}`, actor: 'user', changes: [{ path, baseHash: null, text: btoa(binary), encoding: 'base64' }] }));
-    const editor = this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!, depth = this.draft.documentPath.split('/').length - 2;
-    editor.setRangeText(`\n![${file.name.replace(/[\[\]\r\n]/g, '')}](${'../'.repeat(depth)}assets/${path.split('/').at(-1)})\n`, editor.selectionStart, editor.selectionEnd, 'end'); editor.dispatchEvent(new Event('input', { bubbles: true }));
+    if(this.draft?.id!==draftId)throw new Error('文档已切换，图片尚未插入。');
+    const asset={path,text:btoa(binary),encoding:'base64' as const};
+    if(JSON.stringify([...(this.draft.assets??[]),asset]).length>6*1024*1024)throw new Error('草稿图片合计过大，请先保存当前文档。');
+    this.draft.assets=[...(this.draft.assets??[]),asset];
+    const url=relativeLink(this.draft.documentPath,path);this.dirty=true; await this.flushDraft();if(this.draft?.id!==draftId)throw new Error('文档已切换，图片已保留在原草稿中。');return url;
+  }
+
+  /** 图片选择、粘贴与拖入共用附件草稿；未正式保存时也能预览。 */
+  private async attachImage(file?:File){
+    if(!file)return;const url=await this.storeImage(file),markdown=`\n![${file.name.replace(/[\[\]\r\n]/g,'')}](${url})\n`;
+    if(this.rich&&!this.sourceMode)this.rich.insert(markdown);else{const editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;editor.setRangeText(markdown,editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));}
+  }
+  /** 查找留在当前写作页，不弹出浏览器的全页搜索或丢失正文焦点。 */
+  private findText(){
+    let bar=this.dialog.querySelector<HTMLElement>('.writing-find');if(!bar){bar=document.createElement('div');bar.className='writing-find';bar.innerHTML='<input type="search" aria-label="查找正文" placeholder="查找正文…"/><button type="button">定位</button>';this.dialog.querySelector('.format-toolbar')!.after(bar);const input=bar.querySelector('input')!;const find=()=>{if(this.rich&&!this.sourceMode)this.rich.find(input.value);else{const area=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!,at=area.value.toLocaleLowerCase().indexOf(input.value.toLocaleLowerCase());if(at>=0){area.focus();area.setSelectionRange(at,at+input.value.length);}}};bar.querySelector('button')!.onclick=find;input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();find();}});}bar.querySelector('input')!.focus();
+  }
+  private flushRich(){if(this.rich&&!this.sourceMode&&this.draft){const body=this.rich.read(),title=this.dialog.querySelector<HTMLInputElement>('#writing-title')!.value;const value=replaceWriting(this.draft.text,title,body);if(value!==this.draft.text){this.draft.text=value;this.dirty=true;}}}
+  private async mountRich(){
+    const root=this.dialog.querySelector<HTMLElement>('#rich-writing'),editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor');if(!root||!editor||!this.draft)return;
+    this.rich?.dispose();this.rich=undefined;root.replaceChildren();const generation=++this.richGeneration;
+    if(this.canvasMode){root.hidden=true;editor.hidden=true;return;}
+    const body=writingParts(this.draft.text).body,unsupported=richUnsupported(richBodyParts(body).body);
+    root.hidden=this.sourceMode||!!unsupported;editor.hidden=!root.hidden;
+    if(root.hidden){if(unsupported&&!this.sourceMode)this.message(unsupported);return;}
+    const draftId=this.draft.id;
+    const rich=new RichWriting(root,body,value=>{if(this.draft?.id!==draftId||generation!==this.richGeneration||this.sourceMode)return;editor.value=value;editor.dispatchEvent(new Event('input',{bubbles:true}));},file=>this.storeImage(file),url=>{
+      const target=linkTarget(this.draft!.documentPath,url);if(!target)return /^https?:\/\//i.test(url)?url:'';
+      const asset=this.draft?.assets?.find(item=>item.path===target.path);
+      if(asset){const ext=asset.path.split('.').at(-1);return `data:image/${ext==='jpg'?'jpeg':ext};base64,${asset.text}`;}
+      return target.path.startsWith('docs/assets/')?projectAssetUrl(this.getSnapshot()!,target.path):'';
+    },()=>{void this.insertLink().catch(error=>this.error(error));},{getDialoguePositions:id=>this.layout().dialogues?.[id],onDialoguePositions:(id,positions)=>{const layout=this.layout();layout.dialogues={...layout.dialogues,[id]:positions};this.changeCompanion(layoutCompanionPath(layout.documentId),layout);},storeImage:file=>this.storePaletteImage(file),resolveImage:async path=>this.resolveAsset(path)});
+    this.rich=rich;
+    try{await rich.create();if(generation!==this.richGeneration)rich.dispose();else {
+      const current=this.getSnapshot()!;
+      rich.setLinkCandidates(current.documents.filter(doc=>doc.path!==this.draft!.documentPath&&(doc.type==='dd'||doc.type==='gdd')&&doc.status!=='archived').map(doc=>({id:doc.id,title:doc.title,aliases:documentAliases(readHeader(doc.text).metadata.aliases),href:relativeLink(this.draft!.documentPath,doc.path),summary:current.nodes.find(node=>node.id===doc.id)?.summary})));
+    }}
+    catch(error){if(generation!==this.richGeneration)return;console.warn('正文编辑器初始化未完成',error);rich.dispose();this.rich=undefined;root.hidden=true;editor.hidden=false;this.message('块编辑器未能打开，已保留原文并切换到正文源码。',true);}
+  }
+  private async insertLink(){
+    if(!this.draft)return;const draftId=this.draft.id,editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
+    const selected=this.rich?.selectedText()??editor.value.slice(editor.selectionStart,editor.selectionEnd);
+    const chosen=await pickDocument(this.getSnapshot()!,{external:true,exclude:String(readHeader(this.draft.text).metadata.id)});
+    if(!chosen||this.draft?.id!==draftId)return;
+    const url=typeof chosen==='string'?chosen:relativeLink(this.draft.documentPath,chosen.documentPath)+(chosen.anchor?'#'+chosen.anchor:'');
+    const label=(selected&&selected!=='[['?selected:typeof chosen==='string'?chosen:chosen.title);
+    if(this.rich&&!this.sourceMode)this.rich.link(url,label);else{editor.setRangeText(`[${label.replace(/[\[\]]/g,'')}](${url})`,editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));editor.focus();}
   }
 
   /** 用户表单仅修改标题和语义元数据，不要求记忆 YAML 字段。 */
   private settings() {
+    this.flushRich();
     const snapshot = this.getSnapshot()!, document = parseKnowledge([{ path: this.draft!.documentPath, text: this.draft!.text, hash: this.draft!.baseHash ?? '' }]).documents[0];
     const container = this.dialog.querySelector('#conflict-details')!;
-    container.innerHTML = `<form data-form="settings" class="workbench-form"><h2>文档设置</h2><label>标题<input name="title" required value="${html(document.title)}"/></label><div class="form-columns"><label>设计状态<select name="status">${[['draft','草稿'],['confirmed','已确认'],['question','待确认'],['archived','已归档']].map(([id,title]) => `<option value="${id}" ${document.status === id ? 'selected' : ''}>${title}</option>`).join('')}</select></label><label>主要系统<select name="system"><option value="">未归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${group.id}" ${document.system === group.id ? 'selected' : ''}>${html(group.label)}</option>`).join('')}</select></label></div>${document.type === 'gdd' ? '<label>新增系统名称（选填）<input name="newSystem" placeholder="例如：角色成长"/></label>' : ''}<p class="quiet">归档保留文档与引用。关联此文档的关系有 ${snapshot.edges.filter(edge => edge.target === document.id || edge.target.startsWith(document.id + '/')).length} 条，默认总览会隐藏归档条目。</p><button class="secondary-button" type="submit">更新草稿，稍后统一保存版本</button></form>`;
+    container.innerHTML = `<form data-form="settings" class="workbench-form"><h2>文档设置</h2><label>标题<input name="title" required value="${html(document.title)}"/></label><label>缩写与别名<input name="aliases" value="${html(documentAliases(readHeader(this.draft!.text).metadata.aliases).join('，'))}" placeholder="例如：战斗、Combat，用逗号分隔" maxlength="1600"/></label><p class="quiet">在其他文档中输入标题或别名可选择补全。重名时会列出候选，由你确认。</p><div class="form-columns"><label>设计状态<select name="status">${[['draft','草稿'],['confirmed','已确认'],['question','待确认'],['archived','已归档']].map(([id,title]) => `<option value="${id}" ${document.status === id ? 'selected' : ''}>${title}</option>`).join('')}</select></label><label>主要系统<select name="system"><option value="">未归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${group.id}" ${document.system === group.id ? 'selected' : ''}>${html(group.label)}</option>`).join('')}</select></label></div><p class="quiet">归档保留文档与引用。关联此文档的关系有 ${snapshot.edges.filter(edge => edge.target === document.id || edge.target.startsWith(document.id + '/')).length} 条，默认总览会隐藏归档条目。</p><button class="secondary-button" type="submit">更新草稿，稍后统一保存版本</button></form>`;
     container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
   private relationships() {
-    const snapshot = this.getSnapshot()!, path = this.draft!.documentPath;
-    const documentNodes = snapshot.nodes.filter(node => node.documentPath === path && node.kind !== 'system');
-    this.dialog.querySelector('#conflict-details')!.innerHTML = `<form data-form="relation" class="workbench-form"><h2>添加语义关系</h2><div class="form-columns"><label>来源条目<select name="source">${documentNodes.map(node => `<option value="${node.id}">${html(node.title)}</option>`).join('')}</select></label><label>目标条目<input name="target" list="relation-targets" required placeholder="输入标题搜索或填写条目身份"/><datalist id="relation-targets">${snapshot.nodes.map(node => `<option value="${node.id}" label="${html(node.title)}"></option>`).join('')}</datalist></label></div><label>关系类型<select name="type">${['依赖','约束','关联','引用','替代'].map(type => `<option>${type}</option>`).join('')}</select></label><label>关系依据<textarea name="note" required rows="2"></textarea></label><button class="secondary-button" type="submit">加入当前草稿</button></form><h3>当前出向关系</h3>${snapshot.edges.filter(edge => edge.type !== 'contains' && documentNodes.some(node => node.id === edge.source)).map(edge => `<p class="quiet">${html(snapshot.nodes.find(node => node.id === edge.source)?.title ?? '')} → ${html(snapshot.nodes.find(node => node.id === edge.target)?.title ?? '')} ${edge.id.startsWith('reference:') ? '<span>正文引用 · 在正文中修改链接</span>' : `<button class="secondary-button" data-edit-relation="${edge.id}">编辑关系</button><button class="secondary-button" data-reverse-relation="${edge.id}">保存草稿并反转</button><button class="secondary-button" data-remove-relation="${edge.id}">从草稿移除</button>`}</p>`).join('')}`;
+    this.flushRich();
+    const snapshot = {...this.getSnapshot()!}, path = this.draft!.documentPath;
+    // 未保存的新稿也有稳定身份，关系来源按草稿即时解析。
+    const projected=parseKnowledge(snapshot.documents.map(doc=>({path:doc.path,text:doc.path===path?this.draft!.text:doc.text,hash:doc.hash})).concat(snapshot.documents.some(doc=>doc.path===path)?[]:[{path,text:this.draft!.text,hash:''}]));
+    snapshot.edges=projected.edges;
+    const documentNodes = parseKnowledge([{path,text:this.draft!.text,hash:''}]).nodes.filter(node => node.kind !== 'system');
+    this.dialog.querySelector('#conflict-details')!.innerHTML = `<form data-form="relation" class="workbench-form"><h2>添加语义关系</h2><div class="form-columns"><label>来源条目<select name="source">${documentNodes.map(node => `<option value="${node.id}">${html(node.title)}</option>`).join('')}</select></label><label>目标条目<input name="target" type="hidden"/><button type="button" id="relation-target-picker">选择设计文档或规则</button></label></div><label>关系类型<select name="type">${['依赖','约束','关联','引用','替代'].map(type => `<option>${type}</option>`).join('')}</select></label><label>关系依据<textarea name="note" required rows="2"></textarea></label><button class="secondary-button" type="submit">加入当前草稿</button></form><h3>当前出向关系</h3>${snapshot.edges.filter(edge => edge.type !== 'contains' && documentNodes.some(node => node.id === edge.source)).map(edge => `<p class="quiet">${html(snapshot.nodes.find(node => node.id === edge.source)?.title ?? '')} → ${html(snapshot.nodes.find(node => node.id === edge.target)?.title ?? '')} ${edge.id.startsWith('reference:') ? '<span>正文引用 · 在正文中修改链接</span>' : `<button class="secondary-button" data-edit-relation="${edge.id}">编辑关系</button><button class="secondary-button" data-reverse-relation="${edge.id}">保存草稿并反转</button><button class="secondary-button" data-remove-relation="${edge.id}">从草稿移除</button>`}</p>`).join('')}`;
+    const container=this.dialog.querySelector('#conflict-details')!;
+    container.querySelector('#relation-target-picker')?.addEventListener('click',()=>{void pickDocument(snapshot,{title:'选择关联目标',exclude:documentNodes[0]?.id}).then(chosen=>{if(!chosen||typeof chosen==='string')return;(container.querySelector('[name="target"]') as HTMLInputElement).value=chosen.id;container.querySelector('#relation-target-picker')!.textContent=chosen.title;});});
+    const incoming=snapshot.edges.filter(edge=>edge.type!=='contains'&&documentNodes.some(node=>node.id===edge.target));
+    const backlinks=document.createElement('section');backlinks.innerHTML=`<h3>哪些文档引用或关联了这里</h3>${incoming.map(edge=>`<p>${html(snapshot.nodes.find(n=>n.id===edge.source)?.title??'')} <small>${edge.origin?.kind==='markdown'?'正文引用':'手工关联'} · ${html(edge.note)}</small></p>`).join('')||'<p class="quiet">暂无其他文档指向这里。</p>'}`;container.append(backlinks);container.scrollIntoView({block:'nearest',behavior:'smooth'});
   }
 
   /** 章节移动和路径重命名都通过显式表单，保存前仍有草稿可核对。 */
   private structure() {
-    if (!this.draft) return;
+    if (!this.draft) return;this.flushRich();
     this.dialog.querySelector('#conflict-details')!.innerHTML = `<h2>章节顺序</h2>${documentSections(this.draft.text).map((section,index) => `<p>${html(section.title)} <button class="secondary-button" data-section="${index}" data-direction="-1">上移</button><button class="secondary-button" data-section="${index}" data-direction="1">下移</button></p>`).join('')}<form data-form="move-document" class="workbench-form"><h2>文件位置</h2><label>相对项目的新路径<input name="destination" required value="${html(this.draft.documentPath)}"/></label><small>保存当前草稿后移动文件，同时更新项目内相对链接；文档与条目 ID 保持不变。</small><button class="secondary-button" type="submit">保存草稿并移动</button></form>`;
   }
 
@@ -162,53 +304,194 @@ export class ProjectWorkbench {
   }
 
   /** 文档只需标题与归属；稳定 ID 自动生成且不依赖显示编号。 */
-  newDocument() {
+  async newDocument(system = '', type: 'dd' | 'gdd' | 'question' = 'dd') {
+    await this.flushDraft();
     const snapshot = this.getSnapshot();
     if (!snapshot) { void this.projects(); return; }
-    this.shell('新建文档', '先写清楚一件事，再逐步建立与其他文档的联系。', `<form data-form="new-document" class="workbench-form"><label>文档标题<input name="title" required maxlength="100" placeholder="例如：资源系统"/></label><label>文档类型<select name="type"><option value="dd">专项设计 DD</option><option value="gdd">游戏总纲 GDD</option><option value="question">独立问题</option></select></label><label>主要系统<select name="system"><option value="">暂不归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${html(group.id)}">${html(group.label)}</option>`).join('')}</select></label><button class="primary-button" type="submit">创建并编辑</button></form>`);
+    if(snapshot.historical)throw new Error('请先回到最新版本再创建文档。');
+    const existing=type==='gdd'?snapshot.documents.find(doc=>doc.type==='gdd'&&doc.status!=='archived'):undefined;if(existing){await this.edit(existing.id);return;}
+    const id=`${type}-${crypto.randomUUID()}`,folder=type==='gdd'?'gdd':type==='question'?'questions':'dd';
+    const text=`---\nid: ${id}\ntype: ${type}\nstatus: ${type==='question'?'open':'draft'}\n${system&&system!=='system-unassigned'?`system: ${system}\n`:''}---\n\n# \n\n`;
+    this.draft={id:crypto.randomUUID(),purpose:'document',documentPath:`docs/${folder}/${id}.md`,baseHash:null,baseText:null,text,updatedAt:new Date().toISOString()};
+    this.companionBases=structuredClone(snapshot.companions??{});this.personalInk=[];this.draftProject=snapshot.project.id;this.dirty=false;this.undoStack=[];this.redoStack=[];this.renderEditor({title:'新文档',path:this.draft.documentPath});this.dialog.querySelector<HTMLInputElement>('#writing-title')?.focus();
+  }
+
+  /** 文档身份与伴随文件取自同一份草稿，所有公开修改进入一次版本提交。 */
+  private documentId(){return String(readHeader(this.draft!.text).metadata.id);}
+  private layout():LayoutCompanion {
+    const id=this.documentId(),path=layoutCompanionPath(id),pending=this.draft?.companions?.find(file=>file.path===path),text=pending?pending.text:this.companionBases[path]?.text;
+    return text?parseLayoutCompanion(text,path):{format:1,documentId:id,blocks:{}};
+  }
+  private sharedInk():InkCompanion {
+    const id=this.documentId(),path=inkCompanionPath(id),pending=this.draft?.companions?.find(file=>file.path===path),text=pending?pending.text:this.companionBases[path]?.text;
+    return text?parseInkCompanion(text,path):{format:1,documentId:id,items:[]};
+  }
+  private changeCompanion(path:string,value:LayoutCompanion|InkCompanion){
+    if(!this.draft||this.saving)return;const old=this.draft.companions?.find(file=>file.path===path),text=JSON.stringify(value,null,2)+'\n';
+    if(text===(old?.text??this.companionBases[path]?.text))return;
+    if(!old&&!this.companionBases[path]&&'items' in value&&!value.items.length)return;
+    this.draft.companions=[...(this.draft.companions??[]).filter(file=>file.path!==path),{path,baseHash:old?old.baseHash:this.companionBases[path]?.hash??null,text}];this.changedDraft();
+  }
+  private changedDraft(){
+    if(!this.draft)return;this.dirty=true;cacheDraft(this.draftProject!,this.draft);this.updateStatistics();clearTimeout(this.timer);this.timer=setTimeout(()=>{void this.flushDraft().catch(error=>this.error(error));},650);
+  }
+  private updateStatistics(){const target=this.dialog.querySelector('#writing-statistics');if(target&&this.draft)target.textContent=documentContentSummary(this.draft.text);const title=this.dialog.querySelector('.writing-document-name');if(title&&this.draft)title.textContent=writingParts(this.draft.text).title||'未命名文档';}
+  private async storePaletteImage(file:File){const relative=await this.storeImage(file);return linkTarget(this.draft!.documentPath,relative)!.path;}
+  private resolveAsset(path:string){
+    if(/^data:image\/(png|jpeg|webp|gif);base64,/i.test(path))return path;
+    if(!path.startsWith('docs/assets/')){const target=linkTarget(this.draft!.documentPath,path);if(target)path=target.path;}
+    const asset=this.draft?.assets?.find(item=>item.path===path);
+    if(asset){const ext=path.split('.').at(-1);return `data:image/${ext==='jpg'?'jpeg':ext};base64,${asset.text}`;}
+    return path.startsWith('docs/assets/')?projectAssetUrl(this.getSnapshot()!,path):/^https?:\/\//i.test(path)?path:'';
+  }
+  private disposeDocumentTools(){this.ink?.dispose();this.ink=undefined;this.canvas?.dispose();this.canvas=undefined;this.previewDisposer?.();this.previewDisposer=undefined;}
+  private async setWritingMode(canvas:boolean,ink:boolean){
+    if(!this.draft)return;this.flushRich();this.disposeDocumentTools();this.canvasMode=canvas;this.inkMode=ink;this.sourceMode=false;
+    this.dialog.querySelectorAll<HTMLButtonElement>('.writing-mode-tabs button').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.action===(ink?'ink-mode':canvas?'canvas-mode':'writing-mode'))));
+    this.dialog.querySelector('#document-canvas')!.toggleAttribute('hidden',!canvas);
+    this.dialog.querySelector('#editor-preview')!.setAttribute('hidden','');this.dialog.classList.remove('reading-preview');
+    if(canvas){this.rich?.dispose();this.rich=undefined;this.richGeneration++;this.dialog.querySelector('#rich-writing')!.setAttribute('hidden','');this.dialog.querySelector('#document-editor')!.setAttribute('hidden','');await this.mountCanvas();}
+    else{this.syncEditor();await this.mountRich();}
+  }
+  private renderFragment(markdown:string){
+    const snapshot=this.getSnapshot()!,doc=parseKnowledge([{path:this.draft!.documentPath,text:this.draft!.text,hash:''}]).documents[0];
+    return projectMarkdown({...doc,text:markdown},snapshot,this.draft?.assets);
+  }
+  private async mountCanvas(){
+    if(!this.draft||!this.canvasMode)return;this.ink?.dispose();this.ink=undefined;this.canvas?.dispose();const host=this.dialog.querySelector<HTMLElement>('#document-canvas');if(!host)return;
+    const draftId=this.draft.id,parts=writingParts(this.draft.text),split=richBodyParts(parts.body),body=ensureBlockIds(split.body);
+    const joinBody=(value:string)=>value+(split.tail?'\n\n'+split.tail:'');
+    if(body!==split.body){this.draft.text=replaceWriting(this.draft.text,parts.title,joinBody(body));this.changedDraft();}
+    host.hidden=false;
+    this.canvas=new DocumentCanvas(host,{markdown:body,layout:this.layout(),render:source=>this.renderFragment(source),onChange:(markdown,layout)=>{
+      if(this.draft?.id!==draftId||this.saving)return;this.draft.text=replaceWriting(this.draft.text,writingParts(this.draft.text).title,joinBody(markdown));this.changeCompanion(layoutCompanionPath(layout.documentId),layout);this.changedDraft();
+    },onEditBlock:(_id,source,done)=>this.editCanvasBlock(source,done),onRender:root=>{mountDesignBlocks(root,{onEdit:block=>this.editDesign(block)});}});
+    if(!this.inkMode)return;
+    try{const workspace=await readWorkspace(this.draftProject!);if(this.draft?.id!==draftId||!this.inkMode)return;const record=workspace.items.find(item=>item.id===`ink-${this.documentId()}`&&item.scope==='personal');this.personalInk=Array.isArray((record?.payload as {items?:unknown})?.items)?(record!.payload as {items:InkItem[]}).items:[];}catch(error){this.error(error);return;}
+    this.ink=new AnnotationLayer(host,this.dialog.querySelector('#ink-tools'),{shared:this.sharedInk(),personal:this.personalInk,resolveImage:path=>this.resolveAsset(path),upload:async(file,personal)=>{
+      if(personal){if(file.size>2*1024*1024)throw new Error('私注图片请小于 2 MB。');return new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(reader.error);reader.readAsDataURL(file);});}
+      const url=await this.storeImage(file);return linkTarget(this.draft!.documentPath,url)!.path;
+    },onChange:(shared,personal)=>{
+      if(this.draft?.id!==draftId||this.saving)return;this.changeCompanion(inkCompanionPath(shared.documentId),shared);
+      if(JSON.stringify(personal)!==JSON.stringify(this.personalInk)){this.personalInk=personal;const id=this.documentId(),projectId=this.draftProject!;
+        this.personalWrite=this.personalWrite.catch(()=>{}).then(async()=>{const state=await readWorkspace(projectId),now=new Date().toISOString(),previous=state.items.find(item=>item.id===`ink-${id}`);await updateWorkspace(projectId,{baseRevision:state.revision,item:{id:`ink-${id}`,kind:'annotation',title:'文档私注',scope:'personal',targets:[id],text:'',tags:['视觉注释'],state:'open',payload:{items:personal},createdAt:previous?.createdAt??now,updatedAt:now}});});void this.personalWrite.catch(error=>this.error(error));}
+    }});
+  }
+  /** 排版中的内容块继续用同一个富文本引擎编辑，不创建第二份正文。 */
+  private editCanvasBlock(source:string,done:(source:string)=>void){
+    const dialog=document.createElement('dialog');dialog.className='canvas-block-editor';dialog.innerHTML='<header><strong>编辑内容块</strong><button data-cancel aria-label="取消编辑">×</button></header><div class="canvas-block-rich"></div><textarea class="canvas-block-source" hidden aria-label="内容块源码"></textarea><footer><button data-cancel>取消</button><button class="primary-button" data-done>应用到文档</button></footer>';
+    const root=dialog.querySelector<HTMLElement>('.canvas-block-rich')!,area=dialog.querySelector<HTMLTextAreaElement>('textarea')!;let fallback=false;
+    const rich=new RichWriting(root,source,()=>{},file=>this.storeImage(file),url=>this.resolveAsset(url),()=>{}, {getDialoguePositions:id=>this.layout().dialogues?.[id],storeImage:file=>this.storePaletteImage(file),resolveImage:async path=>this.resolveAsset(path)});
+    const close=()=>{rich.dispose();dialog.remove();};dialog.querySelectorAll('[data-cancel]').forEach(button=>button.addEventListener('click',close));dialog.querySelector('[data-done]')!.addEventListener('click',()=>{done(fallback?area.value:rich.read());close();});dialog.addEventListener('cancel',event=>{event.preventDefault();close();});document.body.append(dialog);dialog.showModal();
+    void rich.create().catch(()=>{fallback=true;rich.dispose();root.hidden=true;area.hidden=false;area.value=source;});
+  }
+  private editDesign(block:DesignBlock,insert=false){
+    if(block.kind==='dialogue')openDialogueEditor(block,{positions:this.layout().dialogues?.[block.id],onSave:(value,positions)=>{const layout=this.layout();layout.dialogues={...layout.dialogues,[value.id]:positions};this.changeCompanion(layoutCompanionPath(layout.documentId),layout);this.writeDesign(value,insert);}});
+    else openPaletteEditor(block,{onSave:value=>this.writeDesign(value,insert),sourcePath:block.source?.path,storeImage:file=>this.storePaletteImage(file),resolveImage:async path=>this.resolveAsset(path)});
+  }
+  private writeDesign(block:DesignBlock,insert:boolean){
+    if(!this.draft)return;this.flushRich();const parts=writingParts(this.draft.text),fence='```cewen-'+block.kind+'\n'+serializeDesignBlock(block)+'\n```';let body=parts.body;
+    if(insert){if(this.rich&&!this.canvasMode&&!this.sourceMode){this.rich.insert('\n'+fence+'\n');return;}body+='\n\n'+fence+'\n';}
+    else{const node=fromMarkdown(body).children.find(node=>{if(node.type!=='code')return false;try{return parseDesignBlock(node.lang??'',node.value)?.id===block.id;}catch{return false;}});if(!node?.position)throw new Error('原内容块已变化，请重新打开文档后编辑。');body=body.slice(0,node.position.start.offset!)+fence+body.slice(node.position.end.offset!);}
+    this.draft.text=replaceWriting(this.draft.text,parts.title,body);this.changedDraft();this.syncEditor();
   }
 
   /** 草稿写入按顺序排队；晚返回的旧请求不能覆盖刚输入的新文字。 */
   private async flushDraft() {
+    this.flushRich();
     clearTimeout(this.timer);
     if (!this.dirty || !this.draft || !this.draftProject) { await this.draftWrite; return; }
-    const draft = { ...this.draft }, projectId = this.draftProject;
+    const draft = structuredClone(this.draft), projectId = this.draftProject;
     const write = this.draftWrite.catch(() => {}).then(() => saveDraft(projectId, draft));
     this.draftWrite = write;
     await write;
-    if (this.draft?.id === draft.id && this.draft.text === draft.text) { this.dirty = false; this.message('草稿已保存；尚未提交为正式版本。'); }
+    if (this.draft?.id === draft.id && this.draft.text === draft.text && JSON.stringify(this.draft.companions)===JSON.stringify(draft.companions)) { this.dirty = false; this.message('草稿已保存；尚未提交为正式版本。'); }
   }
 
   /** 保存使用打开时哈希；发生冲突只展示双方，不覆盖磁盘或抛弃输入。 */
   private async save() {
     if (!this.draft || !this.draftProject || this.saving) return;
-    this.saving = true;
+    this.flushRich();this.saving = true;this.rich?.readonly(true);this.dialog.classList.add('saving-document');
+    // 保存期间锁定整份工作稿，避免异步返回覆盖用户刚改的标题、分类或正文。
+    const controls=[...this.dialog.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>('input,button,select,textarea')].map(control=>({control,disabled:control.disabled}));
+    controls.forEach(({control})=>{control.disabled=true;});
     try {
     await this.flushDraft();
     const draft = { ...this.draft }, snapshot = this.getSnapshot()!;
-    const reason = this.dialog.querySelector<HTMLInputElement>('#commit-reason')?.value.trim() || '编辑策划文档';
+    const title=writingParts(draft.text).title.trim();if(!title)throw new Error('请先给这份设计起个名字。');
+    const reason = this.dialog.querySelector<HTMLInputElement>('#commit-reason')?.value.trim() || `${draft.baseHash===null?'新建':'编辑'}${title}`;
     const editor = this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
     editor.readOnly = true;
     this.message('正在保存文档与版本快照…');
     try {
-      const updated = await commitProject({ projectId: snapshot.project.id, requestId: crypto.randomUUID(), baseRevision: snapshot.revision, reason, actor: 'user', changes: [{ path: draft.documentPath, baseHash: draft.baseHash, text: draft.text }] });
+      const system=String(readHeader(draft.text).metadata.system??''),preset=categoryPresets.find(group=>group.id===system);
+      const categoryChanges=preset&&!snapshot.groups.some(group=>group.id===system)?this.categoryChanges([...snapshot.groups.filter(group=>group.id!=='system-unassigned'),preset],snapshot):[];
+      const migratingSelf=categoryChanges.some(change=>change.path===draft.documentPath);
+      // 同盘哈希不代表私有结构草稿相同；携带打开正文时的投影，防止旧正文盖掉未保存的关系。
+      const updated = await commitProject({ projectId: snapshot.project.id, requestId: crypto.randomUUID(), baseRevision: snapshot.revision, reason, actor: 'user', editingBases: {[draft.documentPath]:draft.baseText}, changes: [...categoryChanges.filter(change=>change.path!==draft.documentPath),{ path: draft.documentPath, baseHash: draft.baseHash, text: migratingSelf?setMetadata(draft.text,{systems:undefined}):draft.text },...(draft.assets??[]).map(asset=>({...asset,baseHash:null})),...(draft.companions??[])] });
       await deleteDraft(snapshot.project.id, draft.id);
       this.onChange(updated);
       const document = updated.documents.find(item => item.path === draft.documentPath)!;
-      this.draft = { id: crypto.randomUUID(), documentPath: document.path, baseHash: document.hash, baseText: document.text, text: document.text, updatedAt: new Date().toISOString() };
-      this.dirty = false;
+      this.draft = { id: draft.id, documentPath: document.path, baseHash: document.hash||null, baseText: document.text, text: document.text, updatedAt: new Date().toISOString() };
+      this.companionBases=structuredClone(updated.companions??{});this.dirty = false;this.syncEditor();
+      this.dialog.querySelector('.draft-recovery')?.remove();
+      const picker=this.dialog.querySelector<HTMLSelectElement>('#document-picker');if(picker)picker.innerHTML=updated.documents.map(item=>`<option value="${html(item.id)}" ${item.id===document.id?'selected':''}>${html(item.title)}</option>`).join('');
       this.message(updated.revision === snapshot.revision ? '内容未变化，未创建重复版本。' : '已保存到 Markdown，并记录正式版本。');
       this.dialog.querySelector('#conflict-details')?.replaceChildren();
     } catch (error) {
       if (error instanceof ClientError && error.code === 'FILE_CONFLICT') {
-        const details = error.details as { currentText?: string; currentHash?: string };
+        const details = error.details as { path?: string; currentText?: string; currentHash?: string; source?: string };
+        if(details.path && details.path!==draft.documentPath)throw new Error(`分类或相关文件刚刚发生变化（${details.path}）。草稿已保留，请关闭后刷新项目并恢复草稿再保存。`);
         const container = this.dialog.querySelector<HTMLElement>('#conflict-details')!;
-        container.innerHTML = `<section class="conflict-panel"><h2>文件已被修改，先比较再保存</h2><p>上方保留你的草稿。下方是磁盘当前稿和你开始编辑时的原稿；合并需要的内容后，使用新的磁盘版本作为保存基准。</p><div class="conflict-columns"><label>磁盘当前稿<textarea readonly aria-label="磁盘当前稿">${html(details.currentText ?? '文件已删除')}</textarea></label><label>编辑前原稿<textarea readonly aria-label="编辑前原稿">${html(draft.baseText ?? '')}</textarea></label></div><button class="secondary-button" id="accept-conflict-base">我已比较，保留上方合并稿并更新保存基准</button></section>`;
+        const currentLabel=details.source==='graph-draft'?'当前结构草稿':'磁盘当前稿';
+        container.innerHTML = `<section class="conflict-panel"><h2>内容已被修改，先比较再保存</h2><p>上方保留你的草稿。下方是${currentLabel}和你开始编辑时的原稿；合并需要的内容后，再更新保存基准。</p><div class="conflict-columns"><label>${currentLabel}<textarea readonly aria-label="${currentLabel}">${html(details.currentText ?? '文件已删除')}</textarea></label><label>编辑前原稿<textarea readonly aria-label="编辑前原稿">${html(draft.baseText ?? '')}</textarea></label></div><button class="secondary-button" id="accept-conflict-base">我已比较，保留上方合并稿并更新保存基准</button></section>`;
         container.querySelector('#accept-conflict-base')!.addEventListener('click', () => { if (this.draft) { this.draft.baseHash = details.currentHash ?? null; this.draft.baseText = details.currentText ?? null; this.dirty = true; container.replaceChildren(); this.message('保存基准已更新。请核对上方合并稿，再点击保存版本。'); } });
       }
       throw error;
     } finally { editor.readOnly = false; }
-    } finally { this.saving = false; }
+    } finally { this.saving = false;this.dialog.classList.remove('saving-document');this.rich?.readonly(false);controls.forEach(({control,disabled})=>{control.disabled=disabled;}); }
+  }
+
+  /** 分类拥有公开的单一来源；升级仅写当前文件，旧快照原样保留。 */
+  private categoryChanges(groups: KnowledgeGroup[], snapshot: ProjectSnapshot): FileChange[] {
+    if(!snapshot.projectEntry)throw new Error('缺少项目入口，请重新扫描文件后再保存分类。');
+    return [{path:'PROJECT.md',baseHash:snapshot.projectEntry.hash,text:setMetadata(snapshot.projectEntry.text,{minimumAppVersion:'0.4.0',systems:groups.map(group=>({id:group.id,title:group.label,color:group.color}))})},...snapshot.documents.filter(doc=>doc.type==='gdd'&&Object.hasOwn(readHeader(doc.text).metadata,'systems')).map(doc=>({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{systems:undefined})}))];
+  }
+
+  /** 用户可新增和改名分类，不要求先创建总纲；稳定 ID 不随标题改变。 */
+  private rebaseCategoryDraft(before: ProjectSnapshot, after: ProjectSnapshot) {
+    if(!this.draft)return;
+    const old=before.documents.find(doc=>doc.path===this.draft!.documentPath),updated=after.documents.find(doc=>doc.path===this.draft!.documentPath);
+    // 只接续本次分类操作造成的元数据变化；外部修改仍交给原有冲突处理。
+    if(old&&updated&&old.hash===this.draft.baseHash&&old.hash!==updated.hash){
+      const oldMeta=readHeader(old.text).metadata,newMeta=readHeader(updated.text).metadata;
+      // 分类删除只迁移被删去的映射，草稿里其他尚未保存的章节分类仍予保留。
+      const draftSections=readHeader(this.draft.text).metadata.sectionSystems;
+      let sectionPatch:Record<string,unknown>={};
+      if(JSON.stringify(oldMeta.sectionSystems)!==JSON.stringify(newMeta.sectionSystems)){
+        const before=oldMeta.sectionSystems as Record<string,unknown>|undefined,after=newMeta.sectionSystems as Record<string,unknown>|undefined;
+        const merged=draftSections&&typeof draftSections==='object'&&!Array.isArray(draftSections)?{...draftSections as Record<string,unknown>}:{};
+        for(const key of new Set([...Object.keys(before??{}),...Object.keys(after??{})]))if(before?.[key]!==after?.[key]&&merged[key]===before?.[key]){if(after?.[key]===undefined)delete merged[key];else merged[key]=after[key];}
+        sectionPatch={sectionSystems:Object.keys(merged).length?merged:undefined};
+      }
+      this.draft.text=setMetadata(this.draft.text,{...(oldMeta.system!==newMeta.system?{system:updated.system}:{}),...(Object.hasOwn(oldMeta,'systems')?{systems:undefined}:{}),...sectionPatch});
+      this.draft.baseHash=updated.hash;this.draft.baseText=updated.text;this.dirty=true;
+    }
+  }
+
+  async categories(selected = '') {
+    await this.flushDraft();const snapshot=this.getSnapshot();if(!snapshot||snapshot.historical)throw new Error('请在当前项目中管理分类。');
+    const content=`<form data-form="category" class="workbench-form"><h2>设计分类</h2><label>已有分类<select name="id"><option value="">新增分类</option>${snapshot.groups.filter(group=>group.id!=='system-unassigned').map(group=>`<option value="${group.id}" ${selected===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select></label><label>名称<input name="label" required maxlength="80" value="${html(snapshot.groups.find(group=>group.id===selected)?.label??'')}" list="common-categories" placeholder="选择常见类别或输入自定义名称"/><datalist id="common-categories">${categoryPresets.map(group=>`<option>${html(group.label)}</option>`).join('')}</datalist></label><label>分类颜色<input type="color" name="color" value="${snapshot.groups.find(group=>group.id===selected)?.color??'#7CBFFF'}"/></label><button type="submit" class="primary-button">保存分类</button><div class="prompt-actions"><button type="button" data-category-move="-1">分类上移</button><button type="button" data-category-move="1">分类下移</button><button type="button" data-category-remove>删除分类，成员移入未归组</button></div><p class="quiet">只创建分类目录，不生成空 DD。重命名不会改变关联身份。</p></form>`;
+    if(this.dialog.open&&this.draft&&this.dialog.querySelector('#conflict-details'))this.dialog.querySelector('#conflict-details')!.innerHTML=content;else{this.draft=null;this.shell('整理设计分类','分类与文档一起保存在公开项目中。',content);}
+    this.dialog.querySelector<HTMLSelectElement>('[data-form="category"] select')!.addEventListener('change',event=>{const group=snapshot.groups.find(group=>group.id===(event.target as HTMLSelectElement).value);const form=this.dialog.querySelector<HTMLFormElement>('[data-form="category"]')!;(form.elements.namedItem('label') as HTMLInputElement).value=group?.label??'';(form.elements.namedItem('color') as HTMLInputElement).value=group?.color??'#7CBFFF';});
+  }
+
+  /** 新稿尚未出现在正式文档目录，单独的恢复入口避免重启后无处可找。 */
+  private async drafts() {
+    await this.flushDraft();const snapshot=this.getSnapshot()!;const drafts=(await projectDrafts(snapshot.project.id)).filter(draft=>draft.purpose!=='answers'&&draft.purpose!=='graph');
+    this.draft=null;this.shell('未完成草稿','这些内容尚未全部保存为正式版本。',drafts.map(draft=>`<article class="draft-recovery"><span>${html(writingParts(draft.text).title||'未命名新稿')} · ${html(new Date(draft.updatedAt).toLocaleString())}</span><button class="secondary-button" data-resume-draft="${draft.id}">继续写作</button><button class="secondary-button" data-discard-draft="${draft.id}">删除草稿</button></article>`).join('')||'<p>没有未完成草稿。</p>');
+    this.dialog.querySelectorAll<HTMLButtonElement>('[data-resume-draft]').forEach(button=>button.addEventListener('click',()=>{const draft=drafts.find(item=>item.id===button.dataset.resumeDraft)!;this.draft={...draft};this.companionBases=structuredClone(snapshot.companions??{});this.personalInk=[];this.draftProject=snapshot.project.id;this.dirty=false;this.renderEditor({title:writingParts(draft.text).title,path:draft.documentPath});}));
+    this.dialog.querySelectorAll<HTMLButtonElement>('[data-discard-draft]').forEach(button=>button.addEventListener('click',()=>{if(!confirm('删除这份未提交草稿？已保存的正式文档不受影响。'))return;void deleteDraft(snapshot.project.id,button.dataset.discardDraft!).then(()=>this.drafts()).catch(error=>this.error(error));}));
   }
 
   /** 历史入口先使用真实公开快照，后续版本图谱与它共享同一修订来源。 */
@@ -217,35 +500,81 @@ export class ProjectWorkbench {
     const snapshot = this.getSnapshot();
     if (!snapshot) { await this.projects(); return; }
     const entries = await projectHistory(snapshot.project.id);
-    this.shell('版本记录', '每个完整版本都保存在项目 versions 文件夹，普通编辑器也能阅读。', `<div class="history-list">${entries.slice().reverse().map(entry => `<article class="history-row ${entry.valid ? '' : 'invalid'}"><span>${html(entry.manifest.label)}</span><div><strong>${html(entry.manifest.reason ?? '未完成版本')}</strong><p>${entry.valid ? html(new Date(entry.manifest.createdAt).toLocaleString()) : html(entry.problem ?? '需要核对')}</p><small>${html(`versions/${entry.manifest.label}/`)}</small></div><b>${entry.valid ? '完整快照' : '待处理'}</b></article>`).join('') || '<p class="quiet">尚未形成正式版本。</p>'}</div>${snapshot.recoveryRequired ? '<div class="recovery-actions"><p>项目存在未完成写入；只会处理仍匹配原稿或候选稿的文件。</p><button class="secondary-button" data-action="continue-recovery">继续完成批次</button><button class="secondary-button" data-action="rollback-recovery">撤回未完成批次</button></div>' : ''}`);
+    this.shell('版本记录', '每个完整版本都保存在项目 versions 文件夹，普通编辑器也能阅读。', `<button class="secondary-button" data-action="handoff">准备版本交接开场白</button><div class="history-list">${entries.slice().reverse().map(entry => `<article class="history-row ${entry.valid ? '' : 'invalid'}"><span>${html(entry.manifest.label)}</span><div><strong>${html(entry.manifest.reason ?? '未完成版本')}</strong><p>${entry.valid ? html(new Date(entry.manifest.createdAt).toLocaleString()) : html(entry.problem ?? '需要核对')}</p><small>${html(`versions/${entry.manifest.label}/`)}</small></div><b>${entry.valid ? '完整快照' : '待处理'}</b></article>`).join('') || '<p class="quiet">尚未形成正式版本。</p>'}</div>${snapshot.recoveryRequired ? '<div class="recovery-actions"><p>项目存在未完成写入；只会处理仍匹配原稿或候选稿的文件。</p><button class="secondary-button" data-action="continue-recovery">继续完成批次</button><button class="secondary-button" data-action="rollback-recovery">撤回未完成批次</button></div>' : ''}`);
   }
 
   private async click(event: MouseEvent) {
+    if(this.saving)return;
     const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#cewen-doc="]');
     if (link) { event.preventDefault(); await this.close(); window.dispatchEvent(new CustomEvent('cewen:read-document', { detail: decodeURIComponent(link.hash.slice('#cewen-doc='.length)) })); return; }
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
     if (!button) return;
+    if(button.dataset.categoryMove || button.hasAttribute('data-category-remove')) {
+      const form=this.dialog.querySelector<HTMLFormElement>('[data-form="category"]')!,id=(form.elements.namedItem('id') as HTMLSelectElement).value;
+      if(!id)return;const snapshot=this.getSnapshot()!,groups=snapshot.groups.filter(group=>group.id!=='system-unassigned'),index=groups.findIndex(group=>group.id===id);
+      if(index<0)return;const changes:FileChange[]=[];
+      if(button.hasAttribute('data-category-remove')) {
+        if(!confirm(`删除“${groups[index].label}”分类？其中的文档会移入“未归组”，正文和历史都会保留。`))return;
+        groups.splice(index,1);
+        for(const doc of snapshot.documents){
+          const raw=readHeader(doc.text).metadata.sectionSystems;
+          const sections=raw&&typeof raw==='object'&&!Array.isArray(raw)?{...raw as Record<string,unknown>}:{};
+          let sectionChanged=false;
+          for(const anchor of Object.keys(sections))if(sections[anchor]===id){sections[anchor]='system-unassigned';sectionChanged=true;}
+          if(doc.system===id||sectionChanged)changes.push({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{...(doc.system===id?{system:undefined}:{}),...(sectionChanged?{sectionSystems:sections}:{})})});
+        }
+      } else {
+        const next=index+Number(button.dataset.categoryMove);if(next<0||next>=groups.length)return;
+        [groups[index],groups[next]]=[groups[next],groups[index]];
+      }
+      // 分类迁移与受影响文档一起提交，避免出现暂时失效的归属。
+      const categoryChanges=this.categoryChanges(groups,snapshot);
+      for(const change of changes){const other=categoryChanges.find(item=>item.path===change.path);if(other){other.text=setMetadata(change.text!,{systems:undefined});}else categoryChanges.push(change);}
+      const updated=await commitProject({projectId:snapshot.project.id,requestId:crypto.randomUUID(),baseRevision:snapshot.revision,reason:button.hasAttribute('data-category-remove')?'删除分类并移入未归组':'调整设计分类顺序',actor:'user',changes:categoryChanges});
+      this.rebaseCategoryDraft(snapshot,updated);this.onChange(updated);await this.categories(button.hasAttribute('data-category-remove')?'':id);return;
+    }
     if (button.dataset.reverseRelation) { await this.save(); this.onChange(await projectAction<ProjectSnapshot>(this.getSnapshot()!.project.id, 'reverse-relation', { relationId: button.dataset.reverseRelation })); const docId = this.getSnapshot()!.documents.find(doc => doc.path === this.draft!.documentPath)!.id; await this.edit(docId); this.relationships(); return; }
-    if (button.dataset.editRelation) { const edge = this.getSnapshot()!.edges.find(edge => edge.id === button.dataset.editRelation)!; this.relationships(); const form = this.dialog.querySelector<HTMLFormElement>('[data-form="relation"]')!; form.dataset.relationId = edge.id; for (const [name,value] of Object.entries({ source: edge.source, target: edge.target, note: edge.note, type: ({ depends: '依赖', constrains: '约束', relates: '关联', references: '引用', replaces: '替代', contains: '包含' })[edge.type] })) (form.elements.namedItem(name) as HTMLInputElement).value = value; return; }
-    if (button.dataset.section !== undefined && this.draft) { this.undoStack.push(this.draft.text); this.draft.text = moveSection(this.draft.text, Number(button.dataset.section), Number(button.dataset.direction)); this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!.value = this.draft.text; this.dirty = true; this.structure(); this.preview(); await this.flushDraft(); return; }
+    if (button.dataset.editRelation) { this.flushRich();const edge = parseKnowledge([{path:this.draft!.documentPath,text:this.draft!.text,hash:''},...this.getSnapshot()!.documents.filter(d=>d.path!==this.draft!.documentPath)]).edges.find(edge => edge.id === button.dataset.editRelation)!;if(!edge)throw new Error('关系已变化，请重新打开关系列表。'); this.relationships(); const form = this.dialog.querySelector<HTMLFormElement>('[data-form="relation"]')!; form.dataset.relationId = edge.id; for (const [name,value] of Object.entries({ source: edge.source, target: edge.target, note: edge.note, type: ({ depends: '依赖', constrains: '约束', relates: '关联', references: '引用', replaces: '替代', contains: '包含' })[edge.type] })) (form.elements.namedItem(name) as HTMLInputElement).value = value;form.querySelector('#relation-target-picker')!.textContent=this.getSnapshot()!.nodes.find(node=>node.id===edge.target)?.title??'重新选择目标'; return; }
+    if (button.dataset.section !== undefined && this.draft) { this.undoStack.push(this.draft.text); this.draft.text = moveSection(this.draft.text, Number(button.dataset.section), Number(button.dataset.direction)); this.syncEditor(); this.dirty = true; this.structure(); await this.flushDraft(); return; }
     if (button.dataset.forgetProject) { await projectAction(button.dataset.forgetProject, 'forget', {}); if (this.getSnapshot()?.project.id === button.dataset.forgetProject) location.reload(); else await this.projects(); return; }
     if (button.dataset.copyProject) { this.shell('复制为新项目', '复制当前公开文档，使用新项目身份与初始版本；原项目和历史完整保留。', `<form data-form="copy-project" data-project="${button.dataset.copyProject}" class="workbench-form"><label>新项目名称<input name="name" required maxlength="100"/></label><label>保存父目录<input name="directory" required value="${html(this.library.defaultDirectory)}"/></label><button class="primary-button" type="submit">创建独立副本</button></form>`); return; }
-    if (button.dataset.removeRelation && this.draft) { this.draft.text = removeRelation(this.draft.text, button.dataset.removeRelation); this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!.value = this.draft.text; this.dirty = true; await this.flushDraft(); this.message('关系已从草稿移除，保存版本后正式生效。'); return; }
+    if (button.dataset.removeRelation && this.draft) { this.draft.text = removeRelation(this.draft.text, button.dataset.removeRelation); this.syncEditor(); this.dirty = true; await this.flushDraft(); this.message('关系已从草稿移除，保存版本后正式生效。'); return; }
     if (button.dataset.projectPath) { await this.flushDraft(); this.onChange(await openProject(button.dataset.projectPath)); this.dialog.close(); return; }
+    if (button.closest('.writing-menu') && (button.dataset.action || button.dataset.format)) (button.closest('.writing-menu') as HTMLDetailsElement).open=false;
     if (button.dataset.format) { this.format(button.dataset.format); return; }
     switch (button.dataset.action) {
       case 'close': await this.close(); break;
+      case 'projects': await this.projects(); break;
+      case 'create-project': this.creation(); break;
+      case 'blank-project': this.setup=undefined;this.projectDetails();break;
+      case 'close-inspector': this.dialog.querySelector('#conflict-details')!.replaceChildren();break;
       case 'example': button.disabled = true; try { this.onChange(await createProject('纸上远行 · 基础示例', 'example', this.library.defaultDirectory)); this.dialog.close(); } finally { button.disabled = false; } break;
       case 'new-document': await this.flushDraft(); this.draft = null; this.newDocument(); break;
+      case 'handoff': await openCollaboration('handoff',this.getSnapshot());break;
+      case 'drafts': await this.drafts(); break;
+      case 'categories': await this.categories(); break;
+      case 'rewrite-selection': {this.rich?.rememberSelection();const selection=this.rich?.selectedText()??window.getSelection()?.toString()??'';if(!selection.trim())throw new Error('请先选中需要讨论的正文。');await openCollaboration('write',this.getSnapshot(),[String(readHeader(this.draft!.text).metadata.id)],{title:'与 LLM 讨论这段设计',extra:`以下为用户当前选中的草稿，可能尚未写入正式版本：\n\n${selection}\n\n请先理解设计意图，提出可审阅的修改建议；不要擅自覆盖原文。`,fixed:true});break;}
+      case 'collaborate': await openCollaboration('write',this.getSnapshot(),this.draft?.baseHash ? [String(readHeader(this.draft.text).metadata.id)] : []); break;
+      case 'writing-mode': await this.setWritingMode(false,false);break;
+      case 'canvas-mode': await this.setWritingMode(true,false);break;
+      case 'ink-mode': await this.setWritingMode(true,true);break;
+      case 'insert-dialogue': this.editDesign({kind:'dialogue',id:'dialogue-'+crypto.randomUUID(),title:'新的对白',start:'start',nodes:[{id:'start',type:'line',speaker:'角色',text:'从第一句台词开始',next:'end'},{id:'end',type:'end',text:'结束'}]},true);break;
+      case 'insert-palette': openPaletteEditor(undefined,{onSave:block=>this.writeDesign(block,true),storeImage:file=>this.storePaletteImage(file)});break;
+      case 'source-mode': {const next=!this.sourceMode;await this.setWritingMode(false,false);this.flushRich();this.sourceMode=next;this.syncEditor();await this.mountRich();button.textContent=next?'返回正文':'Markdown';button.setAttribute('aria-pressed',String(next));break;}
+      case 'insert-link': this.rich?.rememberSelection();await this.insertLink();break;
+      case 'find-text': this.findText();break;
       case 'save-document': button.disabled = true; try { await this.save(); } finally { button.disabled = false; } break;
-      case 'preview': { const pane = this.dialog.querySelector<HTMLElement>('#editor-preview')!; pane.hidden = !pane.hidden; this.preview(); break; }
+      case 'preview': { const pane = this.dialog.querySelector<HTMLElement>('#editor-preview')!; pane.hidden = !pane.hidden;this.dialog.classList.toggle('reading-preview',!pane.hidden);button.setAttribute('aria-pressed',String(!pane.hidden));this.preview(); break; }
       case 'document-settings': this.settings(); break;
       case 'structure': this.structure(); break;
       case 'relationships': this.relationships(); break;
       case 'undo': case 'redo': {
         if (!this.draft) break;
+        if(this.inkMode){button.dataset.action==='undo'?this.ink?.undo():this.ink?.redo();break;}
+        if(this.canvasMode){button.dataset.action==='undo'?this.canvas?.undo():this.canvas?.redo();break;}
+        if(this.rich&&!this.sourceMode){if(button.dataset.action==='undo')this.rich.undo();else this.rich.redo();break;}
         const source = button.dataset.action === 'undo' ? this.undoStack : this.redoStack, target = button.dataset.action === 'undo' ? this.redoStack : this.undoStack, text = source.pop();
-        if (text === undefined) break; target.push(this.draft.text); this.draft.text = text; this.dirty = true; this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!.value = text; this.preview(); await this.flushDraft(); break;
+        if (text === undefined) break; target.push(this.draft.text); this.draft.text = text; this.dirty = true; this.syncEditor(); await this.flushDraft(); break;
       }
       case 'continue-recovery': case 'rollback-recovery': this.onChange(await recoverProject(this.getSnapshot()!.project.id, button.dataset.action === 'continue-recovery' ? 'continue' : 'rollback')); await this.history(); break;
     }
@@ -255,21 +584,29 @@ export class ProjectWorkbench {
     const form = event.target as HTMLFormElement, data = new FormData(form);
     const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!; submit.disabled = true;
     try {
-      if (form.dataset.form === 'move-document' && this.draft) { const doc = this.getSnapshot()!.documents.find(doc => doc.path === this.draft!.documentPath)!; await this.save(); this.onChange(await projectAction<ProjectSnapshot>(this.getSnapshot()!.project.id, 'move-document', { documentId: doc.id, destination: data.get('destination') })); await this.edit(doc.id); return; }
+      if(form.dataset.form==='category'){
+        const snapshot=this.getSnapshot()!,id=String(data.get('id'))||`system-${crypto.randomUUID()}`,label=String(data.get('label')).trim(),color=String(data.get('color'));
+        if(snapshot.groups.some(group=>group.id!==id&&group.label===label))throw new Error('已有同名分类，请选择原分类。');
+        const groups=snapshot.groups.filter(group=>group.id!=='system-unassigned'),index=groups.findIndex(group=>group.id===id);
+        if(index<0)groups.push({id,label,color});else groups[index]={id,label,color};
+        const updated=await commitProject({projectId:snapshot.project.id,requestId:crypto.randomUUID(),baseRevision:snapshot.revision,reason:`更新设计分类：${label}`,actor:'user',changes:this.categoryChanges(groups,snapshot)});
+        this.rebaseCategoryDraft(snapshot,updated);this.onChange(updated);
+        if(this.draft){this.draft.text=setMetadata(this.draft.text,{system:id});this.dirty=true;this.renderEditor({title:writingParts(this.draft.text).title,path:this.draft.documentPath});await this.flushDraft();}else await this.categories(id);return;
+      }
+      if (form.dataset.form === 'move-document' && this.draft) { await this.save(); const doc = this.getSnapshot()!.documents.find(doc => doc.path === this.draft!.documentPath)!; this.onChange(await projectAction<ProjectSnapshot>(this.getSnapshot()!.project.id, 'move-document', { documentId: doc.id, destination: data.get('destination') })); await this.edit(doc.id); return; }
       if ((form.dataset.form === 'settings' || form.dataset.form === 'relation') && this.draft) {
         this.undoStack.push(this.draft.text); this.redoStack = [];
         if (form.dataset.form === 'settings') {
-          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), system: String(data.get('system')) }), String(data.get('title')));
-          const newSystem = String(data.get('newSystem') ?? '').trim();
-          if (newSystem) { const metadata = readHeader(this.draft.text).metadata; this.draft.text = setMetadata(this.draft.text, { systems: [...(Array.isArray(metadata.systems) ? metadata.systems : []), { id: `system-${crypto.randomUUID()}`, title: newSystem, color: '#A7BDDE' }] }); }
+          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), system: String(data.get('system')), aliases: documentAliases(data.get('aliases')) }), String(data.get('title')));
         } else {
-          const source = this.getSnapshot()!.nodes.find(node => node.id === data.get('source'));
+          const source = parseKnowledge([{path:this.draft.documentPath,text:this.draft.text,hash:''}]).nodes.find(node => node.id === data.get('source'));
           if (!source) throw new Error('请选择有效的来源条目。');
+          if(!this.getSnapshot()!.nodes.some(node=>node.id===data.get('target')&&node.kind!=='system'))throw new Error('请先选择关联目标。');
           this.draft.text = putRelation(this.draft.text, source.anchor, { id: form.dataset.relationId ?? `rel-${crypto.randomUUID()}`, target: String(data.get('target')), type: String(data.get('type')), note: String(data.get('note')) });
         }
-        this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!.value = this.draft.text; this.dirty = true; await this.flushDraft(); this.preview(); this.message('已更新草稿，请核对后保存版本。'); return;
+        this.syncEditor(); this.dirty = true; await this.flushDraft(); this.message('已更新草稿，请核对后保存版本。'); return;
       }
-      if (form.dataset.form === 'create') { this.onChange(await createProject(String(data.get('name')), data.get('kind') as 'blank' | 'basic', String(data.get('directory')))); this.dialog.close(); }
+      if (form.dataset.form === 'create') { if(!String(data.get('directory')??'').trim())throw new Error('请先选择项目保存文件夹。');this.onChange(await createProject(String(data.get('name')), data.get('kind') as 'blank' | 'basic', String(data.get('directory')),this.setup));const startWriting=!!this.setup;this.setup=undefined; this.dialog.close();if(startWriting)await this.newDocument(); }
       else if (form.dataset.form === 'copy-project') { this.onChange(await projectAction<ProjectSnapshot>(form.dataset.project!, 'copy', { name: data.get('name'), directory: data.get('directory') })); this.dialog.close(); }
       else if (form.dataset.form === 'open') { this.onChange(await openProject(String(data.get('path')))); this.dialog.close(); }
       else if (form.dataset.form === 'new-document') {
@@ -288,6 +625,8 @@ export class ProjectWorkbench {
   private format(action: string) {
     const editor = this.dialog.querySelector<HTMLTextAreaElement>('#document-editor');
     if (!editor || !this.draft) return;
+    if(this.rich&&!this.sourceMode&&action!=='rule'){this.rich.format(action);return;}
+    if(this.rich&&!this.sourceMode&&action==='rule'){this.rich.insert(`\n<a id="rule-${crypto.randomUUID()}"></a>\n\n## 新条目\n\n`);return;}
     const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
     const insert = ({ heading: `\n## ${selected || '章节标题'}\n`, bold: `**${selected || '重点内容'}**`, list: `\n- ${selected || '列表项'}\n`, quote: `\n> ${selected || '引用内容'}\n`, table: '\n| 项目 | 说明 |\n|---|---|\n| 名称 | 内容 |\n', rule: `\n<a id="rule-${crypto.randomUUID()}"></a>\n\n## 新条目\n\n${selected || '在这里写规则和仍未确定的边界。'}\n` } as Record<string, string>)[action];
     if (!insert) return;

@@ -1,8 +1,12 @@
 import * as THREE from 'three';
+import { GraphInteraction } from './graph-interaction';
+import './graph-selection.css';
+import type { GraphEdit } from '../shared/graph-editing';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { types, type KnowledgeData, type KnowledgeNode, type KnowledgeEdge } from './data';
 import { buildAnalysis, edgeSentence, laneLabels, type AnalysisResult, type AnalysisLane } from './analysis';
 import { currentTheme } from './theme';
+import { categoryColor } from './category-color';
 
 /** 三种空间模式共享同一场景；切换时只改变目标坐标，不重新创建节点。 */
 export type GraphMode = 'galaxy' | 'network' | 'layers';
@@ -29,6 +33,27 @@ type LayoutTransition = {
   refocus: boolean; cards: Map<string, CardAppearance>; cardEdges: number[];
 };
 
+/** 镜头围绕目标插值：方向走最短弧，镜距始终大于控制器下限。 */
+function interpolateCamera(camera: THREE.Vector3, target: THREE.Vector3, from: THREE.Vector3, fromTarget: THREE.Vector3, to: THREE.Vector3, toTarget: THREE.Vector3, ratio: number) {
+  target.lerpVectors(fromTarget, toTarget, ratio);
+  const first = from.clone().sub(fromTarget);
+  const last = to.clone().sub(toTarget);
+  const distance = THREE.MathUtils.lerp(Math.max(first.length(), 150), Math.max(last.length(), 150), ratio);
+  const direction = first.lengthSq() > 1e-6 ? first.normalize() : new THREE.Vector3(0, 0, 1);
+  const destination = last.lengthSq() > 1e-6 ? last.normalize() : direction.clone();
+  const dot = THREE.MathUtils.clamp(direction.dot(destination), -1, 1);
+  if (dot < -.9995) {
+    // 对向视角没有唯一最短弧，固定辅助轴避免快切时随机翻转。
+    const axis = direction.clone().cross(new THREE.Vector3(0, 1, 0));
+    if (axis.lengthSq() < 1e-6) axis.set(1, 0, 0).cross(direction);
+    direction.applyAxisAngle(axis.normalize(), Math.PI * ratio);
+  } else {
+    const rotation = new THREE.Quaternion().setFromUnitVectors(direction, destination);
+    direction.applyQuaternion(new THREE.Quaternion().slerp(rotation, ratio));
+  }
+  camera.copy(target).addScaledVector(direction.normalize(), distance);
+}
+
 /** 用固定种子生成背景星点，使重新打开页面后的视觉位置保持稳定。 */
 function randomGenerator(seed: number) {
   return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
@@ -37,6 +62,20 @@ function randomGenerator(seed: number) {
 /** 星空是知识节点的背景，实际规则使用可聚焦的原生按钮承载文字。 */
 export class KnowledgeGraph {
   private scene = new THREE.Scene();
+  private interaction?:GraphInteraction;
+  private editHandler?:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void;
+  /** 编辑适配器只发出动作，写入和版本统一交给应用的编辑会话。 */
+  configureEditing(handler:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void,enabled=true){this.editHandler=handler;this.interaction?.setEditable(enabled);}
+  setEditable(enabled:boolean){this.interaction?.setEditable(enabled);}
+  setShake(enabled:boolean){if(this.interaction)this.interaction.shake=enabled;}
+  selectAllNodes(){this.interaction?.selectAll();}
+  selectedIds(){return this.interaction?.selectedIds()??[];}
+  private layoutKey(node:KnowledgeNode){return `${this.mode==='galaxy'?'galaxy-v2':this.mode==='network'?'network:'+this.selected:this.mode==='layers'?'layers-v2':this.mode}:${node.id}:${node.group}`;}
+  /** 从快照恢复时替换旧位置，撤销不会留下刚才挤开的节点。 */
+  restoreEditingLayout(value:unknown){this.layoutMemory.clear();this.restoreLayout(value);}
+  togglePin(id:string){const node=this.stars.get(id);if(!node||id===this.coreId())return;const key=this.layoutKey(node.data),row=this.layoutMemory.get(key);this.layoutMemory.set(key,{group:node.data.group,point:node.point.position.clone(),pinned:!row?.pinned});this.labelsDirty=true;}
+  resetPositions(){const prefix=this.mode==='galaxy'?'galaxy-v2:':this.mode==='network'?`network:${this.selected}:`:'layers-v2:';for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
+
   private camera = new THREE.PerspectiveCamera(42, 1, 1, 8000);
   private renderer: THREE.WebGLRenderer;
   private controls: OrbitControls;
@@ -88,7 +127,7 @@ export class KnowledgeGraph {
   private pointerStart: { x: number; y: number; id: number; moved: boolean } | null = null;
   private disposed = false;
   /** 历史布局按稳定身份复用，版本增删不让已有节点重新洗牌。 */
-  private layoutMemory = new Map<string, { group: string; point: THREE.Vector3 }>();
+  private layoutMemory = new Map<string, { group: string; point: THREE.Vector3; pinned?:boolean }>();
   private retiring = new Set<string>();
   private versionChanging = false;
   private light = currentTheme() === 'light';
@@ -96,6 +135,12 @@ export class KnowledgeGraph {
   private galaxyDust?: THREE.Points;
   private galaxyCore?: THREE.Sprite;
   private primaryGdd?: string;
+  /** 星尘按文档身份保存过渡权重；暂停使用累计时间，恢复时不跳相位。 */
+  private dustWeights = new Map<string, number>();
+  private dustOwners: string[] = [];
+  private motionTime = 0;
+  private lastMotionFrame = 0;
+  private contextStart?: { x: number; y: number; moved: boolean };
 
   private findCore() {
     return this.data.nodes.filter(node => node.kind === 'document' && node.documentType === 'gdd' && node.status !== 'archived')
@@ -103,7 +148,7 @@ export class KnowledgeGraph {
   }
   private coreId() { return this.primaryGdd; }
   private starSize(node: KnowledgeNode, halo = false) {
-    return node.id === this.coreId() ? halo ? 205 : 46 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
+    return node.id === this.coreId() ? halo ? 68 : 23 : halo ? node.kind === 'system' ? 95 : 43 : node.kind === 'system' ? 22 : node.kind === 'document' ? 15 : 10;
   }
 
   constructor(private container: HTMLElement, private select: (id: string) => void, private onCount: (count: number) => void, private selectRelation: (index: number) => void, private data: KnowledgeData, private clearSelection: () => void) {
@@ -137,12 +182,15 @@ export class KnowledgeGraph {
     this.controls.maxDistance = 3400;
     this.controls.maxPolarAngle = Math.PI * .9;
     // 拖动只能接管镜头，节点继续完成变换，避免留下半三维、半分层的坐标。
-    this.controls.addEventListener('start', () => { if (this.transition) this.transition.cameraInterrupted = true; });
+    this.controls.addEventListener('start', () => {
+      if (this.transition) this.transition.cameraInterrupted = true;
+      this.controls.enableDamping = true;
+    });
     this.controls.addEventListener('change', () => { this.labelsDirty = true; });
     this.createBackground();
     const geometry = this.layout('galaxy');
     data.nodes.forEach(node => {
-      const color = data.groups.find(group => group.id === node.group)!.color;
+      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)!.color;
       const point = this.sprite(color, this.starSize(node), .98);
       const halo = this.sprite(color, this.starSize(node, true), .22);
       point.position.copy(geometry.get(node.id)!);
@@ -151,7 +199,7 @@ export class KnowledgeGraph {
       label.className = `star-label ${node.kind}`;
       label.type = 'button';
       label.textContent = node.title;
-      label.style.setProperty('--node-color', color);
+      label.style.setProperty('--node-color', categoryColor(color));label.dataset.graphNode=node.id;
       label.setAttribute('aria-label', `查看${node.title}`);
       label.addEventListener('click', () => this.select(node.id));
       this.labelLayer.append(label);
@@ -159,7 +207,7 @@ export class KnowledgeGraph {
     });
     data.edges.forEach((edge, index) => {
       const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3());
-      const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: .19, depthWrite: false });
+      const material = new (edge.type==='contains'?THREE.LineBasicMaterial:THREE.LineDashedMaterial)({ color: '#769cc1', transparent: true, opacity: .19, depthWrite: false, ...(edge.type==='contains'?{}:{dashSize:9,gapSize:7}) });
       const line = new THREE.Line(new THREE.BufferGeometry(), material);
       this.scene.add(line);
       const particle = this.sprite('#b8e5ff', 8, .85);
@@ -193,6 +241,19 @@ export class KnowledgeGraph {
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
     this.renderer.domElement.addEventListener('pointermove', this.pointerMove);
     this.renderer.domElement.addEventListener('pointercancel', this.pointerCancel);
+    this.container.addEventListener('contextmenu',this.contextMenu);
+    this.container.addEventListener('pointerdown',this.contextDown);
+    this.container.addEventListener('pointermove',this.contextMove);
+    this.interaction=new GraphInteraction({container:this.container,canvas:this.renderer.domElement,camera:this.camera,mode:()=>this.mode,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
+      nodes:()=>[...this.stars.values()].map(star=>({data:star.data,point:star.point.position,label:star.label,pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned,visible:(this.desiredAppearance.get(star.data.id)?.point??0)>0})),
+      edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.curve.getPoints(40)})),
+      begin:()=>{if(this.transition)this.advanceTransition(this.transition.start+this.transition.duration+1);this.controls.enabled=false;this.pointerStart=null;},
+      end:()=>{this.controls.enabled=this.mode!=='network';},
+      move:(id,point)=>{const star=this.stars.get(id);if(star){star.point.position.copy(point);star.halo.position.copy(point);this.labelsDirty=true;}},
+      capture:()=>this.exportLayout(),restore:value=>this.restoreEditingLayout(value),
+      record:()=>{this.stars.forEach(star=>{this.layoutMemory.set(this.layoutKey(star.data),{group:star.data.group,point:star.point.position.clone(),pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned});});this.updateConnections();return this.exportLayout();},
+      select:id=>this.select(id),clear:()=>this.clearSelection(),commit:(edit,before,after)=>this.editHandler?.(edit,before,after),
+    });
     document.addEventListener('visibilitychange', this.visibilityChanged);
     window.addEventListener('cewen-theme-change', this.themeChanged);
     this.resize();
@@ -228,9 +289,10 @@ export class KnowledgeGraph {
   }
 
   /** 浅色用有色实体点与普通混合，避免发光叠加在白底上消失；不改布局与镜头。 */
-  private graphColor(color: string) { return new THREE.Color(color).multiplyScalar(this.light ? .3 : 1); }
+  private graphColor(color: string) { return new THREE.Color(categoryColor(color,this.light)); }
   private themeChanged = () => {
     this.light = currentTheme() === 'light';
+    this.stars.forEach(star=>star.label.style.setProperty('--node-color',categoryColor(star.point.userData.baseColor,this.light)));
     this.scene.traverse(object => {
       if (object instanceof THREE.Sprite) {
         object.material.color.copy(this.graphColor(object.userData.baseColor ?? '#b8e5ff'));
@@ -271,30 +333,48 @@ export class KnowledgeGraph {
       this.clouds.push(cloud);
     });
     // 四条渐疏旋臂围绕原点，倾斜薄盘保留三维纵深；粒子不参与点击与计数。
-    const dust = new Float32Array(4200 * 3);
-    for (let index = 0; index < 4200; index++) {
-      const radius = 45 + Math.pow(random(), .7) * 650;
-      const angle = index % 4 * Math.PI / 2 + radius * .0048 + (random() - .5) * .3;
-      dust[index * 3] = Math.cos(angle) * radius;
-      dust[index * 3 + 1] = Math.sin(angle) * radius * .66;
-      dust[index * 3 + 2] = Math.sin(angle) * radius * .23 + (random() - .5) * 36 - 50;
-    }
-    this.galaxyDust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(dust, 3)), new THREE.PointsMaterial({ color: '#b0bcdf', size: 2.4, sizeAttenuation: false, transparent: true, opacity: .3, map: this.texture, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.galaxyDust = new THREE.Points(new THREE.BufferGeometry(), new THREE.ShaderMaterial({
+      uniforms:{tone:{value:new THREE.Color('#a4b3d5')},ambient:{value:0},phase:{value:0},pixelRatio:{value:this.renderer.getPixelRatio()}},
+      vertexShader:'attribute float weight; uniform float phase; uniform float pixelRatio; varying float fade; void main(){ vec3 p=position; p.x+=sin(phase*.11+position.y*.008)*2.0; p.y+=cos(phase*.09+position.x*.009)*1.5; fade=weight*(.91+.09*sin(phase*.25+position.x)); gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.); gl_PointSize=2.4*pixelRatio; }',
+      fragmentShader:'uniform vec3 tone; uniform float ambient; varying float fade; void main(){ float radius=length(gl_PointCoord-.5)*2.; float alpha=(1.-smoothstep(.1,1.,radius))*fade*ambient; gl_FragColor=vec4(tone,alpha); }',
+      transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+    }));
     this.scene.add(this.galaxyDust);
-    this.galaxyCore = this.sprite('#e6cda4', 390, .13); this.galaxyCore.position.set(0, 0, -45); this.galaxyCore.scale.y = 245;
+    this.rebuildDust();
+    this.galaxyCore = this.sprite('#e6cda4', 165, .07); this.galaxyCore.position.set(0, 0, -45); this.galaxyCore.scale.y = 105;
+  }
+
+  /** 增长递减且封顶；同一文档的种子不受排序和筛选影响。 */
+  private rebuildDust() {
+    if(!this.galaxyDust)return;
+    const ids=this.data.nodes.filter(node=>node.kind==='document'&&node.documentType==='dd'&&node.status!=='archived').map(node=>node.id);
+    const live=new Set(ids),retired=[...this.dustWeights].filter(([id,weight])=>!live.has(id)&&weight>.005).map(([id])=>id);
+    const owners=[...ids,...retired],perDocument=owners.length?Math.max(1,Math.min(104,Math.floor(9000/owners.length))):0;
+    const positions:number[]=[],weights:number[]=[];this.dustOwners=[];
+    for(const id of owners){let seed=17;for(const char of id)seed=(seed*31+char.charCodeAt(0))%2147483647;const random=randomGenerator(seed||1),arm=Math.floor(random()*4),center=90+random()*550;
+      if(!this.dustWeights.has(id))this.dustWeights.set(id,0);
+      for(let i=0;i<perDocument&&weights.length<9000;i++){const radius=Math.max(45,Math.min(720,center+(random()-.5)*240)),angle=arm*Math.PI/2+radius*.0048+(random()-.5)*.35;positions.push(Math.cos(angle)*radius,Math.sin(angle)*radius*.66,Math.sin(angle)*radius*.23+(random()-.5)*34-50);weights.push(this.dustWeights.get(id)!);this.dustOwners.push(id);}
+    }
+    for(const [id] of this.dustWeights)if(!owners.includes(id))this.dustWeights.delete(id);
+    const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.setAttribute('weight',new THREE.Float32BufferAttribute(weights,1));this.galaxyDust.geometry.dispose();this.galaxyDust.geometry=geometry;
   }
 
   /** 布局是纯坐标计算。包含关系与跨系统关系均被保留，不把存在循环的图强制当成树。 */
   private layout(mode: GraphMode) {
     const result = new Map<string, THREE.Vector3>();
-    const maxRows = Math.max(1, ...this.data.groups.map(group => this.data.nodes.filter(node => node.group === group.id).length));
+    const coreId = this.coreId();
     this.data.groups.forEach((group, groupIndex) => {
       const members = this.data.nodes.filter(node => node.group === group.id);
       const angle = groupIndex / this.data.groups.length * Math.PI * 2 + Math.PI / 2;
       const center = new THREE.Vector3(Math.cos(angle) * 330, Math.sin(angle) * 245, mode === 'galaxy' ? Math.sin(groupIndex * 2.1) * 140 : 0);
       members.forEach((node, index) => {
         if (mode === 'layers') {
-          result.set(node.id, new THREE.Vector3((groupIndex - (this.data.groups.length - 1) / 2) * 250, (maxRows - 1) * 46 - index * 92, 0));
+          // 总纲统领分类，专项文档再位于分类之下；GDD 原文章节属于真实目录，不冒充分类。
+          const documents = members.filter(item => item.kind === 'document' && item.id !== coreId);
+          const rules = members.filter(item => item.kind === 'rule');
+          const columnX = (groupIndex - (this.data.groups.length - 1) / 2) * 270;
+          const level = node.id === coreId ? 0 : node.kind === 'system' ? 1 : node.kind === 'document' ? 2 + documents.indexOf(node) : 2 + documents.length + rules.indexOf(node);
+          result.set(node.id, new THREE.Vector3(node.id === coreId ? 0 : columnX, -level * 105, 0));
         } else if (index === 0) {
           result.set(node.id, center.clone());
         } else {
@@ -332,14 +412,20 @@ export class KnowledgeGraph {
       coreRules.forEach((node, index) => { const angle = index / coreRules.length * Math.PI * 2 + .5; const radius = 115 + Math.floor(index / 6) * 38; result.set(node.id, new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * .7, Math.sin(angle) * 32)); });
       if (core) result.set(core, new THREE.Vector3());
     }
-    if (mode === 'network') this.analysisLayout(result);
+    if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`network:${this.selected}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
     else {
-      const layoutKey = mode === 'galaxy' ? 'galaxy-v2' : mode;
+      const layoutKey = mode === 'galaxy' ? 'galaxy-v2' : mode === 'layers' ? 'layers-v2' : mode;
       const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
       this.data.nodes.forEach(node => {
-        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key);
-        if (mode === 'galaxy' && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
-        if (saved) result.set(node.id, saved.point.clone());
+        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key)??(mode==='galaxy'?[...this.layoutMemory].find(([k])=>k.startsWith(`${layoutKey}:${node.id}:`))?.[1]:undefined);
+        if ((mode === 'galaxy' || mode === 'layers') && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
+        if (saved) {
+          const point=saved.point.clone();
+          // 导入或恢复的旧坐标同样遵守层级边界，不能让缓存覆盖总纲最高层。
+          if(mode==='layers')point.y=Math.min(point.y,node.kind==='system'?-105:-210);
+          result.set(node.id,point);
+          if(!point.equals(saved.point))this.layoutMemory.set(key,{...saved,point});
+        }
         else {
           const point = result.get(node.id)!;
           // 新条目避开已有槽位；旧节点始终复用自己的坐标，不随数组下标漂移。
@@ -355,10 +441,10 @@ export class KnowledgeGraph {
   }
 
   /** 自定义阅读坐标属于编辑器视图；没有此缓存仍可从公开内容重建图谱。 */
-  exportLayout() { return [...this.layoutMemory].map(([key, value]) => ({ key, group: value.group, point: value.point.toArray() })); }
+  exportLayout() { return [...this.layoutMemory].map(([key, value]) => ({ key, group: value.group, point: value.point.toArray(), pinned:value.pinned===true })); }
   restoreLayout(value: unknown) {
     if (!Array.isArray(value) || value.length > 20000) return;
-    for (const row of value) if (row && typeof row.key === 'string' && typeof row.group === 'string' && Array.isArray(row.point) && row.point.length === 3 && row.point.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 1000000)) this.layoutMemory.set(row.key, { group: row.group, point: new THREE.Vector3(...row.point as [number,number,number]) });
+    for (const row of value) if (row && typeof row.key === 'string' && typeof row.group === 'string' && Array.isArray(row.point) && row.point.length === 3 && row.point.every((n: unknown) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 1000000)) this.layoutMemory.set(row.key, { group: row.group, point: new THREE.Vector3(...row.point as [number,number,number]),pinned:row.pinned===true });
     this.setMode(this.mode);
   }
 
@@ -366,18 +452,18 @@ export class KnowledgeGraph {
   private selectEdge(id: string) { const index = this.data.edges.findIndex(edge => edge.id === id); if (index >= 0) this.selectRelation(index); }
 
   private createStar(node: KnowledgeNode, position: THREE.Vector3): StarNode {
-    const color = this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+    const color = node.id === this.coreId() ? '#CFB378' : node.color ?? this.data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
     const point = this.sprite(color, this.starSize(node), 0);
     const halo = this.sprite(color, this.starSize(node, true), 0);
     point.position.copy(position); halo.position.copy(position);
     const label = document.createElement('button'); label.type = 'button'; label.className = `star-label ${node.kind}`;
-    label.textContent = node.title; label.style.setProperty('--node-color', color); label.setAttribute('aria-label', `查看${node.title}`);
+    label.textContent = node.title; label.style.setProperty('--node-color', categoryColor(color)); label.setAttribute('aria-label', `查看${node.title}`);label.dataset.graphNode=node.id;
     label.addEventListener('click', () => { if (!this.retiring.has(node.id)) this.select(node.id); }); this.labelLayer.append(label);
     return { data: node, point, halo, label };
   }
 
   private createConnection(edge: KnowledgeEdge): Connection {
-    const material = new THREE.LineBasicMaterial({ color: '#769cc1', transparent: true, opacity: 0, depthWrite: false });
+    const material = new (edge.type==='contains'?THREE.LineBasicMaterial:THREE.LineDashedMaterial)({ color: '#769cc1', transparent: true, opacity: 0, depthWrite: false, ...(edge.type==='contains'?{}:{dashSize:9,gapSize:7}) });
     const line = new THREE.Line(new THREE.BufferGeometry(), material); this.scene.add(line);
     const particle = this.sprite('#b8e5ff', 8, 0); particle.visible = false;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.classList.add('analysis-edge', edge.type);
@@ -388,11 +474,14 @@ export class KnowledgeGraph {
 
   /** 数据版本沿用当前场景与镜头；新增从归属节点展开，删除保留到收拢完成。 */
   updateData(data: KnowledgeData) {
+    this.interaction?.flush();
+    const previousCore=this.coreId();
     const before = new Map([...this.stars].map(([id, star]) => [id, star.data]));
     const from = new Map([...this.stars].map(([id, star]) => [id, star.point.position.clone()]));
     const appearance = new Map([...this.stars].map(([id, star]) => [id, { point: star.point.material.opacity, halo: star.halo.material.opacity }]));
     const oldConnections = new Map(this.connections.map(connection => [connection.data.id, connection]));
     this.data = data; this.primaryGdd = this.findCore(); this.transition = null; this.retiring.clear();
+    this.rebuildDust();
     if (this.selected && !data.nodes.some(node => node.id === this.selected)) this.selected = null;
     if (this.group && !data.groups.some(group => group.id === this.group)) this.group = null;
     this.analysis = this.selected ? buildAnalysis(this.selected, data.nodes, data.edges) : undefined;
@@ -404,10 +493,17 @@ export class KnowledgeGraph {
         star = this.createStar(node, origin); this.stars.set(node.id, star); from.set(node.id, origin.clone()); appearance.set(node.id, { point: 0, halo: 0 });
       }
       const changed = before.has(node.id) && JSON.stringify(before.get(node.id)) !== JSON.stringify(node);
-      star.data = node; star.label.inert = false; star.label.textContent = node.title; star.label.classList.toggle('version-changed', changed);
-      const color = data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
+      star.data = node; star.label.inert = false;
+      // 结构编辑时沿用完整卡片，不能清空子元素后仍保留 analysis-card 状态。
+      if(star.label.classList.contains('analysis-card')&&star.label.querySelector('strong')){
+        star.label.querySelector('strong')!.textContent=node.title;
+        star.label.querySelector('.analysis-card-summary')!.textContent=node.summary;
+        star.label.querySelector('.analysis-card-meta')!.textContent=`${data.groups.find(group=>group.id===node.group)?.label??'未归组'} · ${{confirmed:'已确认',draft:'草稿',question:'待确认',archived:'已归档'}[node.status]}`;
+      }else star.label.textContent = node.title;
+      star.label.classList.toggle('version-changed', changed);
+      const color = node.id === this.coreId() ? '#CFB378' : node.color ?? data.groups.find(group => group.id === node.group)?.color ?? '#94A5BC';
       star.point.userData.baseColor = star.halo.userData.baseColor = color;
-      star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', color);
+      star.point.material.color.copy(this.graphColor(color)); star.halo.material.color.copy(this.graphColor(color)); star.label.style.setProperty('--node-color', categoryColor(color));
     }
     const ids = new Set(data.nodes.map(node => node.id));
     for (const [id, star] of this.stars) if (!ids.has(id)) { this.retiring.add(id); to.set(id, to.get(star.data.group)?.clone() ?? from.get(id)!.clone()); star.label.inert = true; }
@@ -421,6 +517,9 @@ export class KnowledgeGraph {
     this.prepareAnalysis(true); this.refreshVisibility(false);
     this.versionChanging = true;
     this.transition = { start: performance.now(), duration: this.reduceMotion.matches ? 0 : this.mode === 'network' ? 360 : 850, from, to, cameraFrom: this.camera.position.clone(), cameraTo: this.camera.position.clone(), targetFrom: this.controls.target.clone(), targetTo: this.controls.target.clone(), cameraInterrupted: true, restoreOverview: false, analysisMorph: this.mode === 'network', appearance, lines, scaleFrom: this.currentScale, ambientFrom: this.ambient, refocus: false, cards: new Map(this.cardAppearance), cardEdges: [...this.cardEdgeOpacity] };
+    // 第一份总纲出现时将新中心纳入视野；普通版本迭代继续保留用户镜头。
+    if(previousCore!==this.coreId()&&this.mode==='galaxy') {const framing=this.framing(to);this.transition.cameraTo=framing.position;this.transition.targetTo=framing.target;this.transition.cameraInterrupted=false;}
+    this.controls.enableDamping=this.transition.cameraInterrupted;
     this.measureLabels(); this.advanceTransition(this.transition.start);
   }
 
@@ -517,7 +616,7 @@ export class KnowledgeGraph {
       }
       const entry = this.analysis?.entries.find(item => item.node.id === star.data.id);
       // 共同卡片沿用同一个内容元素，退出卡片也保留原说明直至收拢结束。
-      if (wasCard) {
+      if (wasCard && star.label.querySelector('.analysis-card-role')) {
         if (entry || star.data.id === this.selected) star.label.querySelector('.analysis-card-role')!.textContent = star.data.id === this.selected ? '当前焦点' : laneLabels[entry!.lane];
         return;
       }
@@ -546,6 +645,20 @@ export class KnowledgeGraph {
   private framing(positions: Map<string, THREE.Vector3>) {
     // 分析坐标按可读像素设计，默认一场景单位对应一个屏幕像素，超出视口的内容可滚动。
     if (this.mode === 'network') return { target: new THREE.Vector3(), position: new THREE.Vector3(0, 0, this.container.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)))) };
+    if (this.mode === 'layers') {
+      // 分层目录可向下很长：默认只取总纲、分类和首层内容取景，深层通过平移阅读。
+      const visible=[...positions].filter(([id])=>(this.desiredAppearance.get(id)?.point??Number(this.stars.get(id)?.point.visible))>0);
+      const upper=visible.filter(([id,point])=>id===this.coreId()||this.stars.get(id)?.data.kind==='system'||point.y>=-315);
+      const points=(upper.length?upper:visible.length?visible:[...positions]).map(([,point])=>point);
+      if(!points.length)return {target:new THREE.Vector3(),position:new THREE.Vector3(0,0,650)};
+      const frame=new THREE.Box3().setFromPoints(points);
+      const size=frame.getSize(new THREE.Vector3()),aspect=Math.max(this.container.clientWidth/Math.max(this.container.clientHeight,1),.45);
+      const tangent=Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2));
+      // 1300×720 窗口内的实际画布约 1300×510，五列系统约占画布宽度的 75%。
+      const distance=Math.min(1200,Math.max(620,(size.x+160)/(2*tangent*aspect*.86)));
+      const target=new THREE.Vector3(frame.getCenter(new THREE.Vector3()).x,frame.max.y-160,0);
+      return {target,position:target.clone().add(new THREE.Vector3(0,0,distance))};
+    }
     // 只对当前可见对象取景；没有结果时使用完整布局，空状态由界面负责显示。
     const visible = [...positions].filter(([id]) => (this.desiredAppearance.get(id)?.point ?? Number(this.stars.get(id)?.point.visible)) > 0).map(([, point]) => point);
     const box = new THREE.Box3().setFromPoints(visible.length ? visible : [...positions.values()]);
@@ -600,6 +713,7 @@ export class KnowledgeGraph {
   /** 动画从当前屏幕位置出发；返回时使用保存的用户视角，不重新缩放到全图。 */
   setMode(mode: GraphMode, options: { restoreOverview?: boolean } = {}) {
     if (this.disposed) return;
+    this.interaction?.flush();
     if (this.versionChanging) this.clearRetired();
     const frame = this.navigationFrame ?? this.captureFrame() ?? this.lastValidFrame;
     this.mode = mode;
@@ -674,6 +788,8 @@ export class KnowledgeGraph {
       ambientFrom: frame?.ambient ?? this.ambient,
       refocus, cards: frame?.cards ?? new Map(), cardEdges: frame?.cardEdges ?? []
     };
+    // 程序控制镜头时暂停 OrbitControls 的残余惯性；用户接管后再恢复。
+    this.controls.enableDamping = false;
     this.container.classList.add('graph-transitioning');
     this.container.dataset.transition = refocus ? 'refocus-analysis' : mode === 'network' ? 'enter-analysis' : frame?.mode === 'network' ? 'leave-analysis' : 'layout';
     // 分析卡片采用固定像素布局，镜头抵达前暂不接收平移，避免停在错误阅读比例。
@@ -726,9 +842,12 @@ export class KnowledgeGraph {
       if (visible) count++;
     });
     const currentEdges = new Set(this.data.edges.map(edge => edge.id));
+    const classifiedRules = new Set(this.data.edges.filter(edge => edge.origin?.kind === 'classification' && this.data.nodes.some(node => node.id === edge.target && node.kind === 'rule')).map(edge => edge.target));
     this.connections.forEach((connection, index) => {
       const { source, target } = connection.data;
-      const overviewVisible = currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
+      // 分层视图按分类展示已归类规则；GDD→章节的真实目录边仍保留在数据及关系分析中。
+      const supersededSection = this.mode === 'layers' && connection.data.origin?.kind === 'section' && classifiedRules.has(target);
+      const overviewVisible = !supersededSection && currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
       connection.path.classList.toggle('selected', index === this.relationIndex);
       connection.label.setAttribute('aria-pressed', String(index === this.relationIndex));
       const focused = source === this.selected || target === this.selected;
@@ -848,8 +967,9 @@ export class KnowledgeGraph {
     });
     this.selectionRing.scale.setScalar(58 * this.currentScale);
     if (!change.cameraInterrupted) {
-      this.camera.position.lerpVectors(change.cameraFrom, change.cameraTo, eased);
-      this.controls.target.lerpVectors(change.targetFrom, change.targetTo, eased);
+      interpolateCamera(this.camera.position, this.controls.target, change.cameraFrom, change.targetFrom, change.cameraTo, change.targetTo, eased);
+      // 立即同步朝向，连续快切时抓取的屏幕帧与本帧镜头保持一致。
+      this.camera.lookAt(this.controls.target);
     }
     this.ambient = THREE.MathUtils.lerp(change.ambientFrom, this.mode === 'galaxy' ? 1 : .24, eased);
     this.applyAppearance(ratio);
@@ -859,6 +979,7 @@ export class KnowledgeGraph {
     this.labelsDirty = true;
     if (ratio === 1) {
       this.transition = null;
+      this.controls.enableDamping = true;
       if (this.versionChanging) this.clearRetired();
       this.controls.enabled = true;
       this.controls.maxDistance = this.mode === 'network' ? 10000 : 3400;
@@ -879,6 +1000,8 @@ export class KnowledgeGraph {
       connection.curve.v2.copy(to);
       connection.curve.v1.copy(from).lerp(to, .5);
       connection.curve.v1.z += this.mode === 'galaxy' ? Math.min(from.distanceTo(to) * .15, 70) : 0;
+      // 同一端点对可以同时有手工关联与正文引用，二维分开走线，避免来源不可点选。
+      if(this.mode!=='galaxy'){const siblings=this.connections.filter(c=>(c.data.source===connection.data.source&&c.data.target===connection.data.target)||(c.data.source===connection.data.target&&c.data.target===connection.data.source));if(siblings.length>1){const slot=siblings.indexOf(connection)-(siblings.length-1)/2,normal=new THREE.Vector3(-(to.y-from.y),to.x-from.x,0).normalize();connection.curve.v1.addScaledVector(normal,slot*48);}}
       const points = connection.curve.getPoints(28);
       const existing = connection.line.geometry.getAttribute('position');
       if (existing) {
@@ -886,6 +1009,7 @@ export class KnowledgeGraph {
         existing.needsUpdate = true;
         connection.line.geometry.computeBoundingSphere();
       } else connection.line.geometry.setFromPoints(points);
+      if(connection.material instanceof THREE.LineDashedMaterial)connection.line.computeLineDistances();
     });
     if (this.selected) this.selectionRing.position.copy(this.stars.get(this.selected)!.point.position);
   }
@@ -899,7 +1023,9 @@ export class KnowledgeGraph {
     if ([...this.stars.values()].some(star => star.label.classList.contains('analysis-card'))) this.updateAnalysisLabels(width, height, true);
     const related = this.neighbors();
     const bounds: { x: number; y: number; width: number; height: number }[] = [];
-    const score = (star: StarNode) => this.mode === 'galaxy' && star.data.id === this.coreId() ? -1 : star.data.id === this.selected ? 0 : related.has(star.data.id) ? 1 : star.data.kind === 'system' ? 2 : 3;
+    const score = (star: StarNode) => this.mode === 'layers'
+      ? star.data.id === this.coreId() ? -1 : star.data.kind === 'system' ? 0 : star.data.id === this.selected ? 1 : related.has(star.data.id) ? 2 : 3
+      : this.mode === 'galaxy' && star.data.id === this.coreId() ? -1 : star.data.id === this.selected ? 0 : related.has(star.data.id) ? 1 : star.data.kind === 'system' ? 2 : 3;
     [...this.stars.values()].sort((a, b) => score(a) - score(b)).forEach(star => {
       if (star.label.classList.contains('analysis-card')) return;
       const point = star.point.position.clone().project(this.camera);
@@ -913,9 +1039,13 @@ export class KnowledgeGraph {
       const centerY = (1 - point.y) * height / 2;
       // 总纲与其他节点共用文字避让位置，保留优先级，不再固定挂一张居中的大标签。
       const candidates = this.mode === 'layers'
-        ? [{ x: centerX - labelWidth / 2, y: centerY + 9 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 10 }]
+        ? [{ x: centerX - labelWidth / 2, y: centerY + 9 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 10 }, { x: centerX + 12, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth - 12, y: centerY - labelHeight / 2 }]
         : [{ x: centerX + 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth - 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth / 2, y: centerY + 12 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 12 }];
-      const choice = candidates.find(candidate => candidate.x >= 8 && candidate.y >= 8 && candidate.x + labelWidth < width - 8 && candidate.y + labelHeight < height - 8 && !bounds.some(bound => candidate.x < bound.x + bound.width + 5 && candidate.x + labelWidth + 5 > bound.x && candidate.y < bound.y + bound.height + 4 && candidate.y + labelHeight + 4 > bound.y));
+      let choice = candidates.find(candidate => candidate.x >= 8 && candidate.y >= 8 && candidate.x + labelWidth < width - 8 && candidate.y + labelHeight < height - 8 && !bounds.some(bound => candidate.x < bound.x + bound.width + 5 && candidate.x + labelWidth + 5 > bound.x && candidate.y < bound.y + bound.height + 4 && candidate.y + labelHeight + 4 > bound.y));
+      if(!choice&&this.mode==='layers'&&(star.data.id===this.coreId()||star.data.kind==='system')&&centerX>=0&&centerX<=width&&centerY>=0&&centerY<=height){
+        // 标题位于画面内时，核心和分类即使遇到拥挤也保留可点击文字。
+        choice={x:THREE.MathUtils.clamp(centerX-labelWidth/2,8,Math.max(8,width-labelWidth-8)),y:THREE.MathUtils.clamp(centerY+9,8,Math.max(8,height-labelHeight-8))};
+      }
       if (!choice) { star.label.hidden = true; return; }
       star.label.style.transform = `translate(${choice.x}px, ${choice.y}px)`;
       bounds.push({ ...choice, width: labelWidth, height: labelHeight });
@@ -982,6 +1112,9 @@ export class KnowledgeGraph {
         c1x = horizontal ? (sx + tx) / 2 : sx; c2x = horizontal ? (sx + tx) / 2 : tx;
         c1y = horizontal ? sy : (sy + ty) / 2; c2y = horizontal ? ty : (sy + ty) / 2;
       }
+      const siblings=this.connections.filter(c=>(c.data.source===connection.data.source&&c.data.target===connection.data.target)||(c.data.source===connection.data.target&&c.data.target===connection.data.source));
+      const laneOffset=(siblings.indexOf(connection)-(siblings.length-1)/2)*54;
+      if(siblings.length>1){if(Math.abs(tx-sx)>Math.abs(ty-sy)){c1y+=laneOffset;c2y+=laneOffset;}else{c1x+=laneOffset;c2x+=laneOffset;}}
       const d = `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${tx} ${ty}`;
       connection.path.setAttribute('d', d); connection.hit.setAttribute('d', d);
       connection.path.setAttribute('marker-end', connection.data.type === 'relates' ? '' : 'url(#analysis-arrow)');
@@ -992,7 +1125,7 @@ export class KnowledgeGraph {
       const y = u ** 3 * sy + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t ** 3 * ty;
       connection.label.hidden = false;
       connection.label.style.left = `${x}px`;
-      connection.label.style.top = `${y}px`;
+      connection.label.style.top = `${y+laneOffset*.5}px`;
     });
   }
 
@@ -1007,21 +1140,31 @@ export class KnowledgeGraph {
   private animate = () => {
     if (this.disposed) return;
     this.frame = requestAnimationFrame(this.animate);
-    if (!this.active || document.hidden) return;
+    if (!this.active || document.hidden) {this.lastMotionFrame=0;return;}
     const now = performance.now();
+    const delta=this.lastMotionFrame?Math.min((now-this.lastMotionFrame)/1000,.05):0;this.lastMotionFrame=now;
+    if(!this.motionPaused&&!this.reduceMotion.matches)this.motionTime+=delta;
     this.advanceTransition(now);
+    if(this.labelsDirty)this.updateConnections();
     this.controls.update();
     this.backgrounds.forEach((field, index) => {
       (field.material as THREE.PointsMaterial).opacity = this.ambient * (this.light ? index ? .25 : .13 : index ? .85 : .6);
     });
     this.clouds.forEach(cloud => { cloud.material.opacity = this.ambient * (this.light ? .025 : .055); });
-    const galaxyOpacity = Math.max(0, (this.ambient - .24) / .76) * Number(Boolean(this.coreId()));
-    if (this.galaxyDust) { const material = this.galaxyDust.material as THREE.PointsMaterial; material.opacity = galaxyOpacity * (this.light ? .21 : .4); material.color.set(this.light ? '#61768d' : '#a4b3d5'); material.blending = this.light ? THREE.NormalBlending : THREE.AdditiveBlending; }
-    if (this.galaxyCore) this.galaxyCore.material.opacity = galaxyOpacity * (this.light ? .035 : .14);
+    const galaxyOpacity = Math.max(0, (this.ambient - .24) / .76);
+    if (this.galaxyDust) {
+      const material=this.galaxyDust.material as THREE.ShaderMaterial;material.uniforms.ambient.value=galaxyOpacity*(this.light?.22:.4);material.uniforms.phase.value=this.motionTime;material.uniforms.tone.value.set(this.light?'#61768d':'#a4b3d5');material.blending=this.light?THREE.NormalBlending:THREE.AdditiveBlending;
+      const live=new Set(this.data.nodes.filter(node=>node.kind==='document'&&node.documentType==='dd'&&node.status!=='archived').map(node=>node.id));
+      for(const [id,value] of this.dustWeights){const desired=live.has(id)?(this.desiredAppearance.get(id)?.point??1)>0?1:.14:0;this.dustWeights.set(id,this.reduceMotion.matches||this.motionPaused?desired:THREE.MathUtils.lerp(value,desired,1-Math.exp(-delta*5)));}
+      const weights=this.galaxyDust.geometry.getAttribute('weight');if(weights){this.dustOwners.forEach((id,i)=>weights.setX(i,this.dustWeights.get(id)??0));weights.needsUpdate=true;}
+    }
+    const breath=1+Math.sin(this.motionTime*Math.PI/4)*.045;
+    if (this.galaxyCore) {this.galaxyCore.material.opacity=galaxyOpacity*Number(Boolean(this.coreId()))*(this.light?.025:.065)*breath;this.galaxyCore.scale.set(165*breath,105*breath,1);}
+    const core=this.coreId()?this.stars.get(this.coreId()!):undefined;if(core&&this.mode==='galaxy')core.halo.scale.setScalar(this.starSize(core.data,true)*this.currentScale*breath);
     this.connections.forEach((connection, index) => {
       if (connection.particle.visible) connection.particle.position.copy(connection.curve.getPoint(this.motionPaused || this.reduceMotion.matches ? .52 : (now * .00012 + index * .2) % 1));
     });
-    if (this.labelsDirty) { this.updateLabels(); this.captureFrame(); }
+    if (this.labelsDirty) { this.updateLabels(); this.captureFrame(); this.interaction?.update(); }
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -1029,6 +1172,16 @@ export class KnowledgeGraph {
     if (!event.isPrimary || event.button !== 0) { if (this.pointerStart) this.pointerStart.moved = true; return; }
     this.pointerStart = { x: event.clientX, y: event.clientY, id: event.pointerId, moved: false };
   };
+  /** 右键拖动仍交给镜头，只有未移动的点击才打开上下文菜单。 */
+  private contextDown = (event: PointerEvent) => {if(event.button===2)this.contextStart={x:event.clientX,y:event.clientY,moved:false};};
+  private contextMove = (event: PointerEvent) => {if(this.contextStart&&Math.hypot(event.clientX-this.contextStart.x,event.clientY-this.contextStart.y)>5)this.contextStart.moved=true;};
+  private contextMenu = (event: MouseEvent) => {
+    event.preventDefault();const start=this.contextStart;this.contextStart=undefined;if(start?.moved)return;
+    let id=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]')?.dataset.graphNode;
+    if(!id){const box=this.container.getBoundingClientRect();this.raycaster.setFromCamera(new THREE.Vector2((event.clientX-box.left)/box.width*2-1,-(event.clientY-box.top)/box.height*2+1),this.camera);const targets=[...this.stars.values()].filter(star=>star.point.visible&&(this.desiredAppearance.get(star.data.id)?.point??0)>0);const hit=this.raycaster.intersectObjects(targets.map(star=>star.point))[0];id=targets.find(star=>star.point===hit?.object)?.data.id;}
+    window.dispatchEvent(new CustomEvent('cewen:graph-context',{detail:{id,x:event.clientX,y:event.clientY}}));
+  };
+  setContextMenuOpen(open: boolean) {this.controls.enabled=!open&&(this.mode!=='network'||this.reduceMotion.matches);}
   private pointerMove = (event: PointerEvent) => { if (this.pointerStart && Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 5) this.pointerStart.moved = true; };
   private pointerCancel = () => { this.pointerStart = null; };
   private pointerUp = (event: PointerEvent) => {
@@ -1040,7 +1193,7 @@ export class KnowledgeGraph {
     const targets = [...this.stars.values()].filter(star => star.point.visible && this.desiredAppearance.get(star.data.id)?.point);
     const hit = this.raycaster.intersectObjects(targets.map(star => star.point))[0];
     if (hit) this.select(targets.find(star => star.point === hit.object)!.data.id);
-    else if (this.mode !== 'network') this.clearSelection();
+    else if (this.mode !== 'network') {this.raycaster.params.Line.threshold=6;const wires=this.connections.filter(c=>c.line.visible&&c.material.opacity>.05),edgeHit=this.raycaster.intersectObjects(wires.map(c=>c.line))[0];const edge=wires.find(c=>c.line===edgeHit?.object);if(edge)this.selectEdge(edge.data.id);else this.clearSelection();}
   };
   private visibilityChanged = () => { if (!document.hidden) this.controls.update(); };
 
@@ -1065,9 +1218,7 @@ export class KnowledgeGraph {
       this.transition.targetTo.copy(framing.target);
     }
     else if (!this.transition && (width !== this.previousSize.width || height !== this.previousSize.height)) {
-      const framing = this.framing(this.layout(this.mode));
-      this.camera.position.copy(framing.position);
-      this.controls.target.copy(framing.target);
+      // 侧栏开合只改变画布比例，保留用户正在使用的观察方向与缩放。
       this.controls.update();
     }
     this.previousSize = { width, height: this.container.clientHeight };
@@ -1085,6 +1236,12 @@ export class KnowledgeGraph {
     this.data = data;
     data.nodes.forEach(node => {
       const star = this.stars.get(node.id)!; star.data = node;
+      const color=node.id===this.coreId()?'#CFB378':node.color??data.groups.find(group=>group.id===node.group)?.color??'#94A5BC';
+      if(star.point.userData.baseColor!==color){
+        star.point.userData.baseColor=star.halo.userData.baseColor=color;
+        star.point.material.color.copy(this.graphColor(color));star.halo.material.color.copy(this.graphColor(color));
+        star.label.style.setProperty('--node-color',categoryColor(color,this.light));
+      }
       star.label.setAttribute('aria-label', `查看${node.title}`);
       if (star.label.classList.contains('analysis-card')) {
         star.label.querySelector('strong')!.textContent = node.title;
@@ -1126,10 +1283,12 @@ export class KnowledgeGraph {
     this.controls.dispose();
     document.removeEventListener('visibilitychange', this.visibilityChanged);
     window.removeEventListener('cewen-theme-change', this.themeChanged);
+    this.interaction?.dispose();
     this.renderer.domElement.removeEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.removeEventListener('pointerup', this.pointerUp);
     this.renderer.domElement.removeEventListener('pointermove', this.pointerMove);
     this.renderer.domElement.removeEventListener('pointercancel', this.pointerCancel);
+    this.container.removeEventListener('contextmenu',this.contextMenu);this.container.removeEventListener('pointerdown',this.contextDown);this.container.removeEventListener('pointermove',this.contextMove);
     this.scene.traverse(object => {
       const renderable = object as THREE.Mesh;
       renderable.geometry?.dispose();

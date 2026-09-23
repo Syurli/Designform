@@ -1,4 +1,5 @@
 import type { CommitRequest, ProjectSnapshot, RevisionManifest } from '../shared/model.ts';
+import { openCollaboration } from './prompt-panel';
 import { compareSnapshots, lineDiff } from '../shared/compare.ts';
 import { projectAction, commitProject, projectHistory, readProject, readRevision, restorePlan, saveBaseline, recoverProject } from './project-client';
 
@@ -57,7 +58,7 @@ export class HistoryPanel {
   private render() {
     const snapshot = this.current(); if (!snapshot) return;
     const selected = snapshot.historical ? snapshot.revision : 'current';
-    this.element.innerHTML = `<div class="version-controls"><span class="version-status">${snapshot.historical ? `${escape(snapshot.revisionLabel ?? '')} · 历史只读` : '当前工作稿'}</span><button data-history="previous" aria-label="上一版本">‹</button><label class="sr-only" for="version-select">查看策划版本</label><select id="version-select"><option value="current">当前工作稿</option>${this.entries.map(entry => `<option value="${entry.id}" ${selected === entry.id ? 'selected' : ''}>${entry.label} · ${escape(entry.reason)}</option>`).join('')}</select><button data-history="next" aria-label="下一版本">›</button><button data-history="play">${this.playing ? '暂停' : '播放演进'}</button><button data-history="compare">比较版本</button><button data-history="baseline">命名基线</button>${snapshot.historical ? '<button data-history="restore">恢复此版…</button><button data-history="undo">撤销此批次…</button><button data-history="latest">回到最新</button>' : '<button data-history="refresh">刷新历史</button>'}${snapshot.recoveryRequired ? '<button data-history="recovery">处理未完成提交</button>' : ''}<button data-history="close" aria-label="收起版本条">×</button></div><p class="version-message">${snapshot.historical ? '所见图谱、文档与附件来自同一历史快照。' : '每次正式保存留存完整文档，草稿单独保留。'}</p>`;
+    this.element.innerHTML = `<div class="version-controls"><button data-history="handoff">交接开场白</button><span class="version-status">${snapshot.historical ? `${escape(snapshot.revisionLabel ?? '')} · 历史只读` : '当前工作稿'}</span><button data-history="previous" aria-label="上一版本">‹</button><label class="sr-only" for="version-select">查看策划版本</label><select id="version-select"><option value="current">当前工作稿</option>${this.entries.map(entry => `<option value="${entry.id}" ${selected === entry.id ? 'selected' : ''}>${entry.label} · ${escape(entry.reason)}</option>`).join('')}</select><button data-history="next" aria-label="下一版本">›</button><button data-history="play">${this.playing ? '暂停' : '播放演进'}</button><button data-history="compare">比较版本</button><button data-history="baseline">命名基线</button>${snapshot.historical ? '<button data-history="restore">恢复此版…</button><button data-history="undo">撤销此批次…</button><button data-history="latest">回到最新</button>' : '<button data-history="refresh">刷新历史</button>'}${snapshot.recoveryRequired ? '<button data-history="recovery">处理未完成提交</button>' : ''}<button data-history="close" aria-label="收起版本条">×</button></div><p class="version-message">${snapshot.historical ? '所见图谱、文档与附件来自同一历史快照。' : '每次正式保存留存完整文档，草稿单独保留。'}</p>`;
   }
   private async select(revision: string) {
     const sequence = ++this.sequence, id = this.projectId, previous = this.current();
@@ -95,6 +96,7 @@ export class HistoryPanel {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-history]'); if (!button) return;
     const action = button.dataset.history, snapshot = this.current(); if (!snapshot) return;
     switch (action) {
+      case 'handoff': this.stop();await openCollaboration('handoff',this.current());break;
       case 'close': this.stop(); this.element.hidden = true; if (snapshot.historical) await this.select('current'); break;
       case 'dialog-close': this.dialog.close(); break;
       case 'latest': this.stop(); await this.select('current'); break;

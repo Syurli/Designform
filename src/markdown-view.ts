@@ -3,6 +3,7 @@ import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes } from 'mdast';
 import { readHeader } from '../shared/markdown.ts';
+import { parseSizedImage } from '../shared/image-markup';
 
 /** 渲染采用白名单 AST，不执行用户 HTML，链接和图片必须经过受控地址转换。 */
 export const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
@@ -44,7 +45,7 @@ export function markdownView(text: string, resolve: (url: string, image: boolean
       case 'emphasis': return `<em>${children}</em>`;
       case 'delete': return `<del>${children}</del>`;
       case 'inlineCode': return `<code>${escapeHtml(node.value)}</code>`;
-      case 'code': return `<pre><code>${escapeHtml(node.value)}</code></pre>`;
+      case 'code': return ['cewen-dialogue','cewen-palette'].includes(node.lang??'') ? `<div data-design-language="${escapeHtml(node.lang!)}" data-design-source="${escapeHtml(node.value)}"></div>` : `<pre><code>${escapeHtml(node.value)}</code></pre>`;
       case 'blockquote': return `<blockquote>${children}</blockquote>`;
       case 'list': return node.ordered ? `<ol start="${node.start ?? 1}">${children}</ol>` : `<ul>${children}</ul>`;
       case 'listItem': return `<li>${node.checked === null || node.checked === undefined ? '' : `<input type="checkbox" disabled ${node.checked ? 'checked' : ''}/>`}${children}</li>`;
@@ -60,7 +61,12 @@ export function markdownView(text: string, resolve: (url: string, image: boolean
       }
       case 'break': return '<br/>';
       case 'thematicBreak': return '<hr/>';
-      case 'html': { const match = /^<a\s+id=["']([A-Za-z0-9_-]+)["']\s*>(?:\s*<\/a>)?(?:\r?\n(#{1,6}) ([^\r\n]+))?\s*$/i.exec(node.value); return match ? `<a id="${match[1]}"></a>${match[2] ? `<h${match[2].length}>${escapeHtml(match[3])}</h${match[2].length}>` : ''}` : ''; }
+      case 'html': {
+        // 图片仅接受受限属性，地址与普通 Markdown 图片共用本地附件校验。
+        const image = parseSizedImage(node.value);
+        if (image) { const src=resolve(image.src,true);return src?`<img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt)}" title="${escapeHtml(image.title)}" width="${image.width}" style="max-width:100%;height:auto" loading="lazy"/>`:`<span class="quiet">[图片：${escapeHtml(image.alt || image.src)}]</span>`; }
+        const match = /^<a\s+id=["']([A-Za-z0-9_-]+)["']\s*>(?:\s*<\/a>)?(?:\r?\n(#{1,6}) ([^\r\n]+))?\s*$/i.exec(node.value); return match ? `<a id="${match[1]}"></a>${match[2] ? `<h${match[2].length}>${escapeHtml(match[3])}</h${match[2].length}>` : ''}` : '';
+      }
       default: return children;
     }
   };

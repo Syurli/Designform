@@ -4,6 +4,7 @@ import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes } from 'mdast';
 import { readHeader } from './markdown.ts';
 import type { Diagnostic } from './model.ts';
+import { parseSizedImage, sizedImageMarkup } from './image-markup.ts';
 
 /** 项目相对路径计算在浏览器和服务共用，不允许越过项目根。 */
 export function linkTarget(file: string, url: string) {
@@ -23,6 +24,11 @@ export function relativeLink(from: string, to: string) {
 export function rewriteLinks(text: string, source: string, destination: string, mapping: Map<string, string>) {
   const { body, bodyOffset } = readHeader(text), changes: { start: number; end: number; value: string }[] = [];
   function visit(node: Nodes) {
+    // 缩放图片的标准 HTML 与普通 Markdown 图片一起迁移，不能在移动文档后遗留旧路径。
+    if(node.type==='html'&&node.position){
+      const image=parseSizedImage(node.value),target=image&&linkTarget(source,image.src),mapped=target&&mapping.get(target.path);
+      if(image&&target&&mapped)changes.push({start:bodyOffset+node.position.start.offset!,end:bodyOffset+node.position.end.offset!,value:sizedImageMarkup({...image,src:relativeLink(destination,mapped)+(target.fragment?`#${target.fragment}`:'')})});
+    }
     if ((node.type === 'link' || node.type === 'image' || node.type === 'definition') && node.position) {
       const target = linkTarget(source, node.url), mapped = target && mapping.get(target.path);
       if (target && mapped) {
@@ -45,6 +51,10 @@ export function diagnoseLinks(files: Map<string, string | null>): Diagnostic[] {
     if (text === null || !file.endsWith('.md')) continue;
     const { body } = readHeader(text);
     function visit(node: Nodes) {
+      if(node.type==='html'){
+        const image=parseSizedImage(node.value),target=image&&linkTarget(file,image.src);
+        if(image&&target&&!files.has(target.path))diagnostics.push({path:file,severity:'warning',code:'BROKEN_MARKDOWN_LINK',message:`相对图片目标不存在：${image.src}`,line:node.position?.start.line});
+      }
       if (node.type === 'link' || node.type === 'image' || node.type === 'definition') {
         const target = linkTarget(file, node.url);
         if (target && !files.has(target.path)) diagnostics.push({ path: file, severity: 'warning', code: 'BROKEN_MARKDOWN_LINK', message: `相对链接目标不存在：${node.url}`, line: node.position?.start.line });

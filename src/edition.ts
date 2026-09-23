@@ -5,19 +5,22 @@ export const releaseUrl = 'https://github.com/Syurli/Designform/releases/latest'
 
 /** 文件夹选择按钮保持在真实用户点击中，避免浏览器拦截延迟弹出的授权框。 */
 export function prepareDirectoryFields(container: HTMLElement) {
-  if (!isWebEdition) return;
   const fields = container.querySelectorAll<HTMLInputElement>('input[name="directory"], form[data-form="open"] input[name="path"]');
   for (const input of fields) {
-    input.value = ''; input.readOnly = true; input.required = false; input.placeholder = '尚未选择文件夹';
-    const details = input.closest('details'); if (details) details.open = true;
+    // 有默认父目录的本机操作复用上次实际选择；取消不改记忆。
+    if(!isWebEdition && input.value) {try { input.value=localStorage.getItem('cewen-last-directory')||input.value; }catch { /* 存储受限仍保留服务默认目录。 */ }}
+    if (isWebEdition) input.value = ''; input.readOnly = true; input.required = true; input.placeholder = '尚未选择文件夹';
+    const details = input.closest('details'); if (details?.querySelector('summary')?.textContent === '项目保存位置') details.open = true;
     const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary-button'; button.textContent = '选择本机文件夹'; input.after(button);
     // 模块在启动阶段预载，点击时不能先等待 import 才调用选择器。
     button.addEventListener('click', () => {
-      if (!folderPicker) { input.placeholder = '文件服务正在准备，请稍后再点一次'; return; }
+      if (isWebEdition && !folderPicker) { input.placeholder = '文件服务正在准备，请稍后再点一次'; return; }
       button.disabled = true;
-      void folderPicker().then(value => { input.value = value; input.title = value; input.dispatchEvent(new Event('input',{bubbles:true})); }).catch(error => { input.placeholder = error instanceof DOMException && error.name === 'AbortError' ? '已取消选择，原文件未修改' : String(error.message ?? error); }).finally(() => { button.disabled = false; });
+      const selection = isWebEdition ? folderPicker!() : import('./project-client').then(client => client.request<{path: string | null}>('/api/choose-directory', { initial: input.value })).then(result => result.path);
+      void selection.then(value => { if (value) { input.value = value; input.title = value; if(!isWebEdition)try {localStorage.setItem('cewen-last-directory',value);}catch {/* 选择结果仍可用于本次操作。 */} input.dispatchEvent(new Event('input',{bubbles:true})); } }).catch(error => { const box = container.querySelector<HTMLElement>('[role="status"]'); if (box && !(error instanceof DOMException && error.name === 'AbortError')) { box.hidden = false; box.textContent = String(error.message ?? error); } }).finally(() => { button.disabled = false; });
     });
   }
+  if (!isWebEdition) return;
   for (const button of container.querySelectorAll<HTMLButtonElement>('[data-project-path]')) {
     button.addEventListener('click', event => {
       if (!folderPermission || button.dataset.authorized === 'yes') { delete button.dataset.authorized; return; }

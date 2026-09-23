@@ -1,4 +1,12 @@
 import { createHash, randomUUID, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, path, Buffer, runtimeKind, runtimePid, ownerAlive, runtimeLock } from './platform.ts';
+import { companionKind } from '../shared/document-companion.ts';
+
+/** 两个公开伴随目录是受控命名空间；外部编辑也不能塞入任意 JSON 或嵌套路径。 */
+export function assertPublicFilePath(relative: string) {
+  validateRelative(relative);
+  if (relative === 'docs/layouts' || relative.startsWith('docs/layouts/') && companionKind(relative) !== 'layout') throw new ProjectError('INVALID_COMPANION_PATH', '排版目录仅允许 docs/layouts/<安全文档ID>.json。', { path: relative });
+  if (relative === 'docs/annotations' || relative.startsWith('docs/annotations/') && companionKind(relative) !== 'ink' && !/^docs\/annotations\/[A-Za-z0-9][A-Za-z0-9_-]{0,119}\.md$/.test(relative)) throw new ProjectError('INVALID_COMPANION_PATH', '注释目录仅允许安全文档 ID 的 Markdown 与 .ink.json。', { path: relative });
+}
 
 /** 本地文件错误携带稳定代码，界面能保留用户稿并给出中文处理建议。 */
 export class ProjectError extends Error {
@@ -80,7 +88,7 @@ export async function readCurrentFiles(root: string): Promise<Map<string, Buffer
       const child = `${relative}/${entry.name}`;
       if (entry.isSymbolicLink()) throw new ProjectError('LINK_NOT_ALLOWED', '当前文档中含有指向其他位置的链接，请使用普通文件。', { path: child });
       if (entry.isDirectory()) await walk(child);
-      else if (entry.isFile()) files.set(child, await readFile(await resolveInside(root, child)));
+      else if (entry.isFile()) { assertPublicFilePath(child); files.set(child, await readFile(await resolveInside(root, child))); }
     }
   }
   await walk('docs');
@@ -94,8 +102,8 @@ export function hashFiles(files: Map<string, Buffer>) {
 
 /** 常见受控写入只允许当前 Markdown，不能用提交接口覆盖历史或编辑器数据库。 */
 export function assertDocumentPath(relative: string) {
-  validateRelative(relative);
-  if (relative !== 'PROJECT.md' && (!relative.startsWith('docs/') || !relative.endsWith('.md'))) throw new ProjectError('INVALID_DOCUMENT_PATH', '正文修改仅允许 PROJECT.md 或 docs 下的 Markdown 文件。');
+  assertPublicFilePath(relative);
+  if (relative !== 'PROJECT.md' && (!relative.startsWith('docs/') || !relative.endsWith('.md')) && !companionKind(relative)) throw new ProjectError('INVALID_DOCUMENT_PATH', '正文修改仅允许 PROJECT.md、docs 下 Markdown 或受控伴随文件。');
 }
 
 /** 多个宿主访问同一项目时使用短期文件锁；外部文本编辑仍由内容哈希保护。 */

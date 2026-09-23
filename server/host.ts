@@ -5,9 +5,9 @@ import os from 'node:os';
 import { createProjectApi } from './http.ts';
 
 /** 正式宿主只监听本机，共用浏览器与桌面项目服务，不需要 Vite 或源码。 */
-export async function startHost(options: { root: string; home?: string; port?: number }) {
+export async function startHost(options: { root: string; home?: string; port?: number; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string }) {
   const root = path.resolve(options.root), home = options.home ?? process.env.CEWEN_HOME ?? path.join(os.homedir(), 'Documents', '策问工作区');
-  const api = createProjectApi({ home, templateRoot: path.join(root, 'templates/example') });
+  const api = createProjectApi({ home, root, templateRoot: path.join(root, 'templates/example'), chooseDirectory: options.chooseDirectory, installation: options.installation });
   const staticRoot = path.join(root, 'dist');
   const server = createServer((request, response) => {
     void (async () => {

@@ -11,6 +11,7 @@ import { rewriteLinks, diagnoseLinks } from '../shared/links.ts';
 import { answerQuestion, inquiry, section, questionAvailable } from '../shared/inquiry.ts';
 import { questionDocument, setMetadata, putRelation, removeRelation } from '../shared/editing.ts';
 import { indexSnapshot } from './index-store.ts';
+import { companionIdPattern, companionKind, inkCompanionPath, layoutCompanionPath, validateCompanionFile, COMPANION_MAX_BYTES } from '../shared/document-companion.ts';
 
 /** 最近项目是本机配置，不混入任何游戏的公开策划目录。 */
 interface Registry { projects: ProjectInfo[]; current: string | null }
@@ -30,6 +31,17 @@ interface Transaction {
 /** 字节转换只对 Markdown 进行；图片附件保留原始字节参与快照。 */
 function markdownFiles(current: Map<string, Buffer>): MarkdownFile[] {
   return [...current].filter(([name]) => name.endsWith('.md')).map(([name, bytes]) => ({ path: name, text: bytes.toString('utf8'), hash: sha256(bytes) }));
+}
+/** 公开伴随文件仅在快照中单列，不送入知识正文解析。 */
+function companionFiles(current: Map<string, Buffer>) {
+  return Object.fromEntries([...current].filter(([name]) => companionKind(name)).map(([name, bytes]) => [name, { text: bytes.toString('utf8'), hash: sha256(bytes) }]));
+}
+/** 对外部编辑的布局和笔画也执行格式校验，避免发布损坏版本。 */
+function companionDiagnostics(current: Map<string, Buffer>) {
+  const result: ProjectSnapshot['diagnostics'] = [];
+  for (const [name, bytes] of current) if (companionKind(name)) try { validateCompanionFile(name, new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch (error) { result.push({ path: name, code: 'INVALID_COMPANION', severity: 'error', message: error instanceof Error ? error.message : '伴随文件格式无效。' }); }
+  return result;
 }
 function changedPaths(current: Record<string, string>, previous: Record<string, string> = {}) {
   return [...new Set([...Object.keys(current), ...Object.keys(previous)])].filter(name => name !== 'README.md' && current[name] !== previous[name]).sort();
@@ -107,7 +119,28 @@ export class ProjectService {
     } catch { /* 部分文件系统不支持监听，定期扫描和窗口焦点刷新仍然有效。 */ }
   }
   close() { this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
-  async list() { await this.ready; return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
+  private libraryView() { return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
+
+  /** 项目库身份以各项目当前 PROJECT.md 为准；失联或损坏项目保留最近登记，供用户重新定位。 */
+  async list() {
+    await this.ready;
+    return this.exclusive('library', async () => {
+      const refreshed = await Promise.all(this.registry.projects.map(async project => {
+        try {
+          const bytes = await optionalBytes(project.path, 'PROJECT.md');
+          if (!bytes) return project;
+          const actual = parseProjectInfo({ path: 'PROJECT.md', text: bytes.toString('utf8'), hash: sha256(bytes) }, project.path);
+          // 磁盘 ID 被改动时仍保留原登记，不悄悄把另一项目塞进当前历史身份。
+          return actual.id === project.id ? actual : project;
+        } catch { return project; }
+      }));
+      if (JSON.stringify(refreshed) !== JSON.stringify(this.registry.projects)) {
+        this.registry.projects = refreshed;
+        await this.saveRegistry();
+      }
+      return this.libraryView();
+    });
+  }
 
   /** 只打开用户明确传入且有公开项目入口的目录，检查重复身份避免两个副本串写。 */
   async open(directory: string): Promise<ProjectInfo> {
@@ -143,10 +176,11 @@ export class ProjectService {
   }
 
   /** 新建始终使用空目标目录；模板只复制虚构材料，绝不以真实资料作为默认。 */
-  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home): Promise<ProjectSnapshot> {
+  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home, setup?: { brief?: string; categories?: import('../shared/model.ts').KnowledgeGroup[] }): Promise<ProjectSnapshot> {
     await this.ready;
     name = name.trim();
     if (!name || name.length > 100) throw new ProjectError('INVALID_NAME', '请输入 1～100 个字符的项目名称。');
+    if (setup && (typeof setup !== 'object' || (setup.brief !== undefined && (typeof setup.brief !== 'string' || setup.brief.length > 20000)) || (setup.categories !== undefined && (!Array.isArray(setup.categories) || setup.categories.length > 60 || setup.categories.some(group => !group || !/^[A-Za-z0-9_-]{1,120}$/.test(group.id) || typeof group.label !== 'string' || !group.label.trim() || !/^#[0-9a-f]{6}$/i.test(group.color)))))) throw new ProjectError('INVALID_SETUP','创作起点或分类内容无效，请保留草稿后重新选择。');
     const id = `project-${randomUUID()}`;
     const folderName = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').slice(0, 65) || '新项目';
     const directory = path.join(path.resolve(parent), `${folderName}-${id.slice(-8)}`);
@@ -156,9 +190,9 @@ export class ProjectService {
       for (const entry of await readdir(this.templateRoot)) await cp(path.join(this.templateRoot, entry), path.join(directory, entry), { recursive: true, force: false, errorOnExist: true });
     }
     const guide = await optionalBytes(this.templateRoot, 'docs/README.md');
-    if (guide) await writeBytes(directory, 'docs/README.md', guide);
-    await writeBytes(directory, 'PROJECT.md', `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: kind === 'example' ? '完全虚构的教学示例，可放心修改和复制。' : '', example: kind === 'example' })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n`);
-    if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\nsystem: system-direction\nsystems:\n  - id: system-direction\n    title: 体验方向\n    color: '#EBC58D'\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n请填写希望玩家获得的体验。\n\n## 核心循环\n\n请描述主要行动、反馈与继续行动的理由。\n\n## 首版范围\n\n记录已确定的范围，其余保持待讨论。\n`);
+    if (guide) await writeBytes(directory, 'docs/README.md', kind==='example'?guide:'# 策划文档\n\n总纲位于 gdd，专项设计位于 dd，待讨论问题位于 questions，图片位于 assets。\n\n正文优先满足阅读；在自然文句中链接相关设计。保留文档身份，不将未决定的建议写成正式规则。设计分类在项目入口登记，个人草稿与视图不进入正文。\n');
+    await writeBytes(directory, 'PROJECT.md', `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: kind === 'example' ? '完全虚构的教学示例，可放心修改和复制。' : '', example: kind === 'example', ...(kind !== 'example' ? { minimumAppVersion: '0.4.0', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color })) } : {}) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`);
+    if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n## 核心循环\n\n## 首版范围\n\n## 尚未决定\n`);
     const project = await this.open(directory);
     return this.read(project.id);
   }
@@ -198,6 +232,7 @@ export class ProjectService {
     const actual = parseProjectInfo(files.find(file => file.path === 'PROJECT.md')!, project.path);
     if (actual.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '磁盘项目 ID 已变化，请核对身份后重新打开，未继续写入。');
     const knowledge = parseKnowledge(files), hashes = hashFiles(current), currentFingerprint = fingerprint(hashes);
+    knowledge.diagnostics.push(...companionDiagnostics(current));
     knowledge.diagnostics.push(...diagnoseLinks(new Map([...current].map(([name,bytes]) => [name, name.endsWith('.md') ? bytes.toString('utf8') : null]))));
     const cached = this.verifiedHistory.get(project.id);
     const versions = cached && this.watchers.has(project.id) && Date.now() - cached.at < 60000 ? cached.entries : await history(project.path, project.id), pending = await this.pending(project.path);
@@ -217,7 +252,7 @@ export class ProjectService {
       if (stable && fingerprint(hashFiles(check)) === currentFingerprint) { head = await publishRevision(project.path, project.id, current, { actor: head ? 'external' : 'user', reason: head ? '同步外部文档修改' : '建立项目初始版本', requestId: `observed-${randomUUID()}` }, currentFingerprint, changedPaths(hashes, head?.files)); this.verifiedHistory.delete(project.id); }
       else knowledge.diagnostics.push({ path: 'docs/', code: 'FILES_CHANGING', severity: 'warning', message: '文件仍在变化，稍后重新扫描；本次未发布版本。' });
     }
-    const snapshot: ProjectSnapshot = { project: actual, ...knowledge, fingerprint: currentFingerprint, revision: head?.id ?? null, revisionLabel: head?.label, files: hashes, recoveryRequired: pending.length > 0 || invalid.length > 0 };
+    const snapshot: ProjectSnapshot = { project: actual, ...knowledge, companions: companionFiles(current), fingerprint: currentFingerprint, revision: head?.id ?? null, revisionLabel: head?.label, files: hashes, recoveryRequired: pending.length > 0 || invalid.length > 0 };
     // 索引失败不遮蔽磁盘稿，保留诊断并允许用户继续读取公开文件。
     try { await indexSnapshot(project.path, snapshot); } catch (error) { snapshot.diagnostics.push({ path: '.cewen/index.sqlite', code: 'INDEX_UNAVAILABLE', severity: 'warning', message: `索引暂不可用：${error instanceof Error ? error.message : String(error)}` }); }
     return snapshot;
@@ -253,7 +288,7 @@ export class ProjectService {
     return this.exclusive(id, async () => {
       const project = this.project(id), saved = await readRevision(project.path, id, revision), files = markdownFiles(saved.files);
       const actual = parseProjectInfo(files.find(file => file.path === 'PROJECT.md')!, project.path);
-      return { project: actual, ...parseKnowledge(files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false };
+      return { project: actual, ...parseKnowledge(files), companions: companionFiles(saved.files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false };
     });
   }
 
@@ -266,7 +301,7 @@ export class ProjectService {
       for (const name of new Set([...current.keys(), ...saved.files.keys()])) {
         const old = current.get(name), next = saved.files.get(name);
         if (old && next && sha256(old) === sha256(next)) continue;
-        const binary = !name.endsWith('.md');
+        const binary = !name.endsWith('.md') && !companionKind(name);
         changes.push({ path: name, baseHash: old ? sha256(old) : null, text: next ? next.toString(binary ? 'base64' : 'utf8') : null, ...(binary ? { encoding: 'base64' as const } : {}) });
       }
       return { projectId: id, requestId: randomUUID(), baseRevision: snapshot.revision, reason: `恢复 ${saved.manifest.label}`, actor: 'restore', changes, dependencies: hashFiles(current), restoredFrom: saved.manifest.id };
@@ -344,7 +379,8 @@ export class ProjectService {
           try { next = Buffer.from(undoText(before.toString('utf8'), after.toString('utf8'), now.toString('utf8'))); }
           catch (error) { throw new ProjectError('UNDO_CONFLICT', `${name}：${(error as Error).message}`); }
         }
-        changes.push({ path: name, baseHash: now ? sha256(now) : null, text: next?.toString(name.endsWith('.md') ? 'utf8' : 'base64') ?? null, ...(!name.endsWith('.md') ? { encoding: 'base64' as const } : {}) });
+        const binary = !name.endsWith('.md') && !companionKind(name);
+        changes.push({ path: name, baseHash: now ? sha256(now) : null, text: next?.toString(binary ? 'base64' : 'utf8') ?? null, ...(binary ? { encoding: 'base64' as const } : {}) });
       }
       return { projectId: id, requestId: randomUUID(), baseRevision: current.revision, reason: `撤销批次 ${saved.manifest.label}（保留后续无关修改）`, actor: 'restore', changes, dependencies: hashFiles(files), restoredFrom: saved.manifest.id };
     });
@@ -437,7 +473,21 @@ export class ProjectService {
     if (documentIds.some(id => !selected.some(document => document.id === id))) throw new ProjectError('MISSING_DOCUMENT', '上下文选择含有不存在的文档。');
     const ids = new Set(selected.map(document => document.id)), nodes = snapshot.nodes.filter(node => ids.has(node.documentId));
     const nodeIds = new Set(nodes.map(node => node.id));
-    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), annotations, instructions: '只修改指定当前文档，保留 ID 和用户原话；未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
+    const companions: NonNullable<ProjectSnapshot['companions']> = {};
+    const annotationDocuments: { documentId: string; path: string; text: string; hash: string }[] = [];
+    for (const document of selected) {
+      if (!companionIdPattern.test(document.id)) continue;
+      for (const path of [layoutCompanionPath(document.id), inkCompanionPath(document.id)]) {
+        const file = snapshot.companions?.[path]; if (file) companions[path] = file;
+      }
+      const path = `docs/annotations/${document.id}.md`, hash = snapshot.files?.[path];
+      if (hash) {
+        const bytes = await optionalBytes(this.project(id).path, path);
+        if (!bytes || sha256(bytes) !== hash) throw new ProjectError('FILES_CHANGING', '公开注释在整理上下文期间发生变化，请重新读取。', { path });
+        annotationDocuments.push({ documentId: document.id, path, text: bytes.toString('utf8'), hash });
+      }
+    }
+    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry?.text }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), companions, annotationDocuments, annotations, instructions: '只修改指定当前文档，保留 ID 和用户原话；布局与笔画是所选文档的伴随文件，不是正文。未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
     if (Buffer.byteLength(JSON.stringify(content)) > 4 * 1024 * 1024) throw new ProjectError('CONTEXT_TOO_LARGE', '上下文超过 4 MB，请选择较少的 DD；未静默截断。');
     return content;
   }
@@ -615,7 +665,7 @@ export class ProjectService {
     await this.open(destination); return this.read(nextId);
   }
 
-  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); await this.saveRegistry(); return this.list(); }); }
+  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); await this.saveRegistry(); return this.libraryView(); }); }
 
   /** 图片等附件只从当前或已校验快照读取，不允许任意本机路径。 */
   async asset(id: string, relative: string, revision?: string) {
@@ -645,6 +695,17 @@ export class ProjectService {
     await this.ready;
     if (!/^[a-f0-9-]{16,50}$/i.test(draft.id) || typeof draft.text !== 'string' || Buffer.byteLength(draft.text) > 4 * 1024 * 1024) throw new ProjectError('INVALID_DRAFT', '草稿身份或正文不正确。');
     assertDocumentPath(draft.documentPath);
+    if (draft.assets !== undefined) {
+      if (!Array.isArray(draft.assets) || draft.assets.length > 20 || Buffer.byteLength(JSON.stringify(draft.assets)) > 6 * 1024 * 1024) throw new ProjectError('DRAFT_ASSETS_TOO_LARGE','草稿附件合计过大，请先保存当前文档再继续添加。');
+      for (const asset of draft.assets) { if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿图片无效。'); changeBytes({ ...asset, baseHash: null }); }
+    }
+    if (draft.companions !== undefined) {
+      if (!Array.isArray(draft.companions) || draft.companions.length > 20 || Buffer.byteLength(JSON.stringify(draft.companions)) > 4 * 1024 * 1024) throw new ProjectError('INVALID_DRAFT', '草稿伴随文件数量或总大小无效。');
+      for (const change of draft.companions) {
+        if (!change || !companionKind(change.path) || change.encoding || typeof change.baseHash !== 'string' && change.baseHash !== null || change.text !== null && typeof change.text !== 'string') throw new ProjectError('INVALID_COMPANION', '草稿伴随文件更改无效。');
+        if (change.text !== null) validateCompanionFile(change.path, change.text);
+      }
+    }
     const saved = { ...draft, updatedAt: new Date().toISOString() };
     await writeBytes(this.project(id).path, `.cewen/drafts/${draft.id}.json`, JSON.stringify(saved));
     return saved;
@@ -679,7 +740,9 @@ export class ProjectService {
         if (changedNames.has(change.path.toLowerCase())) throw new ProjectError('DUPLICATE_CHANGE', '同一文件在一个批次里只能修改一次。');
         changedNames.add(change.path.toLowerCase());
         if (change.path === 'PROJECT.md' && change.text === null) throw new ProjectError('PROJECT_ENTRY_REQUIRED', '不能删除项目入口文件。');
-        if (change.text !== null && (typeof change.text !== 'string' || Buffer.byteLength(change.text) > 4 * 1024 * 1024)) throw new ProjectError('DOCUMENT_TOO_LARGE', '单份 Markdown 超出本次编辑范围。');
+        if (companionKind(change.path) && change.encoding) throw new ProjectError('INVALID_COMPANION', '伴随文件必须使用 UTF-8 文本。');
+        if (change.text !== null && (typeof change.text !== 'string' || Buffer.byteLength(change.text) > (companionKind(change.path) ? COMPANION_MAX_BYTES : 4 * 1024 * 1024))) throw new ProjectError('DOCUMENT_TOO_LARGE', '单份文档或伴随文件超出本次编辑范围。');
+        if (companionKind(change.path) && change.text !== null) validateCompanionFile(change.path, change.text);
         if ((beforeHashes[change.path] ?? null) !== change.baseHash) throw new ProjectError('FILE_CONFLICT', '文件已被其他窗口或外部编辑器修改，请比较后再保存。', { path: change.path, currentText: current.get(change.path)?.toString('utf8') ?? null, proposedText: change.text, currentHash: beforeHashes[change.path] ?? null });
         const bytes = changeBytes(change);
         if (bytes === null) candidate.delete(change.path); else candidate.set(change.path, bytes);
@@ -692,6 +755,7 @@ export class ProjectService {
       const candidateProject = parseProjectInfo(candidateFiles.find(file => file.path === 'PROJECT.md')!, root);
       if (candidateProject.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '保存不能改变项目身份，请使用复制项目。');
       const diagnostics = parseKnowledge(candidateFiles).diagnostics.filter(issue => issue.severity === 'error');
+      diagnostics.push(...companionDiagnostics(candidate));
       if (diagnostics.length) throw new ProjectError('DOCUMENT_INVALID', '修改后存在重复身份、缺失目标或格式错误；草稿已保留，请先修正。', diagnostics);
       if (fingerprint(beforeHashes) === fingerprint(hashFiles(candidate))) return this.load(project, false);
 
@@ -757,7 +821,7 @@ export class ProjectService {
         const preview = new Map(current);
         for (const [name, bytes] of restores) if (bytes === null) preview.delete(name); else preview.set(name, bytes);
         if (parseProjectInfo(markdownFiles(preview).find(file => file.path === 'PROJECT.md')!, root).id !== id) throw new ProjectError('PROJECT_ID_CHANGED', '恢复候选的项目身份不正确。');
-        if (direction === 'continue' && parseKnowledge(markdownFiles(preview)).diagnostics.some(issue => issue.severity === 'error')) throw new ProjectError('DOCUMENT_INVALID', '恢复候选的文档或引用无效，尚未写入。');
+        if (direction === 'continue' && (parseKnowledge(markdownFiles(preview)).diagnostics.some(issue => issue.severity === 'error') || companionDiagnostics(preview).length)) throw new ProjectError('DOCUMENT_INVALID', '恢复候选的文档、引用或伴随文件无效，尚未写入。');
         for (const change of transaction.request.changes) {
           const observed = await optionalBytes(root, change.path);
           if ((observed ? sha256(observed) : null) !== (currentHashes[change.path] ?? null)) throw new ProjectError('RECOVERY_CONFLICT', '恢复期间文件发生变化，已停止。', { path: change.path });
@@ -769,7 +833,8 @@ export class ProjectService {
           const candidate = await readCurrentFiles(root);
           if (fingerprint(hashFiles(candidate)) !== fingerprint(hashFiles(preview))) throw new ProjectError('RECOVERY_CONFLICT', '恢复期间出现额外外部修改，未发布版本。');
           const diagnostics = parseKnowledge(markdownFiles(candidate)).diagnostics;
-          if (diagnostics.some(issue => issue.severity === 'error')) throw new ProjectError('DOCUMENT_INVALID', '恢复候选仍有格式或引用问题，未发布完成版本。', diagnostics);
+          diagnostics.push(...companionDiagnostics(candidate));
+          if (diagnostics.some(issue => issue.severity === 'error')) throw new ProjectError('DOCUMENT_INVALID', '恢复候选仍有格式、引用或伴随文件问题，未发布完成版本。', diagnostics);
           const revision = await publishRevision(root, id, candidate, transaction.request, transaction.requestHash, transaction.request.changes.map(change => change.path));
           transaction.revision = revision.id; transaction.phase = 'complete';
         } else transaction.phase = 'rolled-back';

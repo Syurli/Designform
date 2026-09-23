@@ -3,6 +3,19 @@ import './workbench.css';
 import './features.css';
 import './theme.css';
 import './shell.css';
+import './authoring.css';
+import './creation-editing.css';
+import './workspace-060.css';
+import { setNotebookTexture } from './notebook-style';
+import { openProjectDetails, projectIdentity } from './project-details';
+import { openContentOverview } from './content-overview';
+import { ProjectDirectory } from './project-directory';
+import { mountDocumentPresentation } from './document-presentation';
+import { EditingSession } from './editing-session';
+import type { GraphEdit } from '../shared/graph-editing';
+import { chooseAction, chooseRelationType, classifyDocuments, connectDocuments, editEdge } from './relation-editing';
+import { categoryColor } from './category-color';
+import { openCollaboration } from './prompt-panel';
 import { initializeTheme, mountDesktopChrome } from './theme';
 import { createIcons, Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft } from 'lucide';
 import { KnowledgeGraph, type GraphMode } from './graph';
@@ -70,17 +83,18 @@ app.innerHTML = `
     <div class="application-actions"><button class="llm-connection" id="llm-connection" aria-label="LLM 连接状态"><span class="connection-dot"></span><span><strong>正在检查连接</strong><small>LLM 协作</small></span></button><button class="theme-toggle icon-button" data-theme-toggle aria-label="切换浅色主题"></button></div>
   </header>
   <button class="sidebar-scrim" id="sidebar-scrim" aria-label="收起项目目录"></button>
-  <aside class="sidebar" aria-label="当前项目文档目录">
-    <button class="icon-button sidebar-close" id="sidebar-close" aria-label="关闭系统目录">${icon('x')}</button>
+  <aside class="sidebar" id="project-sidebar" aria-label="当前项目文档目录">
+    <button class="icon-button sidebar-close" id="sidebar-close" aria-label="收起项目面板" title="收起项目面板">${icon('panel-left')}</button>
     <div class="project-label">当前项目</div>
-    <button class="project project-opener" id="project-switch" aria-label="切换当前项目"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
+    <button class="project project-opener" id="project-switch" aria-label="当前项目设置"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
     <label class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索标题、规则…" autocomplete="off" aria-label="搜索策划内容"/><kbd>/</kbd></label>
     <details class="system-filter"><summary><span id="system-filter-label">全部系统</span><small><span id="system-count">${groups.length}</span> 个系统</small></summary>
     <div class="system-list">
       <button data-group="" class="group-button active"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>
-      ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${group.color}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
+      ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
     </div>
     </details>
+    <div class="project-directory-host" id="project-directory-host"></div>
     <details class="reading-options"><summary>筛选与阅读记录</summary><button id="toggle-archived">显示已归档内容</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>大型图谱展开全部规则</label><button id="recent-reading">最近浏览</button><button id="save-reading-view">保存当前阅读视图</button><button id="reset-reading-filters">清除所有筛选</button></details>
     <div class="sidebar-section entry-heading"><span id="entry-heading">策划条目</span><span id="entry-count"></span></div>
     <div id="node-directory" class="node-directory" aria-label="可选择的策划条目"></div>
@@ -89,7 +103,7 @@ app.innerHTML = `
   <div class="workspace">
     <header class="topbar">
       <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
-      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document">编辑</button><span></span><button class="secondary-button" id="project-history">版本</button><button class="secondary-button" id="organize-project">整理</button><button class="secondary-button" id="project-inquiry">问询</button><button class="secondary-button" id="project-exchange">交换</button><button class="sample-tag" id="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
+      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document">编辑</button><span></span><button class="secondary-button" id="project-statistics">统计</button><button class="secondary-button" id="project-history">版本</button><button class="secondary-button" id="organize-project">整理</button><button class="secondary-button" id="project-inquiry">问询</button><button class="secondary-button" id="project-exchange">交换</button><button class="sample-tag" id="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
     </header>
     <main class="work-area">
       <section class="graph-view" id="graph-view" aria-label="知识空间">
@@ -106,7 +120,7 @@ app.innerHTML = `
         <div id="graph-canvas" class="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
         <div class="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
-        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${group.color}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">拖动旋转 · 滚轮缩放 · 点击阅读</span></div>
+        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">空白旋转 · Shift 框选 · 滚轮缩放</span></div>
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
       <section class="cards-view" id="cards-view" hidden aria-label="策划卡片库"></section>
@@ -118,12 +132,30 @@ app.innerHTML = `
 
 mountDesktopChrome();
 await initializeTheme();
+setNotebookTexture();
 
 let graph: KnowledgeGraph | undefined;
+let projectDirectory: ProjectDirectory | undefined;
+let editingSession:EditingSession|undefined;
 let readingReady = false;
 let readingTimer: ReturnType<typeof setTimeout> | undefined;
 let recentNodes: string[] = [];
 const get = (id: string) => document.getElementById(id)!;
+/** 用户决定目录显隐；分辨率只决定并排还是抽屉，不覆盖已保存选择。 */
+let sidebarExpanded = !matchMedia('(max-width:1050px)').matches;
+try { const saved = localStorage.getItem('cewen-sidebar-expanded'); if (saved !== null) sidebarExpanded = saved === 'true'; } catch { /* 存储不可用时保留当前会话选择。 */ }
+function setSidebarExpanded(expanded: boolean) {
+  sidebarExpanded = expanded;
+  app.classList.toggle('sidebar-open', expanded);
+  app.classList.toggle('sidebar-collapsed', !expanded);
+  get('project-sidebar').inert = !expanded;
+  get('menu-toggle').setAttribute('aria-expanded', String(expanded));
+  get('menu-toggle').setAttribute('aria-controls', 'project-sidebar');
+  get('menu-toggle').setAttribute('aria-label', expanded ? '收起项目面板' : '展开项目面板');
+  get('menu-toggle').title = `${expanded ? '收起' : '展开'}项目面板 · Ctrl + \\`;
+  try { localStorage.setItem('cewen-sidebar-expanded', String(expanded)); } catch { /* 偏好不影响文档保存。 */ }
+}
+setSidebarExpanded(sidebarExpanded);
 const connectionPanel = new ConnectionPanel(get('llm-connection') as HTMLButtonElement, () => projectSnapshot);
 /** 目录展开状态按项目保留在本次阅读中，不修改任何策划文档。 */
 const directoryExpansion = new Map<string, Set<string>>();
@@ -157,12 +189,13 @@ function renderAnalysisControls() {
   document.querySelectorAll<HTMLElement>('.graph-tools .tool-divider').forEach(divider => { divider.hidden = analyzing; });
   get('reset-view').setAttribute('aria-label', analyzing ? '重置分析布局' : '返回全图');
   get('reset-view').querySelector('span')!.textContent = analyzing ? '重置布局' : '全图';
-  get('graph-empty-title').textContent = analyzing ? '选择一个条目，展开它的关系' : '没有匹配的条目';
-  get('graph-empty-description').textContent = analyzing ? '可从上方焦点列表或左侧目录开始。' : '尝试其他关键词，或清除当前筛选。';
+  get('graph-empty-title').textContent = analyzing ? '选择一个条目，展开它的关系' : nodes.length ? '没有匹配的条目' : '尚无总纲或专项设计';
+  get('graph-empty-description').textContent = analyzing ? '可从上方焦点列表或左侧目录开始。' : nodes.length ? '尝试其他关键词，或清除当前筛选。' : '点击「＋ 新建」或右键星空，写下第一份设计。';
   get('clear-filters').textContent = analyzing ? '选择首个条目' : '清除筛选';
 }
 
 function renderDirectory() {
+  if(projectDirectory){projectDirectory.render();return;}
   const visible = filteredNodes().filter(node => node.kind !== 'system');
   const key = projectSnapshot?.project.id ?? '', expanded = directoryExpansion.get(key) ?? new Set(nodes.filter(node => node.documentType === 'gdd').map(node => node.id));
   directoryExpansion.set(key, expanded);
@@ -191,15 +224,16 @@ function renderInspector() {
     const source = nodeById.get(edge.source)!, target = nodeById.get(edge.target)!;
     const semantic = edge.type === 'depends' ? '箭头指向依赖项；修改依赖项时，应回头核对使用它的规则。' : edge.type === 'constrains' ? '箭头从约束规则指向受约束内容；建议复核不代表必须修改。' : edge.type === 'contains' ? '这是内容归属关系，不自动表示改动影响。' : '这是普通关联，存储方向不表示因果或改动传播。';
     get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">关系依据</span><button class="icon-button" id="close-relation" aria-label="返回条目详情">${icon('x')}</button></div><div class="edge-statement"><span>${escape(source.title)}</span><strong>${edge.type === 'relates' ? '↔' : '↓'} ${types.find(type => type.id === edge.type)!.label}</strong><span>${escape(target.title)}</span></div><div class="evidence-badge">${edge.note.includes('展示推断') ? '展示推断 · 待核对' : '原文依据'}</div><p class="evidence-note">${escape(edge.note)}</p><p class="edge-semantic">${semantic}</p><div class="panel-divider"></div><div class="detail-label">继续分析</div><button class="evidence-node" data-analyze="${source.id}">${escape(source.title)}${icon('arrow-up-right')}</button><button class="evidence-node" data-analyze="${target.id}">${escape(target.title)}${icon('arrow-up-right')}</button><div class="source-block"><span>两端资料</span><p>${escape(sourceName(source.source))}</p><p>${escape(sourceName(target.source))}</p></div>`;
+    if(!projectSnapshot?.historical){const button=document.createElement('button');button.className='secondary-button';button.dataset.graphCommand='edge';button.textContent=edge.origin?.kind==='markdown'?'修改正文引用':'编辑这条关系';get('inspector').append(button);const review=document.createElement('button');review.className='secondary-button';review.textContent='让 LLM 检查这条关系';review.onclick=()=>void openCollaboration('review',projectSnapshot,[source.documentId,target.documentId].filter(Boolean),{extra:`请检查「${source.title}」与「${target.title}」的关系。当前类型：${types.find(t=>t.id===edge.type)?.label}。来源：${edge.origin?.kind??'文档'}。依据：${edge.note}。区分正文提及、主要分类和真正的设计依赖，不按位置或同名词猜测关系。`,fixed:true});get('inspector').append(review);}
     refreshIcons();
     return;
   }
   if (!selected) {
-    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">项目概览</span>${icon('orbit')}</div><h2>${escape(projectSnapshot?.project.name ?? '从你的第一份策划开始')}</h2><p class="overview-description">${escape(projectSnapshot?.project.description || '新建文档、写下规则，逐步连接你的游戏设计。')}</p><div class="overview-stats"><div><b>${nodes.length}</b><span>策划条目</span></div><div><b>${edges.length}</b><span>知识关联</span></div></div><div class="panel-divider"></div><div class="detail-label">从一个系统开始</div><div class="overview-groups">${groups.map(group => { const node = nodes.find(item => item.group === group.id && item.kind === 'system')!; return `<button data-node="${node.id}"><span class="group-dot" style="--group-color:${group.color}"></span>${escape(group.label)}${icon('arrow-up-right')}</button>`; }).join('')}</div><div class="reading-note">${projectSnapshot?.project.isExample ? '这是完全虚构的基础示例，可自由修改。' : '正文来自项目 Markdown，可用普通编辑器直接读写。'}<br>点击星点或目录条目，查看正文与关联。</div>${projectSnapshot?.diagnostics.length ? `<div class="project-warning">${projectSnapshot.diagnostics.map(issue => escape(`${issue.path}：${issue.message}`)).join('<br>')}</div>` : ''}${connectionError ? `<div class="project-warning">${escape(connectionError)}</div>` : ''}`;
+    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">项目概览</span>${icon('orbit')}</div><h2>${escape(projectSnapshot?.project.name ?? '从你的第一份策划开始')}</h2><p class="overview-description">${escape(projectSnapshot?.project.description || '新建文档、写下规则，逐步连接你的游戏设计。')}</p><div class="overview-stats"><div><b>${nodes.length}</b><span>策划条目</span></div><div><b>${edges.length}</b><span>知识关联</span></div></div><div class="panel-divider"></div><div class="detail-label">从一个系统开始</div><div class="overview-groups">${groups.map(group => { const node = nodes.find(item => item.group === group.id && item.kind === 'system')!; return `<button data-node="${node.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span>${escape(group.label)}${icon('arrow-up-right')}</button>`; }).join('')}</div><div class="reading-note">${projectSnapshot?.project.isExample ? '这是完全虚构的基础示例，可自由修改。' : '正文来自项目 Markdown，可用普通编辑器直接读写。'}<br>点击星点或目录条目，查看正文与关联。</div>${projectSnapshot?.diagnostics.length ? `<div class="project-warning">${projectSnapshot.diagnostics.map(issue => escape(`${issue.path}：${issue.message}`)).join('<br>')}</div>` : ''}${connectionError ? `<div class="project-warning">${escape(connectionError)}</div>` : ''}`;
   } else {
     const group = groupOf(selected);
     const relations = edges.filter(edge => edge.source === selected.id || edge.target === selected.id);
-    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">${kindNames[selected.kind]}</span><button class="icon-button" id="clear-selection" aria-label="关闭条目详情">${icon('x')}</button></div><div class="detail-group" style="--group-color:${group.color}"><i></i>${escape(group.label)}</div><h2>${escape(selected.title)}</h2><div class="detail-meta">${status(selected)}<span>${relations.length} 条关联</span></div><p class="detail-summary">${escape(selected.summary)}</p><button class="read-button" id="read-selected">${icon('file-text')}阅读全文${icon('arrow-up-right')}</button><div class="record-actions"><button id="item-history">条目历史</button><button id="document-history">文档历史</button><button id="copy-node-link">复制条目链接</button></div><div class="panel-divider"></div><div class="related-heading"><span>直接关联</span><label class="mini-check"><input type="checkbox" id="direct-only" ${state.directOnly ? 'checked' : ''}/>只看相关</label></div><div class="relation-list">${relations.map(edge => { const outward = edge.source === selected.id; const other = nodeById.get(outward ? edge.target : edge.source)!; const type = types.find(type => type.id === edge.type)!.label; const label = edge.type === 'relates' ? '关联' : `${outward ? '→' : '←'} ${type}`; return `<div class="relation-item"><button data-node="${other.id}"><span class="relation-type">${label}</span><span>${escape(other.title)}</span>${icon('chevron-right')}</button><p>${escape(edge.note)}</p></div>`; }).join('')}</div><div class="source-block"><span>资料来源</span><p>${escape(sourceName(selected.source))}</p><small>“已有依据”指设计有据，不代表已实现。</small></div>`;
+    get('inspector').innerHTML = `<div class="inspector-heading"><span class="eyebrow">${kindNames[selected.kind]}</span><button class="icon-button" id="clear-selection" aria-label="关闭条目详情">${icon('x')}</button></div><div class="detail-group" style="--group-color:${categoryColor(group.color)}"><i></i>${escape(group.label)}</div><h2>${escape(selected.title)}</h2><div class="detail-meta">${status(selected)}<span>${relations.length} 条关联</span></div><p class="detail-summary">${escape(selected.summary)}</p><button class="read-button" id="read-selected">${icon('file-text')}阅读全文${icon('arrow-up-right')}</button><div class="record-actions"><button id="item-history">条目历史</button><button id="document-history">文档历史</button><button id="copy-node-link">复制条目链接</button></div><div class="panel-divider"></div><div class="related-heading"><span>直接关联</span><label class="mini-check"><input type="checkbox" id="direct-only" ${state.directOnly ? 'checked' : ''}/>只看相关</label></div><div class="relation-list">${relations.map(edge => { const outward = edge.source === selected.id; const other = nodeById.get(outward ? edge.target : edge.source)!; const type = types.find(type => type.id === edge.type)!.label; const label = edge.type === 'relates' ? '关联' : `${outward ? '→' : '←'} ${type}`; return `<div class="relation-item"><button data-node="${other.id}"><span class="relation-type">${label}</span><span>${escape(other.title)}</span>${icon('chevron-right')}</button><p>${escape(edge.note)}</p></div>`; }).join('')}</div><div class="source-block"><span>资料来源</span><p>${escape(sourceName(selected.source))}</p><small>“已有依据”指设计有据，不代表已实现。</small></div>`;
   }
   if (selected) {
     // 总览先选中条目，再通过明确入口深入分析，单击星点仍可快速浏览摘要。
@@ -227,22 +261,30 @@ function renderInspector() {
       get('inspector').querySelector('.mini-check')?.replaceWith(depth);
     }
   }
+  if(selected&&selected.kind!=='system'&&!projectSnapshot?.historical){
+    const actions=document.createElement('div');actions.className='graph-selected-actions';
+    actions.innerHTML='<button data-graph-command="connect">添加手工关联</button><button data-graph-command="classify">修改分类</button>';
+    get('inspector').append(actions);
+  }
   refreshIcons();
 }
 
+let readingDisposers:(()=>void)[]=[];
 function renderReading() {
+  readingDisposers.forEach(dispose=>dispose());readingDisposers=[];
   closeReadingPreview();
   const visible = filteredNodes();
   const selected = state.selected ? nodeById.get(state.selected) : undefined;
   const ids = new Set((selected ? [selected] : visible).map(node => node.documentId));
   const documents = projectSnapshot?.documents.filter(document => ids.has(document.id)).sort((a, b) => Number(b.type === 'gdd') - Number(a.type === 'gdd')) ?? [];
-  get('reading-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN DOCUMENTS</span><h1>${selected ? escape(selected.title) : escape(projectSnapshot?.project.name ?? '未命名项目') + ' · 策划案'}</h1><p>${projectSnapshot?.historical ? `${projectSnapshot.revisionLabel} · 历史策划` : '从设计正文开始阅读，悬停带下划线的词语可预览相关设计。'}</p><div class="reading-navigation">${readingTrail.length ? `<button class="text-button" id="reading-back">${icon('arrow-left')}返回上一处</button>` : ''}${selected ? `<button class="text-button" id="read-all">返回策划案总览</button>` : ''}</div></header><div class="document-content">${documents.map(document => `<article class="document-section" id="doc-${document.id}"><div class="markdown-preview">${projectMarkdown(document, projectSnapshot!)}</div><footer class="document-reading-footer"><div class="document-source">${escape(document.path)}</div><button class="text-button" data-locate="${document.id}">${icon('network')}在关系网中定位${icon('arrow-up-right')}</button></footer></article>`).join('') || '<div class="reading-empty">没有找到匹配文档。可以新建一份 GDD 或 DD。</div>'}</div>`;
+  get('reading-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN DOCUMENTS</span><h1>${selected ? escape(selected.title) : escape(projectSnapshot?.project.name ?? '未命名项目') + ' · 策划案'}</h1><p>${projectSnapshot?.historical ? `${projectSnapshot.revisionLabel} · 历史策划` : '从设计正文开始阅读，悬停带下划线的词语可预览相关设计。'}</p><div class="reading-navigation">${readingTrail.length ? `<button class="text-button" id="reading-back">${icon('arrow-left')}返回上一处</button>` : ''}${selected ? `<button class="text-button" id="read-all">返回策划案总览</button>` : ''}</div></header><div class="document-content">${documents.map(document => `<article class="document-section" id="doc-${document.id}"><div class="document-presentation-host"></div><footer class="document-reading-footer"><div class="document-source">${escape(document.path)}</div><button class="text-button" data-locate="${document.id}">${icon('network')}在关系网中定位${icon('arrow-up-right')}</button></footer></article>`).join('') || '<div class="reading-empty">没有找到匹配文档。可以新建一份 GDD 或 DD。</div>'}</div>`;
+  for(const doc of documents){const host=get('reading-view').querySelector<HTMLElement>(`#doc-${CSS.escape(doc.id)} .document-presentation-host`)!;readingDisposers.push(mountDocumentPresentation(host,doc,projectSnapshot!,{onEdit:()=>{void workbench.edit(doc.id).catch(reportProjectError);}}));}
   refreshIcons();
 }
 
 function renderCards() {
   const visible = filteredNodes();
-  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${groupOf(node).color}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
+  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${categoryColor(node.color??groupOf(node).color)}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
   refreshIcons();
 }
 
@@ -250,6 +292,7 @@ function renderCards() {
 function sync(updateGraph = true) {
   if (readingReady && projectSnapshot && !projectSnapshot.historical) { clearTimeout(readingTimer); const id = projectSnapshot.project.id; readingTimer = setTimeout(() => { void projectAction(id, 'reading-view', { state: { ...state }, layout: graph?.exportLayout(), recent: recentNodes }).catch(reportProjectError); }, 900); }
   renderAnalysisControls();
+  renderEditingState();
   renderDirectory();
   renderInspector();
   if (updateGraph) graph?.setState(state);
@@ -270,8 +313,6 @@ function selectNode(id: string) {
   if (state.group && nodeById.get(id)!.group !== state.group) state.group = null;
   state.query = '';
   (get('search') as HTMLInputElement).value = '';
-  app.classList.remove('sidebar-open');
-  get('menu-toggle').setAttribute('aria-expanded', 'false');
   sync(!refocusing);
   if (refocusing) {
     get('graph-view').scrollTo({ top: 0, behavior: 'instant' });
@@ -292,8 +333,6 @@ function clearOverviewSelection() {
 
 /** 导航批量更新时先恢复页面尺寸，延后场景同步，由后续 setMode 一次完成过渡。 */
 function setView(view: View, deferGraph = false) {
-  app.classList.remove('sidebar-open');
-  get('menu-toggle').setAttribute('aria-expanded', 'false');
   state.view = view;
   get('graph-view').hidden = view !== 'graph';
   get('reading-view').hidden = view !== 'document';
@@ -321,7 +360,7 @@ function setGraphMode(mode: OverviewMode) {
 function updateSpaceNavigation() {
   const mode = state.mode;
   document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(item => { item.classList.toggle('active', item.dataset.mode === mode); item.setAttribute('aria-pressed', String(item.dataset.mode === mode)); });
-  get('gesture').textContent = mode === 'galaxy' ? '拖动旋转 · 滚轮缩放 · 点击阅读' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '拖动平移 · 滚轮缩放 · 点击阅读';
+  get('gesture').textContent = mode === 'galaxy' ? '空白旋转 · Shift 框选 · 滚轮缩放' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '空白拖动框选 · 右键平移 · 滚轮缩放';
   get('space-intro').textContent = { galaxy: '在系统之间，发现设计的联系', network: '从规则出发，核对前提、约束与关联依据', layers: '按系统归位，从方向逐层阅读到规则' }[mode];
 }
 
@@ -409,8 +448,10 @@ app.addEventListener('click', event => {
   }
   if ('group' in button.dataset) { state.group = button.dataset.group || null; state.directOnly = false; if (state.mode !== 'network') { state.selected = null; state.relationIndex = null; } (document.querySelector('.system-filter') as HTMLDetailsElement).open = false; sync(); return; }
   switch (button.id) {
-    case 'project-center': case 'project-switch': void workbench.projects().catch(reportProjectError); break;
-    case 'new-document': workbench.newDocument(); break;
+    case 'project-center': void workbench.projects().catch(reportProjectError); break;
+    case 'project-switch': if(projectSnapshot)openProjectDetails(projectSnapshot,applyProject);else void workbench.projects().catch(reportProjectError);break;
+    case 'project-statistics': if(projectSnapshot)openContentOverview(projectSnapshot);break;
+    case 'new-document': void workbench.newDocument(state.group??'').catch(reportProjectError); break;
     case 'edit-document': void workbench.edit(state.selected ? nodeById.get(state.selected)?.documentId : undefined).catch(reportProjectError); break;
     case 'item-history': if (state.selected) void historyPanel.itemHistory(state.selected, false).catch(reportProjectError); break;
     case 'document-history': if (state.selected) void historyPanel.itemHistory(nodeById.get(state.selected)!.documentId, true).catch(reportProjectError); break;
@@ -439,8 +480,8 @@ app.addEventListener('click', event => {
     case 'zoom-out': graph?.zoom(1.22); break;
     case 'toggle-labels': state.labelsAll = !state.labelsAll; button.setAttribute('aria-pressed', String(state.labelsAll)); sync(); break;
     case 'toggle-motion': state.paused = !state.paused; button.setAttribute('aria-pressed', String(state.paused)); sync(); break;
-    case 'menu-toggle': app.classList.toggle('sidebar-open'); button.setAttribute('aria-expanded', String(app.classList.contains('sidebar-open'))); break;
-    case 'sidebar-close': case 'sidebar-scrim': app.classList.remove('sidebar-open'); get('menu-toggle').setAttribute('aria-expanded', 'false'); break;
+    case 'menu-toggle': setSidebarExpanded(!sidebarExpanded); break;
+    case 'sidebar-close': case 'sidebar-scrim': setSidebarExpanded(false); get('menu-toggle').focus(); break;
     case 'clear-filters': state.scopeIds = null; state.group = null; state.query = ''; state.directOnly = false; if (state.mode === 'network') state.selected = nodes[0]?.id ?? null; (get('search') as HTMLInputElement).value = ''; sync(); break;
   }
 });
@@ -453,12 +494,15 @@ app.addEventListener('change', event => {
 });
 get('search').addEventListener('input', event => { state.query = (event.target as HTMLInputElement).value; sync(); });
 document.addEventListener('keydown', event => {
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
-  if (event.key === '/' && !typing) { event.preventDefault(); if (matchMedia('(max-width:1050px)').matches) { app.classList.add('sidebar-open'); get('menu-toggle').setAttribute('aria-expanded', 'true'); } get('search').focus(); }
+  if(event.defaultPrevented||event.isComposing||document.querySelector('dialog[open]'))return;
+  const typing = !!(event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]');
+  if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); setSidebarExpanded(!sidebarExpanded); return; }
+  if(!typing&&(event.ctrlKey||event.metaKey)){const key=event.key.toLowerCase();if(['s','z','y','c','x','v','a','f'].includes(key)&&!(key==='c'&&window.getSelection()?.toString())){event.preventDefault();void graphCommand(key==='s'?'save':key==='z'?(event.shiftKey?'redo':'undo'):key==='y'?'redo':key==='c'?'copy':key==='x'?'cut':key==='a'?'selectAll':key==='f'?'search':'paste').catch(reportProjectError);return;}}
+  if(!typing&&event.key==='Delete'&&state.view==='graph'&&state.relationIndex!==null){event.preventDefault();void graphCommand('edge').catch(reportProjectError);}
+  if (event.key === '/' && !typing) { event.preventDefault(); setSidebarExpanded(true); document.querySelector<HTMLInputElement>('.project-directory-top input')?.focus(); }
   if (event.key === 'Escape') {
-    const menuOpen = app.classList.contains('sidebar-open');
-    app.classList.remove('sidebar-open');
-    get('menu-toggle').setAttribute('aria-expanded', 'false');
+    const menuOpen = sidebarExpanded && matchMedia('(max-width:1050px)').matches;
+    if (menuOpen) { setSidebarExpanded(false); get('menu-toggle').focus(); }
     if (!menuOpen && !typing && state.view === 'graph' && state.mode === 'network') leaveAnalysis();
   }
 });
@@ -471,6 +515,7 @@ try {
     get('graph-empty').hidden = count > 0;
     get('footer-count').textContent = `${count} / ${nodes.length} 个条目 · ${edges.length} 条关系`;
   }, selectRelation, { nodes, edges, groups }, clearOverviewSelection);
+  graph.configureEditing((edit,before,after)=>{void finishGraphGesture(edit,before,after).catch(reportProjectError);},!projectSnapshot?.historical);
   return graph;
 } catch (error) {
   get('graph-canvas').innerHTML = `<div class="webgl-error"><h2>当前浏览器未能启动三维画面</h2><p>可先在策划案或卡片库阅读，也可在支持 WebGL 的浏览器重试。</p><button class="secondary-button" data-view="document">打开策划案</button></div>`;
@@ -480,7 +525,8 @@ try {
 }
 
 /** 项目变化只更新读取模型；同拓扑正文编辑不重建画布或清空分析卡片。 */
-function applyProject(snapshot: ProjectSnapshot) {
+function applyProject(snapshot: ProjectSnapshot, projected=false) {
+  if(!projected&&editingSession)snapshot=editingSession.receive(snapshot);
   const sameProject = projectSnapshot?.project.id === snapshot.project.id;
   if (!sameProject || projectSnapshot?.revision !== snapshot.revision) readingTrail.length = 0;
   const relationId = state.relationIndex === null ? null : edges[state.relationIndex]?.id;
@@ -497,25 +543,28 @@ function applyProject(snapshot: ProjectSnapshot) {
   get('project-name').textContent = snapshot.project.name;
   if (isWebEdition) get('edition-state').textContent = snapshot.project.path.startsWith('/app/') ? '网页版 · 浏览器示例存储' : '网页版 · 已授权本机文件夹';
   get('breadcrumb-project').textContent = snapshot.project.name;
-  get('project-description').textContent = snapshot.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存';
+  get('project-description').textContent = snapshot.project.description || '项目设置';
+  document.querySelector('.project-art')!.innerHTML=projectIdentity(snapshot);
+  document.title=snapshot.project.name+' · 策问';
   get('refresh-project').textContent = snapshot.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件';
   get('system-count').textContent = String(groups.length);
-  document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${group.color}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
-  document.querySelector('.legend')!.innerHTML = groups.map(group => `<span><i style="background:${group.color}"></i>${escape(group.label)}</span>`).join('');
+  document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
+  document.querySelector('.legend')!.innerHTML = groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');
   get('analysis-focus').innerHTML = `<option value="">请选择条目</option>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}`;
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
   else if (snapshot.historical || !graph.updateText(snapshot)) graph.updateData(snapshot);
-  graph?.setActive(state.view === 'graph');
+  graph?.setActive(state.view === 'graph');graph?.setEditable(!snapshot.historical);
   if (nodes.length > 500) get('announcement').textContent = '大项目总览先展示系统和文档。选择系统、搜索或点击条目展开规则，也可在筛选中展开全部。';
   get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
   connectionError = '';
   updateSpaceNavigation(); sync(); refreshIcons();
   historyPanel.sync(snapshot);
-  if (!sameProject) { readingReady = false; void restoreReading().catch(reportProjectError); }
+  if (!sameProject) { readingReady = false; void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError); }
   (get('edit-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   (get('new-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   if (snapshot.historical) get('project-save-state').textContent = `${snapshot.revisionLabel} · 历史只读`;
+  renderEditingState();
 }
 
 /** 外部变化到来时只替换已读投影，正在编辑的原稿基准由工作面板独立保留。 */
@@ -525,11 +574,63 @@ async function refreshProject(verify = false) {
   const id = projectSnapshot.project.id, snapshot = await readProject(id, verify);
   if (projectSnapshot?.project.id !== id) return;
   if (snapshot.fingerprint !== projectSnapshot.fingerprint || snapshot.revision !== projectSnapshot.revision || snapshot.recoveryRequired !== projectSnapshot.recoveryRequired || JSON.stringify(snapshot.diagnostics) !== JSON.stringify(projectSnapshot.diagnostics)) applyProject(snapshot);
-  else get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
+  else if(!editingSession?.count)get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
 }
 function reportProjectError(error: unknown) { connectionError = error instanceof Error ? error.message : '本地项目操作未完成。'; get('project-save-state').textContent = connectionError; get('announcement').textContent = connectionError; renderInspector(); }
 
+editingSession=new EditingSession(snapshot=>applyProject(snapshot,true),message=>{get('project-save-state').textContent=message;get('announcement').textContent=message;renderEditingState();});
+if(projectSnapshot)editingSession.receive(projectSnapshot);
 const workbench = new ProjectWorkbench(() => projectSnapshot, applyProject);
+projectDirectory=new ProjectDirectory(get('project-directory-host'),{getSnapshot:()=>projectSnapshot!,getSelected:()=>state.selected,getQuery:()=>state.query,getGroup:()=>state.group,onSelect:id=>selectNode(id),onGroup:group=>{state.group=group||null;state.scopeIds=null;sync();},onQuery:query=>{state.query=query;state.scopeIds=null;sync();},onCommit:applyProject,onError:message=>reportProjectError(new Error(message))});
+if(projectSnapshot){document.querySelector('.project-art')!.innerHTML=projectIdentity(projectSnapshot);get('project-description').textContent=projectSnapshot.project.description||'项目设置';}
+/** 结构草稿和正文保存共享同一个事务入口；布局始终只进入项目的私有工作区。 */
+const editBar=document.createElement('div');editBar.className='graph-draft-actions';editBar.id='graph-draft-actions';editBar.innerHTML='<button data-graph-command="undo" title="Ctrl+Z">撤销</button><button data-graph-command="redo" title="Ctrl+Y">重做</button><button data-graph-command="save" title="Ctrl+S">保存结构版本</button><button data-graph-command="reset-layout">自动排布</button><label><input id="shake-links" type="checkbox"/>晃动断开普通关联</label><span id="structure-state"></span>';document.querySelector('.space-intro')!.after(editBar);
+let canvasClipboard:{project:string;ids:string[];cut:boolean}|undefined;
+function renderEditingState(){const bar=document.getElementById('graph-draft-actions');if(!bar)return;bar.hidden=!projectSnapshot||!!projectSnapshot.historical;for(const id of ['edit-document','new-document','project-center','project-switch','project-history']){const control=document.getElementById(id) as HTMLButtonElement|null;if(control)control.disabled=!!editingSession?.busy||(['edit-document','new-document'].includes(id)&&!!projectSnapshot?.historical);}const count=editingSession?.count??0;get('structure-state').textContent=count?`${count} 份文档待保存`:state.mode==='galaxy'?'拖动仅调整摆放':'实线归属 · 虚线关联';for(const action of ['undo','redo','save']){const b=bar.querySelector<HTMLButtonElement>(`[data-graph-command="${action}"]`)!;b.disabled=action==='undo'?!editingSession?.canUndo:action==='redo'?!editingSession?.canRedo:!count;}const shake=bar.querySelector('label')!;shake.hidden=state.mode==='galaxy';if(count&&!projectSnapshot?.historical)get('project-save-state').textContent=`${count} 份文档有结构草稿 · Ctrl+S 保存版本`;}
+async function finishGraphGesture(edit:GraphEdit|undefined,before:unknown,after:unknown){
+  const current=graph,projectId=projectSnapshot?.project.id;if(!current||!editingSession)return;
+  const restore=(value:unknown)=>{if(graph===current&&projectSnapshot?.project.id===projectId){current.restoreEditingLayout(value);sync();}};
+  try{
+    if(edit?.kind==='connect'){const type=await chooseRelationType();if(!type){restore(before);return;}edit={...edit,type};}
+    if(edit?.kind==='insert'){const answer=await chooseAction('在普通关联中插入此条目',[{id:'insert',label:'替换为经过此条目的两条关联'},{id:'layout',label:'只调整摆放，保留原关联'}]);if(!answer){restore(before);return;}if(answer==='layout')edit=undefined;}
+    if(graph!==current||projectSnapshot?.project.id!==projectId)return;
+    if(edit)editingSession.apply(edit,()=>restore(before),()=>restore(after));else editingSession.layout(()=>restore(before),()=>restore(after));sync();
+  }catch(error){restore(before);throw error;}
+}
+async function graphCommand(command:string,id=state.selected){
+  if(!projectSnapshot||projectSnapshot.historical)return;let edit:GraphEdit|undefined;
+  const selected=id?[id]:graph?.selectedIds()??[],ids=id&&id!==state.selected?selected:graph?.selectedIds().length?graph.selectedIds():selected;
+  if(command==='selectAll'){graph?.selectAllNodes();return;}if(command==='search'){setSidebarExpanded(true);document.querySelector<HTMLInputElement>('.project-directory-top input')?.focus();return;}
+  if(command==='save'){try{await editingSession?.save();}finally{renderEditingState();}return;}if(command==='undo'){editingSession?.undo();sync();return;}if(command==='redo'){editingSession?.redo();sync();return;}
+  if(command==='reset-layout'){const before=graph?.exportLayout();graph?.resetPositions();const after=graph?.exportLayout();await finishGraphGesture(undefined,before,after);return;}
+  if(command==='classify')edit=await classifyDocuments(projectSnapshot,ids.filter(value=>{const node=nodeById.get(value);return node?.kind==='rule'&&!!node.anchor||node?.kind==='document'&&node.documentType!=='gdd';}));
+  if(command==='connect'&&id)edit=await connectDocuments(projectSnapshot,id);
+  if(command==='edge'&&state.relationIndex!==null)edit=await editEdge(projectSnapshot,edges[state.relationIndex].id);
+  if(command==='copy'||command==='cut'){const documents=[...new Set(ids.map(value=>nodeById.get(value)).filter(n=>n?.kind!=='system'&&n?.documentType!=='gdd').map(n=>n!.documentId))];if(!documents.length)return;canvasClipboard={project:projectSnapshot.project.id,ids:documents,cut:command==='cut'};await navigator.clipboard.writeText(documents.map(value=>nodeById.get(value)?.title??'').join('\n')).catch(()=>{});get('announcement').textContent=command==='cut'?'已剪切条目；选中目标分类后粘贴即可移动归属。':'已复制条目；在当前项目粘贴可创建独立副本。';return;}
+  if(command==='paste'&&canvasClipboard){if(canvasClipboard.project!==projectSnapshot.project.id)throw new Error('文档复制暂限当前项目，跨项目请使用导出与导入。');const group=nodeById.get(state.selected??'')?.group??state.group??'system-unassigned';edit=canvasClipboard.cut?{kind:'classify',ids:canvasClipboard.ids,group}:{kind:'clone',ids:canvasClipboard.ids,group};}
+  if(edit)editingSession?.apply(edit);
+}
+document.addEventListener('click',event=>{const b=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-command]');if(b)void graphCommand(b.dataset.graphCommand!).catch(reportProjectError);});
+get('shake-links').addEventListener('change',event=>graph?.setShake((event.target as HTMLInputElement).checked));
+window.addEventListener('cewen:editing-command',event=>{if(event.defaultPrevented||document.querySelector('dialog[open]')||document.activeElement?.matches('input,textarea,select,[contenteditable=true]'))return;const command=(event as CustomEvent<string>).detail;if(['save','undo','redo','cut','copy','paste','selectAll'].includes(command)){event.preventDefault();void graphCommand(command).catch(reportProjectError);}});
+/** 上下文菜单在当前画布旁出现；所有操作回到同一编辑与保存流程。 */
+const graphMenu=document.createElement('div');graphMenu.className='star-context-menu';graphMenu.hidden=true;graphMenu.setAttribute('aria-label','星图快捷操作');document.body.append(graphMenu);
+const closeGraphMenu=()=>{graphMenu.hidden=true;graph?.setContextMenuOpen(false);};
+function openGraphMenu(detail:{id?:string;x:number;y:number}){
+  if(!projectSnapshot)return;const node=detail.id?nodeById.get(detail.id):undefined;
+  const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['connect','添加手工关联'],['pin','固定 / 解除固定位置'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
+  graphMenu.innerHTML=`<small>${escape(node?.title??'在星图中开始')}</small>${actions.map(([action,label])=>`<button data-star-action="${action}">${label}</button>`).join('')}`;graphMenu.hidden=false;
+  graphMenu.style.left=`${Math.max(8,Math.min(detail.x,innerWidth-graphMenu.offsetWidth-8))}px`;graphMenu.style.top=`${Math.max(8,Math.min(detail.y,innerHeight-graphMenu.offsetHeight-8))}px`;graph?.setContextMenuOpen(true);
+  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'');break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
+  graphMenu.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
+}
+window.addEventListener('cewen:graph-context',event=>openGraphMenu((event as CustomEvent).detail));
+document.addEventListener('pointerdown',event=>{if(!graphMenu.contains(event.target as Node))closeGraphMenu();});
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closeGraphMenu();});
+window.addEventListener('resize',closeGraphMenu);
+const graphCreate=document.createElement('button');graphCreate.className='secondary-button graph-create-button';graphCreate.textContent='＋ 新建';get('graph-canvas').parentElement!.append(graphCreate);graphCreate.addEventListener('click',()=>{const box=graphCreate.getBoundingClientRect();openGraphMenu({x:box.left,y:box.top-190});});
+const collaborationButton=document.createElement('button');collaborationButton.className='secondary-button';collaborationButton.textContent='与 LLM 协作';document.querySelector('.project-toolbar')!.append(collaborationButton);collaborationButton.addEventListener('click',()=>void openCollaboration(state.selected?'inquiry':'start',projectSnapshot,state.selected?[nodeById.get(state.selected)!.documentId].filter(Boolean):[]));
+window.addEventListener('cewen-theme-change',()=>{renderDirectory();renderInspector();renderCards();document.querySelectorAll<HTMLElement>('.system-list [data-group]').forEach(button=>{const group=groups.find(group=>group.id===button.dataset.group),dot=button.querySelector<HTMLElement>('.group-dot');if(group&&dot)dot.style.setProperty('--group-color',categoryColor(group.color));});document.querySelector('.legend')!.innerHTML=groups.map(group=>`<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');});
 const historyPanel = new HistoryPanel(() => projectSnapshot, applyProject);
 const workspacePanel = new WorkspacePanel(() => projectSnapshot, selectNode, item => workbench.publishAnnotation(item), (ids, title) => { state.scopeIds = ids; state.selected = null; state.relationIndex = null; sync(); get('announcement').textContent = `正在查看工作分组：${title}。清除筛选可返回全部。`; }, () => ({ ...state }), restoreReadingState, applyProject);
 /** 阅读状态与稳定坐标从工作区恢复，不介入公开文档历史。 */
@@ -556,7 +657,7 @@ async function restoreReading() {
 const collaborationPanel = new CollaborationPanel(() => projectSnapshot, applyProject);
 graph = mountGraph();
 sync();
-void restoreReading().catch(reportProjectError);
+void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
 refreshIcons();
 if (!projectSnapshot) void workbench.projects().catch(reportProjectError);
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
