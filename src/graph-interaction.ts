@@ -8,6 +8,7 @@ export interface GraphSurface {
   canvas:HTMLElement;
   camera:THREE.Camera;
   mode:()=>string;
+  direction:()=> 'vertical'|'horizontal';
   selected:()=>string|null;
   edge:()=>KnowledgeEdge|undefined;
   nodes:()=>{data:KnowledgeNode;point:THREE.Vector3;label:HTMLElement;visible:boolean;pinned?:boolean}[];
@@ -128,7 +129,11 @@ export class GraphInteraction {
     if(drag.mode==='layers'){
       // 分层模式允许整组自由平移，但不能把分类或内容拖到总纲上方。
       const ceiling=[...drag.moving].map(id=>{const item=this.surface.nodes().find(n=>n.data.id===id)?.data,start=drag.positions.get(id);return item&&start?(item.kind==='system'?-105:-210)-start.y:Infinity;});
-      delta.y=Math.min(delta.y,...ceiling);
+      if(this.surface.direction()==='vertical')delta.y=Math.min(delta.y,...ceiling);
+      else {
+        const floor=[...drag.moving].map(id=>{const item=this.surface.nodes().find(n=>n.data.id===id)?.data,start=drag.positions.get(id);return item&&start?-(item.kind==='system'?-105:-210)-start.x:-Infinity;});
+        delta.x=Math.max(delta.x,...floor);
+      }
     }
     // 主拖节点直接取手势位置；多选共用一个位移，保证所选形状不变。
     drag.delta.copy(delta);
@@ -203,7 +208,7 @@ export class GraphInteraction {
       if(drag.mode!=='galaxy')offset.z=0;
       offset.clampLength(0,95);
       follower.goal.copy(start).add(offset);
-      if(drag.mode==='layers')follower.goal.y=Math.min(follower.goal.y,-210);
+      if(drag.mode==='layers'){if(this.surface.direction()==='vertical')follower.goal.y=Math.min(follower.goal.y,-210);else follower.goal.x=Math.max(follower.goal.x,210);}
     }
   }
   /** 固定时间上限防止回到窗口时积累巨大步长，速度和位移都有限幅。 */
@@ -219,7 +224,7 @@ export class GraphInteraction {
       follower.position.addScaledVector(follower.velocity,dt);
       const start=drag.positions.get(id)!;
       follower.position.sub(start).clampLength(0,100).add(start);
-      if(drag.mode==='layers')follower.position.y=Math.min(follower.position.y,-210);
+      if(drag.mode==='layers'){if(this.surface.direction()==='vertical')follower.position.y=Math.min(follower.position.y,-210);else follower.position.x=Math.max(follower.position.x,210);}
       energy=Math.max(energy,follower.position.distanceTo(follower.goal),follower.velocity.length()*.02);
       this.surface.move(id,follower.position);
     }

@@ -6,6 +6,8 @@ import './shell.css';
 import './authoring.css';
 import './creation-editing.css';
 import './workspace-060.css';
+import './workspace-070.css';
+import { groupAncestors } from '../shared/project-hierarchy';
 import { setNotebookTexture } from './notebook-style';
 import { openProjectDetails, projectIdentity } from './project-details';
 import { openContentOverview } from './content-overview';
@@ -18,7 +20,7 @@ import { categoryColor } from './category-color';
 import { openCollaboration } from './prompt-panel';
 import { initializeTheme, mountDesktopChrome } from './theme';
 import { createIcons, Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft } from 'lucide';
-import { KnowledgeGraph, type GraphMode } from './graph';
+import { KnowledgeGraph, type GraphMode, type GraphDirection } from './graph';
 import { nodes, edges, groups, types, setKnowledgeData, type KnowledgeNode, type ProjectSnapshot } from './data';
 import { edgeSentence } from './analysis';
 import { projectAction, connectProjects, readProject } from './project-client';
@@ -48,7 +50,7 @@ type OverviewMode = Exclude<GraphMode, 'network'>;
 type AnalysisOrigin = { mode: OverviewMode; selected: string | null; group: string | null; query: string; directOnly: boolean };
 let analysisOrigin: AnalysisOrigin | null = null;
 let overviewMode: OverviewMode = 'galaxy';
-const state = { view: 'graph' as View, mode: 'galaxy' as GraphMode, selected: null as string | null, relationIndex: null as number | null, group: null as string | null, query: '', directOnly: false, labelsAll: false, paused: false, scopeIds: null as string[] | null, includeArchived: false, detailedGraph: false };
+const state = { view: 'graph' as View, mode: 'galaxy' as GraphMode, direction: 'vertical' as GraphDirection, selected: null as string | null, relationIndex: null as number | null, group: null as string | null, query: '', directOnly: false, labelsAll: false, paused: false, scopeIds: null as string[] | null, includeArchived: false, detailedGraph: false };
 const nodeById = new Map(nodes.map(node => [node.id, node]));
 const app = document.getElementById('app')!;
 const closeReadingPreview = installReadingPreviews(() => projectSnapshot);
@@ -61,7 +63,7 @@ window.addEventListener('cewen:read-document', event => {
 });
 /** 阅读回退只保存当前阅读位置，不写入策划正文或版本。 */
 const readingTrail: { selected: string | null; scroll: number; group: string | null; scopeIds: string[] | null; query: string }[] = [];
-const names = { galaxy: '星图总览', network: '关系分析', layers: '系统分层' };
+const names = { galaxy: '星图总览', network: '脑图聚焦', layers: '系统分层', mindmap: '设计脑图' };
 const kindNames = { system: '系统', document: '专项文档', rule: '设计规则' };
 const statusNames = { confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' };
 const icons = { Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft };
@@ -71,7 +73,7 @@ function escape(text: string) { return text.replace(/[&<>"']/g, value => ({ '&':
 function icon(name: string) { return `<i data-lucide="${name}" aria-hidden="true"></i>`; }
 function refreshIcons() { createIcons({ icons, attrs: { 'stroke-width': 1.65 } }); }
 function sourceName(source: string) { return source.split('/').at(-1) || source; }
-function groupOf(node: KnowledgeNode) { return groups.find(group => group.id === node.group)!; }
+function groupOf(node: KnowledgeNode) { return groups.find(group => group.id === node.group) ?? {id:'',label:node.documentType==='gdd'?'游戏总纲':'未归组',color:'#CFB378'}; }
 function status(node: KnowledgeNode) { return `<span class="status ${node.status}">${statusNames[node.status]}</span>`; }
 
 /** 固定的工作台框架只创建一次，切换模式保留同一个 WebGL 画布。 */
@@ -112,11 +114,13 @@ app.innerHTML = `
           <div class="mode-switch" id="overview-switch" role="group" aria-label="总览布局">
             <button data-mode="galaxy" aria-pressed="true" class="active">${icon('orbit')}星图总览</button>
             <button data-mode="layers" aria-pressed="false">${icon('layers')}系统分层</button>
+            <button data-mode="mindmap" aria-pressed="false">${icon('network')}设计脑图</button>
           </div>
+          <div class="layout-direction" id="layout-direction" role="group" aria-label="平面排版方向" hidden><button data-direction="vertical" aria-pressed="true" title="从上到下展开">↓ 竖向</button><button data-direction="horizontal" aria-pressed="false" title="从左向右展开">→ 横向</button></div>
           <span class="analysis-page-note" id="analysis-page-note" hidden>从一个条目，读懂它的直接联系</span>
         </header>
         <div class="space-intro" id="space-intro">在系统之间，发现设计的联系</div>
-        <div class="analysis-toolbar" id="analysis-toolbar" hidden><label>分析焦点<select id="analysis-focus" aria-label="选择关系分析焦点"><option value="">请选择条目</option>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}</select></label><span>建议复核 ≠ 必须修改 · 点击连线查看依据</span></div>
+        <div class="analysis-toolbar" id="analysis-toolbar" hidden><label>分析焦点<select id="analysis-focus" aria-label="选择关系分析焦点"><option value="">请选择条目</option><optgroup label="游戏总纲">${nodes.filter(node=>!node.group).map(node=>`<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}</select></label><span>建议复核 ≠ 必须修改 · 点击连线查看依据</span></div>
         <div id="graph-canvas" class="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
         <div class="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
@@ -166,22 +170,24 @@ function filteredNodes() {
   const related = new Set([state.selected]);
   const filterRelated = state.directOnly && state.mode !== 'network';
   if (filterRelated && state.selected) edges.forEach(edge => { if (edge.source === state.selected) related.add(edge.target); if (edge.target === state.selected) related.add(edge.source); });
-  return nodes.filter(node => (state.includeArchived || node.status !== 'archived') && (!state.scopeIds || state.scopeIds.includes(node.id)) && (!state.group || node.group === state.group) && (!query || `${node.id} ${node.title} ${node.summary} ${node.content.join(' ')}`.toLowerCase().includes(query)) && (!filterRelated || !state.selected || related.has(node.id)));
+  return nodes.filter(node => (state.includeArchived || node.status !== 'archived') && (!state.scopeIds || state.scopeIds.includes(node.id)) && (!state.group || node.group === state.group || groupAncestors({groups},node.group).some(group=>group.id===state.group)) && (!query || `${node.id} ${node.title} ${node.summary} ${node.content.join(' ')}`.toLowerCase().includes(query)) && (!filterRelated || !state.selected || related.has(node.id)));
 }
 
 /** 关系分析始终围绕显式焦点，搜索只筛选候选目录，不悄悄删掉分析依据。 */
 function renderAnalysisControls() {
   const analyzing = state.mode === 'network';
-  get('overview-switch').hidden = analyzing;
+  get('overview-switch').hidden = false;
   get('back-to-overview').hidden = !analyzing;
   get('back-to-overview').querySelector('span')!.textContent = `返回${names[analysisOrigin?.mode ?? overviewMode]}`;
   get('analysis-page-note').hidden = !analyzing;
   get('space-eyebrow').hidden = analyzing;
-  get('view-title').textContent = state.view === 'graph' ? (analyzing ? '关系分析' : '知识空间') : state.view === 'document' ? '策划案' : '卡片库';
+  get('view-title').textContent = state.view === 'graph' ? (analyzing ? '脑图 · 聚焦' : '知识空间') : state.view === 'document' ? '策划案' : '卡片库';
   get('analysis-toolbar').hidden = !analyzing;
   (get('analysis-focus') as HTMLSelectElement).value = state.selected ?? '';
   (get('search') as HTMLInputElement).placeholder = analyzing ? '搜索目录，选择分析条目…' : '搜索标题、规则…';
-  get('space-title').textContent = analyzing ? '关系分析' : state.mode === 'layers' ? '系统分层' : '设计星图';
+  get('space-title').textContent = analyzing ? '脑图 · 聚焦' : state.mode === 'galaxy' ? '设计星图' : names[state.mode];
+  get('layout-direction').hidden = state.mode === 'galaxy';
+  document.querySelectorAll<HTMLButtonElement>('[data-direction]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.direction===state.direction)));
   get('toggle-labels').hidden = analyzing;
   get('toggle-motion').hidden = analyzing;
   get('zoom-in').hidden = analyzing;
@@ -343,10 +349,13 @@ function setView(view: View, deferGraph = false) {
   sync(!deferGraph);
 }
 
-/** 总览只提供星图和分层两种布局；关系分析由独立入口进入。 */
+/** 三种总览共享场景；脑图的聚焦模式复用原有关系分析动画。 */
 function setGraphMode(mode: OverviewMode) {
+  if (state.mode === 'network') graph?.captureNavigationFrame();
+  analysisOrigin = null;
   overviewMode = mode;
   state.mode = mode;
+  if (mode === 'mindmap') state.selected = null;
   state.relationIndex = null;
   updateSpaceNavigation();
   sync(false);
@@ -356,12 +365,12 @@ function setGraphMode(mode: OverviewMode) {
   get('announcement').textContent = `已切换到${names[mode]}`;
 }
 
-/** 两层页面共用标题区，但次级页面使用返回导航，不混入总览布局开关。 */
+/** 脑图聚焦仍保留三种布局入口，并用返回按钮恢复进入前的总览。 */
 function updateSpaceNavigation() {
   const mode = state.mode;
-  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(item => { item.classList.toggle('active', item.dataset.mode === mode); item.setAttribute('aria-pressed', String(item.dataset.mode === mode)); });
+  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(item => { const active=item.dataset.mode===(mode==='network'?'mindmap':mode);item.classList.toggle('active',active); item.setAttribute('aria-pressed',String(active)); });
   get('gesture').textContent = mode === 'galaxy' ? '空白旋转 · Shift 框选 · 滚轮缩放' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '空白拖动框选 · 右键平移 · 滚轮缩放';
-  get('space-intro').textContent = { galaxy: '在系统之间，发现设计的联系', network: '从规则出发，核对前提、约束与关联依据', layers: '按系统归位，从方向逐层阅读到规则' }[mode];
+  get('space-intro').textContent = { galaxy: '在系统之间，发现设计的联系', network: '当前节点的直接联系 · 点击相邻卡片继续追踪', layers: '按系统归位，从总纲逐层阅读到规则', mindmap:'从总纲展开设计脉络 · 点击卡片聚焦关系' }[mode];
 }
 
 /** 进入分析前保存总览上下文；在分析中继续追踪邻居不会覆盖原来的返回位置。 */
@@ -437,6 +446,7 @@ app.addEventListener('click', event => {
   }
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
   if (!button) return;
+  if (button.dataset.direction) { state.direction=button.dataset.direction as GraphDirection;graph?.setDirection(state.direction);sync(false);return; }
   if (button.dataset.edge !== undefined) { selectRelation(Number(button.dataset.edge)); return; }
   if (button.dataset.analyze) { enterAnalysis(button.dataset.analyze); return; }
   if (button.dataset.node) { selectNode(button.dataset.node); return; }
@@ -510,11 +520,12 @@ document.addEventListener('keydown', event => {
 /** 显卡不可用时仍保留可阅读的策划和卡片，明确提示而不是留下一块空白。 */
 function mountGraph(): KnowledgeGraph | undefined {
 try {
-  graph = new KnowledgeGraph(get('graph-canvas'), selectNode, count => {
+  graph = new KnowledgeGraph(get('graph-canvas'), id=>{if(state.mode==='mindmap')enterAnalysis(id);else selectNode(id);}, count => {
     get('space-count').textContent = `${count} 个条目`;
     get('graph-empty').hidden = count > 0;
     get('footer-count').textContent = `${count} / ${nodes.length} 个条目 · ${edges.length} 条关系`;
-  }, selectRelation, { nodes, edges, groups }, clearOverviewSelection);
+  }, selectRelation, { nodes, edges, groups,rootDocumentId:projectSnapshot?.rootDocumentId }, clearOverviewSelection);
+  graph.setDirection(state.direction);
   graph.configureEditing((edit,before,after)=>{void finishGraphGesture(edit,before,after).catch(reportProjectError);},!projectSnapshot?.historical);
   return graph;
 } catch (error) {
@@ -550,7 +561,7 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   get('system-count').textContent = String(groups.length);
   document.querySelector('.system-list')!.innerHTML = `<button data-group="" class="group-button"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}`;
   document.querySelector('.legend')!.innerHTML = groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');
-  get('analysis-focus').innerHTML = `<option value="">请选择条目</option>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}`;
+  get('analysis-focus').innerHTML = `<option value="">请选择条目</option><optgroup label="游戏总纲">${nodes.filter(node=>!node.group).map(node=>`<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}`;
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
   else if (snapshot.historical || !graph.updateText(snapshot)) graph.updateData(snapshot);
@@ -621,7 +632,7 @@ function openGraphMenu(detail:{id?:string;x:number;y:number}){
   const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['connect','添加手工关联'],['pin','固定 / 解除固定位置'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
   graphMenu.innerHTML=`<small>${escape(node?.title??'在星图中开始')}</small>${actions.map(([action,label])=>`<button data-star-action="${action}">${label}</button>`).join('')}`;graphMenu.hidden=false;
   graphMenu.style.left=`${Math.max(8,Math.min(detail.x,innerWidth-graphMenu.offsetWidth-8))}px`;graphMenu.style.top=`${Math.max(8,Math.min(detail.y,innerHeight-graphMenu.offsetHeight-8))}px`;graph?.setContextMenuOpen(true);
-  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'');break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
+  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'','dd',node?.kind==='document'&&node.documentType==='dd'?node.id:undefined);break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
   graphMenu.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
 }
 window.addEventListener('cewen:graph-context',event=>openGraphMenu((event as CustomEvent).detail));
@@ -643,7 +654,8 @@ function restoreReadingState(value: unknown) {
   get('toggle-labels').setAttribute('aria-pressed', String(state.labelsAll));
   get('toggle-motion').setAttribute('aria-pressed', String(state.paused));
   if (saved.view && ['graph','document','cards'].includes(saved.view)) setView(saved.view);
-  if (saved.mode === 'galaxy' || saved.mode === 'layers') setGraphMode(saved.mode);
+  state.direction = saved.direction === 'horizontal' ? 'horizontal' : 'vertical';graph?.setDirection(state.direction);
+  if (saved.mode === 'galaxy' || saved.mode === 'layers' || saved.mode === 'mindmap') setGraphMode(saved.mode);
   (get('search') as HTMLInputElement).value = state.query; sync();
 }
 async function restoreReading() {

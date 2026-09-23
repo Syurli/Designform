@@ -1,4 +1,6 @@
 import { DocumentCanvas } from './document-canvas';
+import { ProjectDirectory } from './project-directory';
+import { DOCUMENT_DRAG_TYPE, readDocumentDrag, type DocumentDrag } from './document-drag';
 import { setNotebookTexture } from './notebook-style';
 import { AnnotationLayer } from './annotation-layer';
 import { ensureBlockIds } from '../shared/document-blocks';
@@ -41,6 +43,7 @@ export class ProjectWorkbench {
   private saving = false;
   private sourceMode = false;
   private rich?: RichWriting;
+  private referenceDirectory?:ProjectDirectory;
   private richGeneration = 0;
   private canvas?:DocumentCanvas;
   private ink?:AnnotationLayer;
@@ -78,7 +81,7 @@ export class ProjectWorkbench {
     this.dialog.addEventListener('change', event => {
       const input = event.target as HTMLSelectElement;
       if (input.id === 'document-picker') void this.edit(input.value).catch(error => this.error(error));
-      if (input.id === 'writing-system' && this.draft) { this.draft.text = setMetadata(this.draft.text,{ system: input.value }); this.dirty = true; void this.flushDraft().catch(error=>this.error(error)); }
+      if (input.id === 'writing-system' && this.draft) { this.updateDraftCategory(input.value); this.dirty = true; void this.flushDraft().catch(error=>this.error(error)); }
       if (input.id === 'writing-outline' && this.draft && input.value) {
         const editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
         if (writingParts(this.draft.text).body.trim()) { this.message('正文已有内容，未覆盖。可以用标题工具继续添加章节。'); input.value=''; return; }
@@ -102,6 +105,7 @@ export class ProjectWorkbench {
   }
 
   private shell(title: string, description: string, content: string, wide = false) {
+    this.referenceDirectory?.dispose();this.referenceDirectory=undefined;this.dialog.classList.remove('references-open');
     this.disposeDocumentTools();this.canvasMode=false;this.inkMode=false;
     this.rich?.dispose(); this.rich=undefined; this.richGeneration++;
     this.dialog.classList.remove('writing-dialog', 'library-dialog', 'creation-dialog', 'reading-preview');
@@ -116,7 +120,7 @@ export class ProjectWorkbench {
     if (box) { box.hidden = false; box.classList.toggle('error', error); box.textContent = message; }
   }
   private error(error: unknown) { this.message(error instanceof Error ? error.message : '操作尚未完成，内容已保留。', true); }
-  private async close() { if(this.saving)return;this.flushRich();await this.flushDraft();await this.personalWrite;this.disposeDocumentTools();this.rich?.dispose();this.rich=undefined;this.richGeneration++;this.draft=null; this.dialog.close(); }
+  private async close() { if(this.saving)return;this.flushRich();await this.flushDraft();await this.personalWrite;this.disposeDocumentTools();this.rich?.dispose();this.rich=undefined;this.richGeneration++;this.draft=null;this.referenceDirectory?.dispose();this.referenceDirectory=undefined; this.dialog.close(); }
 
   /** 项目库只负责找到与打开项目；创作向导有独立页面和返回路径。 */
   async projects() {
@@ -172,12 +176,13 @@ export class ProjectWorkbench {
         <details class="writing-menu writing-menu-end"><summary>更多 ···</summary><div><button data-action="document-settings">文档属性与别名</button><button data-action="relationships">关系与引用</button><button data-action="structure">章节与路径</button><button data-action="categories">管理分类</button><hr/><button data-action="rewrite-selection">与 LLM 讨论选中文字</button><button data-action="new-document">新建文档</button><button data-action="drafts">未完成草稿</button><label>切换文档<select id="document-picker">${this.draft!.baseHash===null?'<option value="">未保存的新稿</option>':''}${snapshot.documents.map(item=>`<option value="${html(item.id)}" ${item.path===document.path?'selected':''}>${html(item.title)}</option>`).join('')}</select></label><label>版本备注<input id="commit-reason" placeholder="默认使用文档标题" maxlength="200"/></label></div></details>
       </div>
       ${recovered ? `<div class="draft-recovery">有一份未保存的草稿 · ${html(new Date(recovered.updatedAt).toLocaleString())}<button class="secondary-button" data-action="recover-draft">恢复草稿</button></div>` : ''}
-      <div id="ink-tools"></div><div class="writing-content"><div class="writing-paper"><input id="writing-title" aria-label="文档标题" maxlength="160" placeholder="给这份设计起个名字" value="${html(parts.title)}"/><div class="writing-properties"><span>${metadata.type==='gdd'?'游戏总纲':metadata.type==='question'?'设计问题':'专项设计 DD'}</span><span class="writing-meta-dot">·</span><select id="writing-system" aria-label="设计分类"><option value="">暂不分类</option>${groups.map(group=>`<option value="${group.id}" ${metadata.system===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select><span class="writing-meta-dot">·</span><button data-action="document-settings">${html(({draft:'草稿',confirmed:'已确认',question:'待确认',archived:'已归档'} as Record<string,string>)[String(metadata.status)]??'草稿')}</button></div>
+      <div id="ink-tools"></div><div class="writing-content"><aside class="writing-reference-panel"><header>文档目录<button data-action="references" aria-label="收起引用目录">×</button></header><p>拖入正文，或点击标题插入引用。</p><div class="writing-reference-host"></div></aside><div class="writing-paper"><input id="writing-title" aria-label="文档标题" maxlength="160" placeholder="给这份设计起个名字" value="${html(parts.title)}"/><div class="writing-properties"><span>${metadata.type==='gdd'?'游戏总纲':metadata.type==='question'?'设计问题':'专项设计 DD'}</span><span class="writing-meta-dot">·</span><select id="writing-system" aria-label="设计分类"><option value="">暂不分类</option>${groups.map(group=>`<option value="${group.id}" ${metadata.system===group.id?'selected':''}>${html(group.label)}</option>`).join('')}</select><span class="writing-meta-dot">·</span><button data-action="document-settings">${html(({draft:'草稿',confirmed:'已确认',question:'待确认',archived:'已归档'} as Record<string,string>)[String(metadata.status)]??'草稿')}</button></div>
       <div id="document-canvas" hidden></div><div id="rich-writing" class="rich-writing"></div><textarea id="document-editor" class="markdown-editor body-editor" aria-label="策划正文" placeholder="从你想写的第一句话开始……" spellcheck="false">${html(parts.body)}</textarea><div id="editor-preview" class="markdown-preview editor-preview" hidden></div></div>
       <aside class="writing-inspector"><button class="writing-inspector-close" data-action="close-inspector" aria-label="收起文档面板">×</button><div id="conflict-details"></div></aside></div><footer class="writing-statusbar"><span id="writing-statistics"></span><label>纸张 <select id="paper-texture" aria-label="纸张底纹"><option value="grid">方格</option><option value="lines">横线</option><option value="dots">点阵</option><option value="plain">素纸</option></select></label><span>当前草稿 · 保存后进入版本</span></footer>`, true);
     this.dialog.classList.add('writing-dialog');
     // 标题栏承担文档身份与保存，正文工具收在紧邻纸张的一条工具栏。
-    this.dialog.querySelector('.project-dialog-header')!.innerHTML=`<div class="writing-breadcrumb"><button data-action="close" aria-label="返回知识空间">←</button><span>${html(snapshot.project.name)}</span><span>/</span><strong class="writing-document-name">${html(parts.title || '未命名文档')}</strong></div><div class="writing-header-actions"><button class="secondary-button" data-action="collaborate">与 LLM 完善</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>`;
+    this.dialog.querySelector('.project-dialog-header')!.innerHTML=`<div class="writing-breadcrumb"><button data-action="close" aria-label="返回知识空间">←</button><span>${html(snapshot.project.name)}</span><span>/</span><strong class="writing-document-name">${html(parts.title || '未命名文档')}</strong></div><div class="writing-header-actions"><button class="secondary-button" data-action="references" aria-pressed="false">文档目录</button><button class="secondary-button" data-action="collaborate">与 LLM 完善</button><button class="primary-button" data-action="save-document">保存版本 <kbd>Ctrl S</kbd></button></div>`;
+    if(metadata.type==='gdd'){const category=this.dialog.querySelector<HTMLSelectElement>('#writing-system')!;category.disabled=true;category.hidden=true;category.previousElementSibling?.remove();}
     this.sourceMode=false;void this.mountRich();this.updateStatistics();
     const texture=this.dialog.querySelector<HTMLSelectElement>('#paper-texture')!;texture.value=setNotebookTexture();texture.addEventListener('change',()=>setNotebookTexture(texture.value));
     // 工具菜单互斥，选择后收起，不长期盖住写作位置。
@@ -189,6 +194,10 @@ export class ProjectWorkbench {
       this.dialog.querySelector('.draft-recovery')?.remove();
       void this.flushDraft().catch(error => this.error(error));
     });
+    for(const target of this.dialog.querySelectorAll<HTMLElement>('#document-editor,#document-canvas')){
+      target.addEventListener('dragover',event=>{if(event.dataTransfer?.types.includes(DOCUMENT_DRAG_TYPE)){event.preventDefault();event.dataTransfer.dropEffect='copy';if(target.id==='document-editor')this.message('Markdown 模式会在当前文本光标处插入引用。');}});
+      target.addEventListener('drop',event=>{if(!event.dataTransfer?.types.includes(DOCUMENT_DRAG_TYPE))return;event.preventDefault();event.stopPropagation();const item=readDocumentDrag(event.dataTransfer);if(item)this.insertReference(item);});
+    }
     this.dialog.querySelector('#asset-input')?.addEventListener('change', event => { void this.attachImage((event.target as HTMLInputElement).files?.[0]).catch(error => this.error(error)); });
   }
 
@@ -247,7 +256,7 @@ export class ProjectWorkbench {
       const asset=this.draft?.assets?.find(item=>item.path===target.path);
       if(asset){const ext=asset.path.split('.').at(-1);return `data:image/${ext==='jpg'?'jpeg':ext};base64,${asset.text}`;}
       return target.path.startsWith('docs/assets/')?projectAssetUrl(this.getSnapshot()!,target.path):'';
-    },()=>{void this.insertLink().catch(error=>this.error(error));},{getDialoguePositions:id=>this.layout().dialogues?.[id],onDialoguePositions:(id,positions)=>{const layout=this.layout();layout.dialogues={...layout.dialogues,[id]:positions};this.changeCompanion(layoutCompanionPath(layout.documentId),layout);},storeImage:file=>this.storePaletteImage(file),resolveImage:async path=>this.resolveAsset(path)});
+    },()=>{void this.insertLink().catch(error=>this.error(error));},{getDialoguePositions:id=>this.layout().dialogues?.[id],onDialoguePositions:(id,positions)=>{const layout=this.layout();layout.dialogues={...layout.dialogues,[id]:positions};this.changeCompanion(layoutCompanionPath(layout.documentId),layout);},storeImage:file=>this.storePaletteImage(file),resolveImage:async path=>this.resolveAsset(path),resolveDocumentDrop:item=>this.resolveReference(item)});
     this.rich=rich;
     try{await rich.create();if(generation!==this.richGeneration)rich.dispose();else {
       const current=this.getSnapshot()!;
@@ -265,12 +274,53 @@ export class ProjectWorkbench {
     if(this.rich&&!this.sourceMode)this.rich.link(url,label);else{editor.setRangeText(`[${label.replace(/[\[\]]/g,'')}](${url})`,editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));editor.focus();}
   }
 
+  /** 改分类会脱离旧父 DD，根总纲始终没有分类。 */
+  private updateDraftCategory(system:string){
+    if(!this.draft||readHeader(this.draft.text).metadata.type==='gdd')return;
+    this.draft.text=setMetadata(this.draft.text,{system:system==='system-unassigned'?'':system,parent:undefined});
+  }
+  /** 后代归属与正文在同一版本提交，避免目录与星图看到不同树。 */
+  private descendantCategoryChanges(snapshot:ProjectSnapshot,text:string):FileChange[]{
+    const metadata=readHeader(text).metadata,previous=readHeader(this.draft?.baseText??'').metadata;
+    if(metadata.type==='gdd'||metadata.system===previous.system)return [];
+    const descendants=new Set([String(metadata.id)]);let changed=true;
+    while(changed){changed=false;for(const doc of snapshot.documents)if(doc.parent&&descendants.has(doc.parent)&&!descendants.has(doc.id)){descendants.add(doc.id);changed=true;}}
+    return snapshot.documents.filter(doc=>doc.id!==metadata.id&&descendants.has(doc.id)).map(doc=>({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{system:String(metadata.system??'')})}));
+  }
+  /** 写作时的引用目录位于对话框内部，让来源与插入位置可以同时操作。 */
+  private toggleReferences(){
+    if(!this.draft)return;this.rich?.rememberSelection();const open=this.dialog.classList.toggle('references-open');
+    this.dialog.querySelector('[data-action="references"]')?.setAttribute('aria-pressed',String(open));
+    if(open&&!this.referenceDirectory)this.referenceDirectory=new ProjectDirectory(this.dialog.querySelector('.writing-reference-host')!,{
+      getSnapshot:()=>this.getSnapshot()!,linkOnly:true,onGroup:()=>{},onCommit:()=>{},onError:message=>this.message(message,true),
+      onSelect:id=>{const snapshot=this.getSnapshot()!,node=snapshot.nodes.find(item=>item.id===id),doc=snapshot.documents.find(item=>item.id===(node?.documentId??id));if(doc)this.insertReference({projectId:snapshot.project.id,documentId:doc.id,path:doc.path,title:node?.title??doc.title,anchor:node?.anchor});},
+    });
+  }
+  /** 使用当前项目真实身份生成相对链接，绝不信任拖放文本里的路径。 */
+  private resolveReference(item:DocumentDrag){
+    const snapshot=this.getSnapshot();if(!snapshot||!this.draft)return;
+    if(item.projectId!==snapshot.project.id){this.message('请引用当前项目中的文档；跨项目内容可以使用网页或文件链接。',true);return;}
+    const doc=snapshot.documents.find(doc=>doc.id===item.documentId),section=item.anchor?snapshot.nodes.find(node=>node.documentId===item.documentId&&node.anchor===item.anchor):undefined;
+    if(!doc||(item.anchor&&!section)){this.message('这个文档或章节已变动，请重新从目录选择。',true);return;}
+    return {href:relativeLink(this.draft.documentPath,doc.path)+(section?'#'+section.anchor:''),title:section?.title??doc.title};
+  }
+  private insertReference(item:DocumentDrag){
+    const link=this.resolveReference(item);if(!link||!this.draft)return;
+    if(this.rich&&!this.sourceMode&&!this.canvasMode){this.rich.link(link.href,link.title);return;}
+    // 源码按光标插入，自由排版追加一个可移动的引用块；两者都写入同一 Markdown。
+    const markdown=`[${link.title.replace(/[\\\[\]]/g,'\\$&')}](${link.href})`,editor=this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
+    if(this.canvasMode){editor.value=writingParts(this.draft.text).body+'\n\n'+markdown+'\n';editor.dispatchEvent(new Event('input',{bubbles:true}));void this.mountCanvas();this.message('已添加文档引用块，可以继续拖动摆放。');}
+    else{editor.setRangeText(markdown,editor.selectionStart,editor.selectionEnd,'end');editor.dispatchEvent(new Event('input',{bubbles:true}));editor.focus();}
+  }
+
   /** 用户表单仅修改标题和语义元数据，不要求记忆 YAML 字段。 */
   private settings() {
     this.flushRich();
-    const snapshot = this.getSnapshot()!, document = parseKnowledge([{ path: this.draft!.documentPath, text: this.draft!.text, hash: this.draft!.baseHash ?? '' }]).documents[0];
+    const snapshot=this.getSnapshot()!, metadata=readHeader(this.draft!.text).metadata, parsed=parseKnowledge([{path:this.draft!.documentPath,text:this.draft!.text,hash:this.draft!.baseHash??''}]).documents[0], current=snapshot.documents.find(doc=>doc.path===this.draft!.documentPath);
+    const document={...parsed,system:String(metadata.system??current?.system??''),parent:typeof metadata.parent==='string'?metadata.parent:undefined};
     const container = this.dialog.querySelector('#conflict-details')!;
     container.innerHTML = `<form data-form="settings" class="workbench-form"><h2>文档设置</h2><label>标题<input name="title" required value="${html(document.title)}"/></label><label>缩写与别名<input name="aliases" value="${html(documentAliases(readHeader(this.draft!.text).metadata.aliases).join('，'))}" placeholder="例如：战斗、Combat，用逗号分隔" maxlength="1600"/></label><p class="quiet">在其他文档中输入标题或别名可选择补全。重名时会列出候选，由你确认。</p><div class="form-columns"><label>设计状态<select name="status">${[['draft','草稿'],['confirmed','已确认'],['question','待确认'],['archived','已归档']].map(([id,title]) => `<option value="${id}" ${document.status === id ? 'selected' : ''}>${title}</option>`).join('')}</select></label><label>主要系统<select name="system"><option value="">未归组</option>${snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => `<option value="${group.id}" ${document.system === group.id ? 'selected' : ''}>${html(group.label)}</option>`).join('')}</select></label></div><p class="quiet">归档保留文档与引用。关联此文档的关系有 ${snapshot.edges.filter(edge => edge.target === document.id || edge.target.startsWith(document.id + '/')).length} 条，默认总览会隐藏归档条目。</p><button class="secondary-button" type="submit">更新草稿，稍后统一保存版本</button></form>`;
+    if(readHeader(this.draft!.text).metadata.type==='gdd')container.querySelector('[name=system]')?.closest('label')?.setAttribute('hidden','');
     container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
@@ -304,14 +354,15 @@ export class ProjectWorkbench {
   }
 
   /** 文档只需标题与归属；稳定 ID 自动生成且不依赖显示编号。 */
-  async newDocument(system = '', type: 'dd' | 'gdd' | 'question' = 'dd') {
+  async newDocument(system = '', type: 'dd' | 'gdd' | 'question' = 'dd', parentId?:string) {
     await this.flushDraft();
     const snapshot = this.getSnapshot();
     if (!snapshot) { void this.projects(); return; }
     if(snapshot.historical)throw new Error('请先回到最新版本再创建文档。');
     const existing=type==='gdd'?snapshot.documents.find(doc=>doc.type==='gdd'&&doc.status!=='archived'):undefined;if(existing){await this.edit(existing.id);return;}
+    const parent=parentId?snapshot.documents.find(doc=>doc.id===parentId&&doc.type==='dd'):undefined;if(parent)system=parent.system;
     const id=`${type}-${crypto.randomUUID()}`,folder=type==='gdd'?'gdd':type==='question'?'questions':'dd';
-    const text=`---\nid: ${id}\ntype: ${type}\nstatus: ${type==='question'?'open':'draft'}\n${system&&system!=='system-unassigned'?`system: ${system}\n`:''}---\n\n# \n\n`;
+    const text=`---\nid: ${id}\ntype: ${type}\nstatus: ${type==='question'?'open':'draft'}\n${type!=='gdd'&&system&&system!=='system-unassigned'?`system: ${system}\n`:''}${parent?`parent: ${parent.id}\n`:''}---\n\n# \n\n`;
     this.draft={id:crypto.randomUUID(),purpose:'document',documentPath:`docs/${folder}/${id}.md`,baseHash:null,baseText:null,text,updatedAt:new Date().toISOString()};
     this.companionBases=structuredClone(snapshot.companions??{});this.personalInk=[];this.draftProject=snapshot.project.id;this.dirty=false;this.undoStack=[];this.redoStack=[];this.renderEditor({title:'新文档',path:this.draft.documentPath});this.dialog.querySelector<HTMLInputElement>('#writing-title')?.focus();
   }
@@ -418,6 +469,7 @@ export class ProjectWorkbench {
     try {
     await this.flushDraft();
     const draft = { ...this.draft }, snapshot = this.getSnapshot()!;
+    if(readHeader(draft.text).metadata.type==='gdd')draft.text=setMetadata(draft.text,{system:undefined,parent:undefined});
     const title=writingParts(draft.text).title.trim();if(!title)throw new Error('请先给这份设计起个名字。');
     const reason = this.dialog.querySelector<HTMLInputElement>('#commit-reason')?.value.trim() || `${draft.baseHash===null?'新建':'编辑'}${title}`;
     const editor = this.dialog.querySelector<HTMLTextAreaElement>('#document-editor')!;
@@ -428,7 +480,7 @@ export class ProjectWorkbench {
       const categoryChanges=preset&&!snapshot.groups.some(group=>group.id===system)?this.categoryChanges([...snapshot.groups.filter(group=>group.id!=='system-unassigned'),preset],snapshot):[];
       const migratingSelf=categoryChanges.some(change=>change.path===draft.documentPath);
       // 同盘哈希不代表私有结构草稿相同；携带打开正文时的投影，防止旧正文盖掉未保存的关系。
-      const updated = await commitProject({ projectId: snapshot.project.id, requestId: crypto.randomUUID(), baseRevision: snapshot.revision, reason, actor: 'user', editingBases: {[draft.documentPath]:draft.baseText}, changes: [...categoryChanges.filter(change=>change.path!==draft.documentPath),{ path: draft.documentPath, baseHash: draft.baseHash, text: migratingSelf?setMetadata(draft.text,{systems:undefined}):draft.text },...(draft.assets??[]).map(asset=>({...asset,baseHash:null})),...(draft.companions??[])] });
+      const updated = await commitProject({ projectId: snapshot.project.id, requestId: crypto.randomUUID(), baseRevision: snapshot.revision, reason, actor: 'user', editingBases: {[draft.documentPath]:draft.baseText}, changes: [...this.descendantCategoryChanges(snapshot,draft.text),...categoryChanges.filter(change=>change.path!==draft.documentPath),{ path: draft.documentPath, baseHash: draft.baseHash, text: migratingSelf?setMetadata(draft.text,{systems:undefined}):draft.text },...(draft.assets??[]).map(asset=>({...asset,baseHash:null})),...(draft.companions??[])] });
       await deleteDraft(snapshot.project.id, draft.id);
       this.onChange(updated);
       const document = updated.documents.find(item => item.path === draft.documentPath)!;
@@ -455,7 +507,7 @@ export class ProjectWorkbench {
   /** 分类拥有公开的单一来源；升级仅写当前文件，旧快照原样保留。 */
   private categoryChanges(groups: KnowledgeGroup[], snapshot: ProjectSnapshot): FileChange[] {
     if(!snapshot.projectEntry)throw new Error('缺少项目入口，请重新扫描文件后再保存分类。');
-    return [{path:'PROJECT.md',baseHash:snapshot.projectEntry.hash,text:setMetadata(snapshot.projectEntry.text,{minimumAppVersion:'0.4.0',systems:groups.map(group=>({id:group.id,title:group.label,color:group.color}))})},...snapshot.documents.filter(doc=>doc.type==='gdd'&&Object.hasOwn(readHeader(doc.text).metadata,'systems')).map(doc=>({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{systems:undefined})}))];
+    return [{path:'PROJECT.md',baseHash:snapshot.projectEntry.hash,text:setMetadata(snapshot.projectEntry.text,{minimumAppVersion:'0.7.0',systems:groups.map(group=>({id:group.id,title:group.label,color:group.color,...(group.parent?{parent:group.parent}:{})}))})},...snapshot.documents.filter(doc=>doc.type==='gdd'&&Object.hasOwn(readHeader(doc.text).metadata,'systems')).map(doc=>({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{systems:undefined})}))];
   }
 
   /** 用户可新增和改名分类，不要求先创建总纲；稳定 ID 不随标题改变。 */
@@ -511,11 +563,13 @@ export class ProjectWorkbench {
     if (!button) return;
     if(button.dataset.categoryMove || button.hasAttribute('data-category-remove')) {
       const form=this.dialog.querySelector<HTMLFormElement>('[data-form="category"]')!,id=(form.elements.namedItem('id') as HTMLSelectElement).value;
-      if(!id)return;const snapshot=this.getSnapshot()!,groups=snapshot.groups.filter(group=>group.id!=='system-unassigned'),index=groups.findIndex(group=>group.id===id);
+      if(!id)return;const snapshot=this.getSnapshot()!,groups=snapshot.groups.filter(group=>group.id!=='system-unassigned').map(group=>({...group})),index=groups.findIndex(group=>group.id===id);
       if(index<0)return;const changes:FileChange[]=[];
       if(button.hasAttribute('data-category-remove')) {
-        if(!confirm(`删除“${groups[index].label}”分类？其中的文档会移入“未归组”，正文和历史都会保留。`))return;
-        groups.splice(index,1);
+        if(!confirm(`删除“${groups[index].label}”分类？直属文档会移入“未归组”，子分类会提升一级；正文和历史都会保留。`))return;
+        const removed=groups[index];groups.splice(index,1);
+        // 删除父分类时只提升其子分类，保留子树和其中的文档。
+        groups.forEach(group=>{if(group.parent===id)group.parent=removed.parent;});
         for(const doc of snapshot.documents){
           const raw=readHeader(doc.text).metadata.sectionSystems;
           const sections=raw&&typeof raw==='object'&&!Array.isArray(raw)?{...raw as Record<string,unknown>}:{};
@@ -524,7 +578,7 @@ export class ProjectWorkbench {
           if(doc.system===id||sectionChanged)changes.push({path:doc.path,baseHash:doc.hash,text:setMetadata(doc.text,{...(doc.system===id?{system:undefined}:{}),...(sectionChanged?{sectionSystems:sections}:{})})});
         }
       } else {
-        const next=index+Number(button.dataset.categoryMove);if(next<0||next>=groups.length)return;
+        const siblingIndexes=groups.map((group,i)=>group.parent===groups[index].parent?i:-1).filter(i=>i>=0),sibling=siblingIndexes.indexOf(index)+Number(button.dataset.categoryMove),next=siblingIndexes[sibling];if(next===undefined)return;
         [groups[index],groups[next]]=[groups[next],groups[index]];
       }
       // 分类迁移与受影响文档一起提交，避免出现暂时失效的归属。
@@ -563,6 +617,7 @@ export class ProjectWorkbench {
       case 'source-mode': {const next=!this.sourceMode;await this.setWritingMode(false,false);this.flushRich();this.sourceMode=next;this.syncEditor();await this.mountRich();button.textContent=next?'返回正文':'Markdown';button.setAttribute('aria-pressed',String(next));break;}
       case 'insert-link': this.rich?.rememberSelection();await this.insertLink();break;
       case 'find-text': this.findText();break;
+      case 'references': this.toggleReferences();break;
       case 'save-document': button.disabled = true; try { await this.save(); } finally { button.disabled = false; } break;
       case 'preview': { const pane = this.dialog.querySelector<HTMLElement>('#editor-preview')!; pane.hidden = !pane.hidden;this.dialog.classList.toggle('reading-preview',!pane.hidden);button.setAttribute('aria-pressed',String(!pane.hidden));this.preview(); break; }
       case 'document-settings': this.settings(); break;
@@ -587,17 +642,17 @@ export class ProjectWorkbench {
       if(form.dataset.form==='category'){
         const snapshot=this.getSnapshot()!,id=String(data.get('id'))||`system-${crypto.randomUUID()}`,label=String(data.get('label')).trim(),color=String(data.get('color'));
         if(snapshot.groups.some(group=>group.id!==id&&group.label===label))throw new Error('已有同名分类，请选择原分类。');
-        const groups=snapshot.groups.filter(group=>group.id!=='system-unassigned'),index=groups.findIndex(group=>group.id===id);
-        if(index<0)groups.push({id,label,color});else groups[index]={id,label,color};
+        const groups=snapshot.groups.filter(group=>group.id!=='system-unassigned').map(group=>({...group})),index=groups.findIndex(group=>group.id===id);
+        if(index<0)groups.push({id,label,color});else groups[index]={...groups[index],label,color};
         const updated=await commitProject({projectId:snapshot.project.id,requestId:crypto.randomUUID(),baseRevision:snapshot.revision,reason:`更新设计分类：${label}`,actor:'user',changes:this.categoryChanges(groups,snapshot)});
         this.rebaseCategoryDraft(snapshot,updated);this.onChange(updated);
-        if(this.draft){this.draft.text=setMetadata(this.draft.text,{system:id});this.dirty=true;this.renderEditor({title:writingParts(this.draft.text).title,path:this.draft.documentPath});await this.flushDraft();}else await this.categories(id);return;
+        if(this.draft){this.updateDraftCategory(id);this.dirty=true;this.renderEditor({title:writingParts(this.draft.text).title,path:this.draft.documentPath});await this.flushDraft();}else await this.categories(id);return;
       }
       if (form.dataset.form === 'move-document' && this.draft) { await this.save(); const doc = this.getSnapshot()!.documents.find(doc => doc.path === this.draft!.documentPath)!; this.onChange(await projectAction<ProjectSnapshot>(this.getSnapshot()!.project.id, 'move-document', { documentId: doc.id, destination: data.get('destination') })); await this.edit(doc.id); return; }
       if ((form.dataset.form === 'settings' || form.dataset.form === 'relation') && this.draft) {
         this.undoStack.push(this.draft.text); this.redoStack = [];
         if (form.dataset.form === 'settings') {
-          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), system: String(data.get('system')), aliases: documentAliases(data.get('aliases')) }), String(data.get('title')));
+          this.draft.text = setTitle(setMetadata(this.draft.text, { status: String(data.get('status')), ...(readHeader(this.draft.text).metadata.type==='gdd'?{}:{system:String(data.get('system')), ...(String(data.get('system'))!==String(readHeader(this.draft.text).metadata.system??'')?{parent:undefined}:{})}), aliases: documentAliases(data.get('aliases')) }), String(data.get('title')));
         } else {
           const source = parseKnowledge([{path:this.draft.documentPath,text:this.draft.text,hash:''}]).nodes.find(node => node.id === data.get('source'));
           if (!source) throw new Error('请选择有效的来源条目。');

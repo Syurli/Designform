@@ -1,0 +1,34 @@
+/* 展开时收起入口留在目录内；收起后在原导航起点出现展开入口。 */
+#app.sidebar-open #menu-toggle{display:none}
+#app.sidebar-collapsed #sidebar-close{display:none}
+.sidebar .project-directory-content,.writing-reference-panel .project-directory-content{grid-template-columns:minmax(108px,44%) minmax(0,1fr)}
+.sidebar .project-directory-category-row .project-directory-category{padding-left:6px}
+.sidebar .project-directory .project-directory-categories .project-directory-category-row .project-directory-more{position:absolute!important;right:0;width:18px;visibility:hidden!important;background:var(--surface-panel)!important}
+/* 子分类箭头保持独立点击区，悬浮菜单向左让位。 */
+.sidebar .project-directory .project-directory-categories .project-directory-category-row:has(.project-directory-enter-group) .project-directory-more{right:18px}
+.sidebar .project-directory .project-directory-categories .project-directory-category-row:hover .project-directory-more,.sidebar .project-directory .project-directory-categories .project-directory-category-row:focus-within .project-directory-more{visibility:visible!important}
+.layout-direction{display:flex;flex-shrink:0;gap:2px;border:1px solid var(--line-soft);border-radius:7px;padding:3px;margin-left:auto;background:var(--surface-panel)}
+.layout-direction button{font:inherit;font-size:11px;padding:6px 9px;color:var(--text-muted);border-radius:4px}
+.layout-direction button[aria-pressed=true]{background:var(--surface-tint);color:var(--text-strong)}
+.graph-view .space-toolbar{flex-wrap:wrap;row-gap:12px}
+.inspector-open .graph-view:not(.analysis-mode) .space-toolbar{right:calc(var(--inspector-width) + 28px);gap:10px}
+.graph-view:has(#layout-direction:not([hidden])) .space-intro{visibility:hidden}
+.inspector-open .graph-view.mindmap-mode .graph-canvas{right:var(--inspector-width);transform:none}
+.graph-view.mindmap-mode .graph-canvas{top:170px;bottom:74px}
+.graph-view.mindmap-mode .graph-draft-actions{top:113px}
+.graph-view.analysis-mode .space-toolbar{align-items:center;gap:16px}
+.graph-view.analysis-mode .analysis-page-note{display:none}
+@media(max-width:900px){.graph-view .space-toolbar{column-gap:12px!important}.graph-view .mode-switch button{padding-inline:10px}.layout-direction{margin-left:0}.layout-direction button{padding:5px}}
+/* 写作页中的引用目录与主目录采用同一组件，保持拖入正文时可同时看到来源和落点。 */
+.writing-reference-panel{display:none;flex-shrink:0;width:270px;position:sticky;top:0;align-self:flex-start;height:100%;padding:14px 12px 10px;border-right:1px solid var(--line-soft);background:color-mix(in srgb,var(--surface-panel) 90%,transparent)}
+.writing-dialog.references-open .writing-reference-panel{display:flex;flex-direction:column}
+.writing-reference-panel>header{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--text-body);margin-bottom:10px}
+.writing-reference-panel>header button{font-size:17px;color:var(--text-muted)}
+.writing-reference-panel>p{margin:0 0 10px;font-size:11px;line-height:1.7;color:var(--text-muted)}
+.writing-reference-host{flex:1;min-height:0}
+.writing-reference-panel .project-directory{height:100%;min-height:300px}
+.writing-dialog.references-open .writing-content{padding-left:0}
+.writing-dialog.references-open .writing-paper{padding-inline:30px}
+.rich-writing.document-link-dragover{outline:1px dashed var(--accent-strong);outline-offset:8px}
+.document-link-drop-caret{position:fixed;width:2px;background:var(--accent-strong);pointer-events:none;z-index:100}
+@media(max-width:850px){.writing-reference-panel{width:220px}.writing-dialog.references-open .writing-paper{padding-inline:20px}.writing-dialog.references-open .writing-content{padding-right:8px}}

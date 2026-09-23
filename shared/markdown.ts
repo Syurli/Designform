@@ -3,7 +3,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes, RootContent } from 'mdast';
-import { DOCUMENT_FORMAT, type DesignStatus, type Diagnostic, type KnowledgeData, type KnowledgeEdge, type KnowledgeGroup, type KnowledgeNode, type ProjectDocument, type ProjectInfo, type RelationType } from './model.ts';
+import { DOCUMENT_FORMAT, HIERARCHY_MAX_DEPTH, type DesignStatus, type Diagnostic, type KnowledgeData, type KnowledgeEdge, type KnowledgeGroup, type KnowledgeNode, type ProjectDocument, type ProjectInfo, type RelationType } from './model.ts';
 
 /** 文件由宿主读取；解析器不接触磁盘，浏览器预检与本地服务可复用。 */
 export interface MarkdownFile { path: string; text: string; hash: string }
@@ -105,7 +105,8 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
       else for (const raw of metadata.systems) {
         const item = raw as Record<string, unknown> | null, id = identity(item?.id);
         if (!id || groups.some(group => group.id === id)) { issue('PROJECT.md', 'INVALID_SYSTEM', '分类身份缺失或重复。'); continue; }
-        groups.push({ id, label: string(item?.title, id), color: /^#[0-9a-f]{6}$/i.test(string(item?.color)) ? string(item?.color) : palette[groups.length % palette.length] });
+        if (item?.parent !== undefined && item.parent !== '' && !identity(item.parent)) issue('PROJECT.md', 'INVALID_GROUP_PARENT', `分类 ${id} 的父分类 ID 格式无效。`);
+        groups.push({ id, label: string(item?.title, id), color: /^#[0-9a-f]{6}$/i.test(string(item?.color)) ? string(item?.color) : palette[groups.length % palette.length], ...(identity(item?.parent) ? { parent: identity(item?.parent) } : {}) });
       }
     }
   } catch (error) { issue('PROJECT.md','PARSE_ERROR', String(error)); }
@@ -116,8 +117,9 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
       const rawType = header.metadata.type;
       const type = rawType === 'gdd' || rawType === 'dd' || rawType === 'question' ? rawType : 'guide';
       const id = identity(header.metadata.id);
+      if (header.metadata.parent !== undefined && header.metadata.parent !== '' && !identity(header.metadata.parent)) issue(file.path, 'INVALID_DOCUMENT_PARENT', '父文档 ID 格式无效。');
       const color = /^#[0-9a-f]{6}$/i.test(string(header.metadata.color)) ? string(header.metadata.color) : undefined;
-      const document: ProjectDocument = { id: id || `unidentified:${file.path}`, path: file.path, title: titleOf(children, file.path.split('/').at(-1)!), type, status: statusOf(header.metadata.status, type === 'question'), system: identity(header.metadata.system), text: file.text, hash: file.hash, ...(color ? { color } : {}) };
+      const document: ProjectDocument = { id: id || `unidentified:${file.path}`, path: file.path, title: titleOf(children, file.path.split('/').at(-1)!), type, status: statusOf(header.metadata.status, type === 'question'), system: identity(header.metadata.system), ...(identity(header.metadata.parent) ? { parent: identity(header.metadata.parent) } : {}), text: file.text, hash: file.hash, ...(color ? { color } : {}) };
       documents.push(document);
       if (type === 'guide') continue;
       if (!id) { issue(file.path, 'MISSING_ID', '文档缺少有效 ID；可阅读原文，补齐身份后才能建立稳定关系。'); continue; }
@@ -129,7 +131,8 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
           if (!raw || typeof raw !== 'object') { issue(file.path, 'INVALID_SYSTEM', '系统目录项必须包含 id 和 title。'); continue; }
           const system = raw as Record<string, unknown>, systemId = identity(system.id);
           if (!systemId || groups.some(group => group.id === systemId)) { issue(file.path, 'INVALID_SYSTEM', '系统 ID 缺失或重复。'); continue; }
-          groups.push({ id: systemId, label: string(system.title, systemId), color: /^#[0-9a-f]{6}$/i.test(string(system.color)) ? string(system.color) : palette[groups.length % palette.length] });
+          if (system.parent !== undefined && system.parent !== '' && !identity(system.parent)) issue(file.path, 'INVALID_GROUP_PARENT', `分类 ${systemId} 的父分类 ID 格式无效。`);
+          groups.push({ id: systemId, label: string(system.title, systemId), color: /^#[0-9a-f]{6}$/i.test(string(system.color)) ? string(system.color) : palette[groups.length % palette.length], ...(identity(system.parent) ? { parent: identity(system.parent) } : {}) });
         }
       }
     } catch (error) {
@@ -138,9 +141,72 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     }
   }
 
-  // 未指定主归属的内容仍可阅读；该分组是明确标注的导航容器，不是新增玩法。
-  if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => !groups.some(group => group.id === item.document.system) || Object.values(item.header.metadata.sectionSystems && typeof item.header.metadata.sectionSystems==='object' ? item.header.metadata.sectionSystems : {}).includes('system-unassigned'))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
-  const root = parsed.filter(item => item.document.type === 'gdd' && item.document.status !== 'archived').sort((a, b) => Number(/\/GDD\.md$/i.test(b.file.path)) - Number(/\/GDD\.md$/i.test(a.file.path)))[0]?.document;
+  const roots = parsed.filter(item => item.document.type === 'gdd' && item.document.status !== 'archived').sort((a, b) => Number(/\/GDD\.md$/i.test(b.file.path)) - Number(/\/GDD\.md$/i.test(a.file.path)));
+  const root = roots[0]?.document;
+  if (roots.length > 1) issue(roots[1].file.path, 'MULTIPLE_ROOT', '项目只能有一份当前游戏总纲。');
+  // 旧总纲的 system/parent 只保留在原文，不参与层级投影。
+  if (root) { root.system = ''; delete root.parent; }
+  const groupById = new Map(groups.map(group => [group.id, group]));
+  for (const group of groups) if (group.parent) {
+    const visited = new Set([group.id]); let parent: string | undefined = group.parent, depth = 1;
+    while (parent) {
+      const ancestor = groupById.get(parent);
+      if (!ancestor || visited.has(parent) || ++depth > HIERARCHY_MAX_DEPTH) { issue(projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', 'INVALID_GROUP_PARENT', `分类 ${group.id} 的父分类不存在、成环或超过层级上限。`); delete group.parent; break; }
+      visited.add(parent); parent = ancestor.parent;
+    }
+  }
+  const documentById = new Map(parsed.map(item => [item.document.id, item.document]));
+  for (const item of parsed) {
+    const document = item.document;
+    if (document === root || !document.parent) continue;
+    const seen = new Set([document.id]); let parent: string | undefined = document.parent;
+    while (parent) {
+      const ancestor = documentById.get(parent);
+      if (!ancestor || ancestor.type === 'gdd' || seen.has(parent)) { issue(item.file.path, 'INVALID_DOCUMENT_PARENT', `文档 ${document.id} 的父文档不存在、指向总纲或形成循环。`); delete document.parent; break; }
+      seen.add(parent); parent = ancestor.parent;
+    }
+  }
+  // 父文档决定后代的主要分类；旧稿中不一致的 system 字段保留原文但不误投影。
+  const effectiveSystem = (document: ProjectDocument): string => document.parent ? effectiveSystem(documentById.get(document.parent)!) : document.system;
+  for (const item of parsed) if (item.document !== root && item.document.parent) item.document.system = effectiveSystem(item.document);
+  for (const item of parsed) {
+    const document = item.document; if (document === root) continue;
+    let depth = 1, parent = document.parent;
+    while (parent) { depth++; parent = documentById.get(parent)?.parent; }
+    let group = groupById.get(document.system);
+    while (group) { depth++; group = group.parent ? groupById.get(group.parent) : undefined; }
+    if (depth > HIERARCHY_MAX_DEPTH) issue(item.file.path, 'HIERARCHY_TOO_DEEP', `文档 ${document.id} 超过总纲以下 ${HIERARCHY_MAX_DEPTH} 层。`);
+  }
+  // 未指定主归属的内容仍可阅读；总纲本身永不归入未归组。
+  if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => item.document.type !== 'gdd' && (!groups.some(group => group.id === item.document.system) || Object.values(item.header.metadata.sectionSystems && typeof item.header.metadata.sectionSystems==='object' ? item.header.metadata.sectionSystems : {}).includes('system-unassigned')))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
+  // 图谱的兄弟节点沿用目录的公开顺序。只调整投影遍历，不重排 Markdown 文件或正文。
+  // 缺少 documentOrder 的旧项目按标题排序；无效条目忽略，仍交给原有诊断与原文保留。
+  let documentOrder: Record<string, string[]> = {};
+  try {
+    const raw = projectEntry && readHeader(projectEntry.text).metadata.documentOrder;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) documentOrder = Object.fromEntries(Object.entries(raw).filter(([, ids]) => Array.isArray(ids)).map(([key, ids]) => [key, (ids as unknown[]).filter((id): id is string => typeof id === 'string')]));
+  } catch { /* PROJECT.md 的解析错误已经单独诊断，知识投影继续使用标题顺序。 */ }
+  const orderedParsed: typeof parsed = [], orderedIds = new Set<string>();
+  const appendDocument = (item: typeof parsed[number]) => {
+    if (orderedIds.has(item.document.id)) return;
+    orderedIds.add(item.document.id); orderedParsed.push(item);
+    appendSiblings(`document:${item.document.id}`, child => child.document.parent === item.document.id);
+  };
+  const appendSiblings = (key: string, predicate: (item: typeof parsed[number]) => boolean) => {
+    const row = documentOrder[key] ?? [];
+    parsed.filter(item => !orderedIds.has(item.document.id) && predicate(item)).sort((a, b) => {
+      const left = row.indexOf(a.document.id), right = row.indexOf(b.document.id);
+      if (left !== right) return (left < 0 ? Number.MAX_SAFE_INTEGER : left) - (right < 0 ? Number.MAX_SAFE_INTEGER : right);
+      return a.document.title.localeCompare(b.document.title, 'zh-CN') || a.file.path.localeCompare(b.file.path, 'zh-CN');
+    }).forEach(appendDocument);
+  };
+  if (root) { const item = parsed.find(item => item.document.id === root.id); if (item) appendDocument(item); }
+  const visitGroup = (id: string) => {
+    groups.filter(group => group.parent === id).forEach(group => visitGroup(group.id));
+    appendSiblings(id, item => !item.document.parent && item.document.system === id);
+  };
+  groups.filter(group => !group.parent).forEach(group => visitGroup(group.id));
+  parsed.filter(item => !orderedIds.has(item.document.id)).forEach(appendDocument);
   for (const group of groups) {
     nodes.push({ id: group.id, title: group.label, group: group.id, kind: 'system', summary: group.id === 'system-unassigned' ? '尚未指定主要系统的文档。' : `查看${group.label}的文档与规则。`, content: ['设计分类来自公开项目目录；私人工作分组不会修改此结构。'], source: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', status: 'draft', documentId: root?.id ?? '', documentPath: projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md' });
     nodeIds.add(group.id);
@@ -151,14 +217,17 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     edgeIds.add(edge.id); edges.push(edge);
   };
 
-  for (const { file, header, children, document } of parsed) {
+  for (const { file, header, children, document } of orderedParsed) {
     if (nodeIds.has(document.id)) { issue(file.path, 'DUPLICATE_ID', `文档 ID ${document.id} 与系统身份冲突。`); continue; }
-    const group = groups.find(group => group.id === document.system)?.id ?? 'system-unassigned';
-    if (document.system && group === 'system-unassigned') issue(file.path, 'UNKNOWN_SYSTEM', `未找到主要系统 ${document.system}，暂列入未归组。`, 'warning');
+    const group = document.type === 'gdd' ? '' : groups.find(group => group.id === document.system)?.id ?? 'system-unassigned';
+    if (document.type !== 'gdd' && document.system && group === 'system-unassigned') issue(file.path, 'UNKNOWN_SYSTEM', `未找到主要系统 ${document.system}，暂列入未归组。`, 'warning');
     const content = paragraphs(children), line = header.bodyOffset ? file.text.slice(0, header.bodyOffset).split('\n').length : 1;
     nodes.push({ id: document.id, title: document.title, kind: 'document', documentType: document.type, group, summary: string(header.metadata.summary) || content[0] || '尚未填写设计正文。', content, source: `${file.path}:${line}`, status: document.status, documentId: document.id, documentPath: file.path, ...(document.color ? { color: document.color } : {}) });
     nodeIds.add(document.id);
-    if (document.id !== root?.id) appendEdge({ id: `contains:${group}:${document.id}`, source: group, target: document.id, type: 'contains', note: '来自当前文档的主要系统归属。', origin: {kind:'classification',path:file.path} }, file.path);
+    if (document.type !== 'gdd') {
+      const parent = document.parent ?? group;
+      appendEdge({ id: `contains:${parent}:${document.id}`, source: parent, target: document.id, type: 'contains', note: document.parent ? '来自当前文档的父文档归属。' : '来自当前文档的主要系统归属。', origin: {kind:'classification',path:file.path} }, file.path);
+    }
 
     let owner = document.id;
     const anchors = children.flatMap((node, index) => anchorOf(node) ? [{ index, id: anchorOf(node)! }] : []);
@@ -205,7 +274,10 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   }
 
   // 总纲声明的系统从总纲展开，避免反向把总纲包含进某个系统而形成归属环。
-  if (root) for (const group of groups) appendEdge({ id: `contains:${root.id}:${group.id}`, source: root.id, target: group.id, type: 'contains', note: '游戏总纲统领的文档系统目录。', origin: {kind:'catalog',path:projectSystems?'PROJECT.md':root.path} }, root.path);
+  if (root) for (const group of groups) {
+    const parent = group.parent ?? root.id;
+    appendEdge({ id: `contains:${parent}:${group.id}`, source: parent, target: group.id, type: 'contains', note: group.parent ? '来自公开分类的父子层级。' : '游戏总纲统领的顶层分类。', origin: {kind:'catalog',path:projectSystems?'PROJECT.md':root.path} }, root.path);
+  }
 
   // 同一对条目的多次正文提及聚合为引用线；与手工关系独立保留各自来源。
   // 仅阅读界面的同名词提示不进入模型，防止自动补出作者未声明的设计关系。
@@ -249,5 +321,5 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     issue(nodes.find(node => node.id === edge.source)?.documentPath ?? 'docs/', 'BROKEN_RELATION', `关系 ${edge.id} 的目标 ${edge.target} 不存在。`);
     return false;
   });
-  return { documents, diagnostics, groups, nodes, edges: validEdges, ...(projectEntry ? { projectEntry: { text: projectEntry.text, hash: projectEntry.hash } } : {}) };
+  return { documents, diagnostics, groups, nodes, edges: validEdges, ...(root ? { rootDocumentId: root.id } : {}), ...(projectEntry ? { projectEntry: { text: projectEntry.text, hash: projectEntry.hash } } : {}) };
 }
