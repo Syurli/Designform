@@ -104,4 +104,3 @@ export class AnnotationLayer {
   redo(){const value=this.redoStack.pop();if(value){this.undoStack.push(this.snapshot());this.restore(value);}}
   dispose(){this.observer.disconnect();this.mutations.disconnect();cancelAnimationFrame(this.frame);this.svg.remove();this.controls.remove();this.paper.classList.remove('ink-paper');this.paper.removeEventListener('keydown',this.keydown);}
 }
-
