@@ -3,6 +3,7 @@ import { GraphInteraction } from './graph-interaction';
 import './graph-selection.css';
 import './graph-mindmap.css';
 import { hierarchyLayout, type GraphDirection } from './graph-hierarchy';
+import { layersLayout } from './graph-layers';
 export type { GraphDirection } from './graph-hierarchy';
 import type { GraphEdit } from '../shared/graph-editing';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -15,7 +16,7 @@ import { categoryColor } from './category-color';
 export type GraphMode = 'galaxy' | 'network' | 'layers' | 'mindmap';
 type DesignNode = KnowledgeNode;
 type StarNode = { data: DesignNode; point: THREE.Sprite; halo: THREE.Sprite; label: HTMLButtonElement };
-type Connection = { data: KnowledgeEdge; curve: THREE.QuadraticBezierCurve3; line: THREE.Line; material: THREE.LineBasicMaterial; particle: THREE.Sprite; path: SVGPathElement; hit: SVGPathElement; label: HTMLButtonElement };
+type Connection = { data: KnowledgeEdge; curve: THREE.QuadraticBezierCurve3; points?: THREE.Vector3[]; line: THREE.Line; material: THREE.LineBasicMaterial; particle: THREE.Sprite; path: SVGPathElement; hit: SVGPathElement; label: HTMLButtonElement };
 type NodeAppearance = { point: number; halo: number };
 /** 展开比例独立于卡片的位置；打断动画时从当前比例继续，不把整层文字清空。 */
 type CardAppearance = { open: number; opacity: number };
@@ -76,7 +77,7 @@ export class KnowledgeGraph {
   private layoutPrefix(mode=this.mode){
     if(mode==='galaxy')return 'galaxy-v2';
     if(mode==='network')return `network:${this.direction}:${this.selected}`;
-    if(mode==='layers')return `layers-v4:${this.direction}`;
+    if(mode==='layers')return `layers-v5:${this.direction}:${this.layersScope}`;
     // 筛选后的脑图重新压紧可见层级，同时不覆盖默认脑图的手工摆放。
     const scope=JSON.stringify([this.group,this.query,this.selected,this.directOnly,this.scopeIds,this.detailedGraph,this.includeArchived]);
     let hash=2166136261;for(const char of scope)hash=Math.imul(hash^char.charCodeAt(0),16777619);
@@ -109,6 +110,8 @@ export class KnowledgeGraph {
   private mode: GraphMode = 'galaxy';
   private direction: GraphDirection = 'vertical';
   private hierarchyParent = new Map<string,string>();
+  /** 分层坐标按公开结构及可见集合隔离，旧版零碎坐标不能盖回新排布。 */
+  private layersScope = '';
   private selected: string | null = null;
   private group: string | null = null;
   private query = '';
@@ -290,7 +293,7 @@ export class KnowledgeGraph {
     this.container.addEventListener('pointermove',this.contextMove);
     this.interaction=new GraphInteraction({container:this.container,canvas:this.renderer.domElement,camera:this.camera,mode:()=>this.mode,direction:()=>this.direction,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
       nodes:()=>[...this.stars.values()].map(star=>({data:star.data,point:star.point.position,label:star.label,pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned,visible:(this.desiredAppearance.get(star.data.id)?.point??0)>0})),
-      edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.curve.getPoints(40)})),
+      edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.points??c.curve.getPoints(40)})),
       begin:()=>{if(this.transition)this.advanceTransition(this.transition.start+this.transition.duration+1);this.controls.enabled=false;this.pointerStart=null;},
       end:()=>{this.controls.enabled=this.mode!=='network';},
       move:(id,point)=>{const star=this.stars.get(id);if(star){star.point.position.copy(point);star.halo.position.copy(point);this.labelsDirty=true;}},
@@ -407,19 +410,14 @@ export class KnowledgeGraph {
   private layout(mode: GraphMode) {
     const result = new Map<string, THREE.Vector3>();
     const coreId = this.coreId();
+    const related = this.neighbors();
     this.data.groups.forEach((group, groupIndex) => {
       const members = this.data.nodes.filter(node => node.group === group.id);
       const angle = groupIndex / this.data.groups.length * Math.PI * 2 + Math.PI / 2;
       const center = new THREE.Vector3(Math.cos(angle) * 330, Math.sin(angle) * 245, mode === 'galaxy' ? Math.sin(groupIndex * 2.1) * 140 : 0);
       members.forEach((node, index) => {
-        if (mode === 'layers') {
-          // 总纲统领分类，专项文档再位于分类之下；GDD 原文章节属于真实目录，不冒充分类。
-          const documents = members.filter(item => item.kind === 'document' && item.id !== coreId);
-          const rules = members.filter(item => item.kind === 'rule');
-          const columnX = (groupIndex - (this.data.groups.length - 1) / 2) * 270;
-          const level = node.id === coreId ? 0 : node.kind === 'system' ? 1 : node.kind === 'document' ? 2 + documents.indexOf(node) : 2 + documents.length + rules.indexOf(node);
-          result.set(node.id, new THREE.Vector3(node.id === coreId ? 0 : columnX, -level * 105, 0));
-        } else if (index === 0) {
+        if (mode === 'layers') return;
+        if (index === 0) {
           result.set(node.id, center.clone());
         } else {
           const orbit = members.length > 20 ? index * 2.399963 : (index - 1) / Math.max(members.length - 1, 1) * Math.PI * 2 + groupIndex * .38;
@@ -457,16 +455,22 @@ export class KnowledgeGraph {
       if (core) result.set(core, new THREE.Vector3());
     }
     if (mode === 'layers' || mode === 'mindmap') {
-      const related=mode==='mindmap'?this.neighbors():new Set<string>();
-      const visibleIds=mode==='mindmap'?new Set(this.data.nodes.filter(node=>this.overviewNodeVisible(node,related,mode)).map(node=>node.id)):undefined;
-      hierarchyLayout(this.data, coreId, this.direction, mode === 'layers', this.hierarchyParent, visibleIds).forEach((point,id)=>result.set(id,point));
+      const visibleIds = new Set(this.data.nodes.filter(node => this.overviewNodeVisible(node, related, mode)).map(node => node.id));
+      if (mode === 'layers') {
+        // 排序、归属或筛选改变时重新连续排布；普通点击与缩放不触发布局重排。
+        const structure = JSON.stringify([this.data.nodes.map(node => [node.id, node.title, node.group]), this.data.edges.filter(edge => edge.type === 'contains').map(edge => [edge.source, edge.target, edge.origin?.kind]), [...visibleIds]]);
+        let hash = 2166136261;
+        for (const char of structure) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+        this.layersScope = (hash >>> 0).toString(36);
+        layersLayout(this.data, coreId, this.direction, visibleIds, this.hierarchyParent).forEach((point, id) => result.set(id, point));
+      } else hierarchyLayout(this.data, coreId, this.direction, false, this.hierarchyParent, visibleIds).forEach((point,id)=>result.set(id,point));
     }
     if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`${this.layoutPrefix(mode)}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
     else {
       const layoutKey = this.layoutPrefix(mode);
       const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
       this.data.nodes.forEach(node => {
-        if(mode==='mindmap'&&!result.has(node.id)){
+        if((mode==='mindmap'||mode==='layers')&&!this.overviewNodeVisible(node,related,mode)){
           result.set(node.id,(result.get(node.documentId)??result.get(coreId??''))?.clone()??new THREE.Vector3());
           return;
         }
@@ -753,18 +757,21 @@ export class KnowledgeGraph {
       return {target,position:target.clone().add(new THREE.Vector3(0,0,distance))};
     }
     if (this.mode === 'layers') {
-      // 分层目录可向下很长：默认只取总纲、分类和首层内容取景，深层通过平移阅读。
+      // 镜头只适配分栏宽度，不因某一分支很长就把所有文字缩成一团。
       const visible=[...positions].filter(([id])=>(this.desiredAppearance.get(id)?.point??Number(this.stars.get(id)?.point.visible))>0);
-      const upper=visible.filter(([id,point])=>id===this.coreId()||this.stars.get(id)?.data.kind==='system'||(this.direction==='vertical'?point.y>=-340:point.x<=640));
-      const points=(upper.length?upper:visible.length?visible:[...positions]).map(([,point])=>point);
+      const points=visible.map(([,point])=>point);
       if(!points.length)return {target:new THREE.Vector3(),position:new THREE.Vector3(0,0,650)};
       const frame=new THREE.Box3().setFromPoints(points);
-      const size=frame.getSize(new THREE.Vector3()),aspect=Math.max(this.container.clientWidth/Math.max(this.container.clientHeight,1),.45);
+      const size=frame.getSize(new THREE.Vector3());
+      const width=this.container.clientWidth,height=this.container.clientHeight;
       const tangent=Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2));
-      // 1300×720 窗口内的实际画布约 1300×510，五列系统约占画布宽度的 75%。
-      const distance=Math.min(2200,Math.max(620,(size.x+300)/(2*tangent*aspect*.86),(size.y+230)/(2*tangent*.86)));
-      const center=frame.getCenter(new THREE.Vector3());
-      const target=this.direction==='vertical'?new THREE.Vector3(center.x,frame.max.y-175,0):new THREE.Vector3(frame.min.x+240,center.y,0);
+      const vertical=this.direction==='vertical';
+      const scale=THREE.MathUtils.clamp(vertical?(width-90)/(size.x+240):(height-150)/(size.y+100),vertical?.6:.45,1);
+      const distance=height/(2*tangent*scale);
+      const core=positions.get(this.coreId()??'');
+      // 超宽项目从首栏开始阅读，避免最左侧分类在初始视野之外。
+      const centerX=(size.x+240)*scale>width-90?frame.min.x+(width/2-45)/scale:frame.getCenter(new THREE.Vector3()).x+85;
+      const target=vertical?new THREE.Vector3(centerX,(core?.y??frame.max.y)-(height/2-70)/scale,0):new THREE.Vector3((core?.x??frame.min.x)+(width/2-90)/scale,frame.getCenter(new THREE.Vector3()).y,0);
       return {target,position:target.clone().add(new THREE.Vector3(0,0,distance))};
     }
     // 只对当前可见对象取景；没有结果时使用完整布局，空状态由界面负责显示。
@@ -872,6 +879,8 @@ export class KnowledgeGraph {
     this.refreshVisibility(false);
     const saved = options.restoreOverview && this.overview?.mode === mode && this.overview.direction===this.direction ? this.overview : undefined;
     const to = saved ? new Map([...saved.positions].map(([id, point]) => [id, point.clone()])) : this.layout(mode);
+    // 排布完成才有本模式的展示父子表；首次进入也必须据此更新归属线。
+    this.refreshVisibility(false);
     // 返回焦点前若窗口尺寸变了，沿用原位置但重新取景，避免旧镜距裁掉卡片。
     const resizedOverview=saved && (Math.abs(saved.width-width)>4 || Math.abs(saved.height-height)>4);
     const framing = saved && !resizedOverview ? { position: saved.camera.clone(), target: saved.target.clone() } : this.framing(to);
@@ -924,7 +933,8 @@ export class KnowledgeGraph {
     this.relationIndex = state.relationIndex ?? null;
     // 导航会紧接着调用 setMode，避免先用旧页面模式生成一次过渡布局。
     if (options.deferLayout) return;
-    if (!options.preserveCamera && (this.mode === 'network' ? focusChanged : scopeChanged || (this.mode==='mindmap'&&focusChanged))) this.reset();
+    // 大图按选择展开小节时也需分配新槽位，不能让新可见的小节停在隐藏时的父节点上。
+    if (!options.preserveCamera && (this.mode === 'network' ? focusChanged : scopeChanged || ((this.mode==='mindmap'||this.mode==='layers'&&this.data.nodes.length>500)&&focusChanged))) this.reset();
     else this.refreshVisibility();
   }
 
@@ -953,13 +963,12 @@ export class KnowledgeGraph {
       if (visible) count++;
     });
     const currentEdges = new Set(this.data.edges.map(edge => edge.id));
-    const classifiedRules = new Set(this.data.edges.filter(edge => edge.origin?.kind === 'classification' && this.data.nodes.some(node => node.id === edge.target && node.kind === 'rule')).map(edge => edge.target));
     this.connections.forEach((connection, index) => {
       const { source, target } = connection.data;
-      // 分层视图按分类展示已归类规则；GDD→章节的真实目录边仍保留在数据及关系分析中。
-      const supersededSection = this.mode === 'layers' && connection.data.origin?.kind === 'section' && classifiedRules.has(target);
+      // 分层总览以归属骨架为主；选中条目才显示其跨分支关联，原始关系仍完整保留。
+      const layerVisible = this.mode !== 'layers' || (connection.data.type === 'contains' ? this.hierarchyParent.get(target) === source : source === this.selected || target === this.selected);
       const hierarchyVisible = this.mode !== 'mindmap' || connection.data.type === 'contains' && this.hierarchyParent.get(target) === source;
-      const overviewVisible = hierarchyVisible && !supersededSection && currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
+      const overviewVisible = hierarchyVisible && layerVisible && currentEdges.has(connection.data.id) && this.mode !== 'network' && (this.desiredAppearance.get(source)?.point ?? 0) > 0 && (this.desiredAppearance.get(target)?.point ?? 0) > 0;
       connection.path.classList.toggle('selected', index === this.relationIndex);
       connection.label.setAttribute('aria-pressed', String(index === this.relationIndex));
       const focused = source === this.selected || target === this.selected;
@@ -967,7 +976,7 @@ export class KnowledgeGraph {
       const galaxyLine = source === this.coreId() ? .3 : connection.data.type === 'contains' ? .2 : .09;
       this.desiredLines[index] = overviewVisible ? focused ? .65 : this.selected ? .07 : this.mode === 'galaxy' ? galaxyLine : .24 : 0;
       // 普通“关联”没有因果方向，不绘制方向粒子，避免视觉暗示出不存在的依赖。
-      connection.particle.visible = overviewVisible && focused && connection.data.type !== 'relates';
+      connection.particle.visible = overviewVisible && focused && connection.data.type !== 'relates' && !(this.mode === 'layers' && connection.data.type === 'contains');
     });
     const current = this.selected && this.stars.get(this.selected);
     this.selectionRing.visible = Boolean(current && this.desiredAppearance.get(current.data.id)!.point > 0);
@@ -1119,7 +1128,22 @@ export class KnowledgeGraph {
       connection.curve.v1.z += this.mode === 'galaxy' ? Math.min(from.distanceTo(to) * .15, 70) : 0;
       // 同一端点对可以同时有手工关联与正文引用，二维分开走线，避免来源不可点选。
       if(this.mode!=='galaxy'){const siblings=this.connections.filter(c=>(c.data.source===connection.data.source&&c.data.target===connection.data.target)||(c.data.source===connection.data.target&&c.data.target===connection.data.source));if(siblings.length>1){const slot=siblings.indexOf(connection)-(siblings.length-1)/2,normal=new THREE.Vector3(-(to.y-from.y),to.x-from.x,0).normalize();connection.curve.v1.addScaledVector(normal,slot*48);}}
-      const points = connection.curve.getPoints(28);
+      let points = connection.curve.getPoints(28);
+      if (this.mode === 'layers' && connection.data.type === 'contains' && this.hierarchyParent.get(connection.data.target) === connection.data.source) {
+        // 归属线沿父节点侧边及行间留白走折线，不穿过同列的正文标签。
+        const vertical = this.direction === 'vertical';
+        const core = connection.data.source === this.coreId();
+        const corner = vertical ? new THREE.Vector3(from.x, to.y, 0) : new THREE.Vector3(to.x, from.y, 0);
+        const route = core
+          ? vertical ? [from, new THREE.Vector3(from.x, -65, 0), new THREE.Vector3(to.x, -65, 0), to]
+            : [from, new THREE.Vector3(100, from.y, 0), new THREE.Vector3(100, to.y, 0), to]
+          : [from, corner, to];
+        // 固定采样数兼容已有几何缓冲，并让拖线命中使用与屏幕一致的路径。
+        const path = new THREE.CurvePath<THREE.Vector3>();
+        for (let index = 1; index < route.length; index++) path.add(new THREE.LineCurve3(route[index - 1], route[index]));
+        points = Array.from({ length: 29 }, (_, index) => path.getPoint(index / 28) ?? from.clone());
+      }
+      connection.points = points;
       const existing = connection.line.geometry.getAttribute('position');
       if (existing) {
         points.forEach((point, index) => existing.setXYZ(index, point.x, point.y, point.z));
@@ -1156,12 +1180,14 @@ export class KnowledgeGraph {
       const centerY = (1 - point.y) * height / 2;
       // 总纲与其他节点共用文字避让位置，保留优先级，不再固定挂一张居中的大标签。
       const candidates = this.mode === 'layers'
-        ? [{ x: centerX - labelWidth / 2, y: centerY + 9 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 10 }, { x: centerX + 12, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth - 12, y: centerY - labelHeight / 2 }]
+        ? star.data.id === this.coreId() || this.direction === 'horizontal'
+          ? [{ x: centerX - labelWidth / 2, y: centerY - labelHeight - 12 }]
+          : [{ x: centerX + 14, y: centerY - labelHeight / 2 }]
         : [{ x: centerX + 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth - 11, y: centerY - labelHeight / 2 }, { x: centerX - labelWidth / 2, y: centerY + 12 }, { x: centerX - labelWidth / 2, y: centerY - labelHeight - 12 }];
       let choice = candidates.find(candidate => candidate.x >= 8 && candidate.y >= 8 && candidate.x + labelWidth < width - 8 && candidate.y + labelHeight < height - 8 && !bounds.some(bound => candidate.x < bound.x + bound.width + 5 && candidate.x + labelWidth + 5 > bound.x && candidate.y < bound.y + bound.height + 4 && candidate.y + labelHeight + 4 > bound.y));
       if(!choice&&this.mode==='layers'&&(star.data.id===this.coreId()||star.data.kind==='system')&&centerX>=0&&centerX<=width&&centerY>=0&&centerY<=height){
         // 标题位于画面内时，核心和分类即使遇到拥挤也保留可点击文字。
-        choice={x:THREE.MathUtils.clamp(centerX-labelWidth/2,8,Math.max(8,width-labelWidth-8)),y:THREE.MathUtils.clamp(centerY+9,8,Math.max(8,height-labelHeight-8))};
+          choice={x:THREE.MathUtils.clamp(candidates[0].x,8,Math.max(8,width-labelWidth-8)),y:THREE.MathUtils.clamp(candidates[0].y,8,Math.max(8,height-labelHeight-8))};
       }
       if (!choice) { star.label.hidden = true; return; }
       star.label.style.transform = `translate(${choice.x}px, ${choice.y}px)`;

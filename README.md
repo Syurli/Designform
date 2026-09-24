@@ -1,6 +1,6 @@
 # 策问 Designform
 
-百舸体系下的本地游戏策划与 LLM 协作工作台。当前应用 0.7.0，文档格式 1，接口协议 1。
+百舸体系下的本地游戏策划与 LLM 协作工作台。当前应用 0.7.1，文档格式 1，接口协议 1。
 
 当前实现独立项目、Markdown 编辑、公开版本、问询与提案审核。提供 GitHub Pages 网页版与 Windows 桌面版，共用业务规则和项目格式，不绑定模型厂商。网页版授权本机文件夹后直接读写，策划内容不上传。
 
@@ -37,7 +37,9 @@ PROJECT.md             项目身份与说明
 
 总纲固定为项目根。目录用同级列表与路径面包屑浏览深层设计，支持手柄拖动、250ms 长按、前后排序、移入父项和提升层级。写作页的“文档目录”可以把条目拖进正文，形成真实 Markdown 引用。知识空间提供星图、系统分层和设计脑图；平面视图支持横竖切换，脑图点击节点进入关系聚焦并可返回原总览。
 
-字段规则见 [层级协议](docs/protocol/HIERARCHY_0.7.md)，操作见 [项目目录](docs/protocol/PROJECT_DIRECTORY_0.7.md) 与 [设计脑图](docs/protocol/GRAPH_MINDMAP_0.7.md)，本轮验证见 [0.7 验收记录](docs/protocol/WORKSPACE_REVIEW_0.7.0.md)。
+0.7.1 的系统分层恢复按顶层分类分栏：文档和小节沿所属分支连续排列，子分类以缩进区分，长分支通过平移阅读。横向使用相同的分组顺序；总览显示归属骨架，选中条目再看跨分支关联。升级后重新计算旧版分层坐标，正文与历史版本不变。
+
+字段规则见 [层级协议](docs/protocol/HIERARCHY_0.7.md)，操作见 [项目目录](docs/protocol/PROJECT_DIRECTORY_0.7.md)、[设计脑图](docs/protocol/GRAPH_MINDMAP_0.7.md) 与 [系统分层排版](docs/protocol/GRAPH_LAYERS_0.7.1.md)，本轮验证见 [0.7.1 验收记录](docs/protocol/WORKSPACE_REVIEW_0.7.1.md)。
 
 ## 0.6 统一设计工作台
 
