@@ -112,10 +112,11 @@ export class TutorialManager {
         const progress = loadProgress()[manager.current.id];
         if (!progress || progress.version < manager.current.version) manager.finish('skipped', false);
       },
-      onDestroyStarted: (_element, _step, { state }) => {
-        if ((state.activeIndex ?? 0) >= steps.length - 1) manager.finish('completed');
-        else manager.instance?.destroy();
+      onNextClick: () => {
+        const active = manager.instance?.getActiveIndex() ?? 0;
+        if (active >= steps.length - 1) manager.finish('completed'); else manager.instance?.moveNext();
       },
+      onPrevClick: () => manager.instance?.movePrevious(),
     });
     this.instance.drive(this.currentStep);
     this.announce?.(`已开始“${tutorial.title}”，可随时跳过或快进。`);
