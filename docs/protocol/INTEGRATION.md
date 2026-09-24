@@ -1,6 +1,6 @@
 # 策问独立接入说明 · 协议 1
 
-应用 0.4.0，文档格式 1，接口协议 1。本文、Schema、项目说明及当前 Markdown 足以继续策划，无需应用源码或旧聊天。
+应用 0.7.1，文档格式 1，接口协议 1。本文、Schema、项目说明及当前 Markdown 足以继续策划，无需应用源码或旧聊天。
 
 ## 用户开始协作
 
@@ -34,9 +34,18 @@ Windows MCP 客户端配置示例（路径和端口需替换）：
 
 CLI：list、read、history、context、questions、propose、import-plan、commit、checkpoint、begin-batch、end-batch。除 list 外传项目 ID；需要请求体的命令再传 UTF-8 JSON 文件路径或 `-` 标准输入，不把全文塞进命令行转义。
 
-MCP 共 12 个工具：cewen_identify、cewen_projects、cewen_search（25 份/页）、cewen_context、cewen_history、cewen_read_revision、cewen_publish_questions、cewen_propose、cewen_prepare_import、cewen_begin_batch、cewen_end_batch、cewen_checkpoint。
+MCP 共 20 个工具，按用途分为：
+- 身份与项目：`cewen_identify`、`cewen_projects`、`cewen_status`。
+- 当前内容：`cewen_search`（25 份/页）、`cewen_context`、`cewen_read_document`、`cewen_asset`。
+- 历史与恢复信息：`cewen_history`、`cewen_read_revision`、`cewen_baselines`、`cewen_backup_status`、`cewen_prepare_restore`、`cewen_prepare_undo`。
+- 问询与提案：`cewen_publish_questions`、`cewen_propose`、`cewen_proposals`。
+- 导入与外部编辑：`cewen_prepare_import`、`cewen_begin_batch`、`cewen_end_batch`、`cewen_checkpoint`。
 
-MCP 不提供代填用户答案、采纳自己提案或任意正文提交的工具。读取问题 Markdown 即读取答案。
+`cewen_status` 和上下文会返回当前诊断、恢复标记、指纹与公开文件哈希；`cewen_context` 支持 documentIds、nodeIds、collectionIds 与 annotationIds，其中工作区批注仍只允许显式选择的项目级内容。`cewen_read_document` 用字符窗口读取单份当前文档，避免大项目必须一次全量返回。`cewen_asset` 只读取项目 `docs/assets/` 下明确指定的 PNG/JPEG/WebP/GIF，单张上限 5 MB，并以 MCP image content 返回实际图像。
+
+`cewen_proposals` 只列项目级提案，可用于换会话后核对待审核、部分采纳或已采纳状态。`cewen_prepare_restore` 与 `cewen_prepare_undo` 只生成计划，不执行恢复或撤销。
+
+MCP 不提供代填用户答案、采纳自己提案、任意正文提交、任意磁盘读取或直接应用恢复计划的工具。读取问题 Markdown 即读取答案。项目创建/打开、导出路径选择等宿主管理行为仍由用户界面负责。
 
 ## 连接与模型身份
 
