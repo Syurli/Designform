@@ -71,12 +71,12 @@ export class TutorialManager {
     this.currentStep = Math.max(0, Math.min(from, tutorial.steps.length - 1));
     const steps: DriveStep[] = [];
     for (const step of tutorial.steps) {
-      if (step.before) await step.before();
       const target = step.waitFor ?? step.target;
-      if (target && !(await waitForTarget(target)) && step.optional) continue;
+      if (target && !document.querySelector(targetSelector(target)) && step.optional) continue;
       steps.push({
         element: step.target ? targetSelector(step.target) : undefined,
         popover: { title: step.title, description: step.description, side: step.side, align: step.align },
+        onHighlightStarted: async () => { if (step.before) await step.before(); if (target) await waitForTarget(target); },
       });
     }
     if (!steps.length) return;
