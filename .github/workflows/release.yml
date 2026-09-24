@@ -2,19 +2,51 @@ name: Release Windows edition
 on:
   push:
     tags: ['v*']
+  workflow_run:
+    workflows: ['Publish web edition']
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag, for example v0.3.0
+        description: Existing version tag, for example v0.8.0
         required: true
         type: string
 permissions:
   contents: write
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 jobs:
+  tag-version:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Create version tag when missing
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          git fetch --tags --force
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists; no release tag needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$HEAD_SHA" -m "策问 Designform $TAG"
+          git push origin "$TAG"
+
   windows:
+    if: github.event_name != 'workflow_run'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
