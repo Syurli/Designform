@@ -78,3 +78,17 @@
 .space-heading{min-width:0}
 @media(max-width:1260px){.analysis-mode .space-toolbar{padding-left:23px;padding-right:23px}.analysis-page-note{display:none}}
 @media(max-width:700px){.graph-view{scroll-margin-top:65px}.analysis-mode .space-toolbar{padding-left:20px;padding-right:20px}.analysis-back{font-size:12px;min-height:28px}.breadcrumb #view-title{max-width:165px;overflow:hidden;text-overflow:ellipsis}.analysis-mode .graph-tools{bottom:16px}}
+
+/* 新手教程：Driver.js 只承担 DOM 高亮与气泡，视觉保持策问工作台语言。 */
+.tutorial-help{font-size:16px;font-weight:600;color:var(--text-body,#8fa6c8);border:1px solid var(--line-soft,#7189ad32);border-radius:50%}
+.tutorial-help:hover{color:var(--text-strong,#dbe8fb);background:var(--surface-tint,#40577938)}
+.tutorial-menu{position:fixed;z-index:100000;width:min(360px,calc(100vw - 24px));padding:16px;border:1px solid var(--line-soft,#819ac43d);border-radius:10px;background:var(--surface-raised,#101827f5);box-shadow:0 18px 55px var(--theme-shadow,#0007);backdrop-filter:blur(18px);color:var(--text-strong,#d6e2f4)}
+.tutorial-menu header{display:flex;align-items:center;justify-content:space-between}.tutorial-menu header strong{font-size:15px}.tutorial-menu header button{font-size:20px;color:var(--text-body,#8297b7);padding:2px 6px}.tutorial-menu>p{font-size:11px;line-height:1.8;color:var(--text-body,#8195b3);margin:10px 0 12px}
+.tutorial-list{display:grid;gap:7px}.tutorial-list>button{display:flex;align-items:center;justify-content:space-between;text-align:left;padding:11px 12px;border:1px solid var(--line-soft,#7287a829);border-radius:7px;background:var(--surface-tint,#2638523d)}.tutorial-list>button:hover{border-color:var(--line-active,#9db8e066);background:var(--surface-input,#3045635c)}.tutorial-list span{display:grid;gap:3px}.tutorial-list strong{font-size:12px;font-weight:500}.tutorial-list small{font-size:10px;color:var(--text-body,#7186a5)}.tutorial-list b{font-size:10px;font-weight:500;color:var(--text-strong,#a9c6ef)}
+.tutorial-reset{margin-top:12px;font-size:10px;color:var(--text-body,#788dab);padding:6px 0}
+.cewen-tutorial-popover.driver-popover{max-width:340px;border:1px solid var(--line-soft,#8299c33d);border-radius:10px;background:var(--surface-raised,#101827f7);box-shadow:0 20px 65px var(--theme-shadow,#0008);color:var(--text-strong,#d9e5f6)}
+.cewen-tutorial-popover .driver-popover-title{font-size:16px;font-weight:500;line-height:1.5}.cewen-tutorial-popover .driver-popover-description{font-size:12px;line-height:1.85;color:var(--text-body,#93a6c1)}.cewen-tutorial-popover .driver-popover-progress-text{font-size:10px;color:var(--text-body,#7084a2)}
+.cewen-tutorial-popover .driver-popover-btn{border:1px solid var(--line-soft,#7890b13b);border-radius:6px;background:var(--surface-tint,#263a5857);color:var(--text-strong,#c5d8f4);text-shadow:none;font-size:11px;padding:6px 9px}.cewen-tutorial-popover .driver-popover-btn:hover{background:var(--surface-input,#38517175)}
+.cewen-tutorial-popover .cewen-tutorial-skip{margin-right:auto;color:var(--text-body,#8295b0);background:transparent}.cewen-tutorial-popover .cewen-tutorial-fast{background:transparent}
+.driver-overlay{opacity:.66!important}
+@media(max-width:700px){.tutorial-menu{left:12px!important;right:12px!important;width:auto}.cewen-tutorial-popover.driver-popover{max-width:calc(100vw - 24px)}}

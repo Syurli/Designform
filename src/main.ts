@@ -31,6 +31,8 @@ import { CollaborationPanel } from './collaboration-panel';
 import { projectMarkdown, installReadingPreviews } from './document-reading';
 import { ConnectionPanel } from './connection-panel';
 import { isWebEdition } from './edition';
+import { TutorialManager } from './tutorial/tutorial-manager';
+import { designformTutorials } from './tutorial/tutorials';
 
 /** 启动时读取独立项目目录；没有最近项目则进入项目中心，不自动接入真实资料。 */
 let projectSnapshot: ProjectSnapshot | undefined;
@@ -82,21 +84,21 @@ app.innerHTML = `
     <a class="brand" href="./" aria-label="策问 Designform 首页"><span class="brand-name"><span class="brand-mark"><img data-brand-icon src="${import.meta.env.BASE_URL}icons/cewen-dark.svg" alt="策"/></span><b>问</b></span><small class="brand-wordmark">Designform</small></a>
     <span class="application-divider"></span><button class="application-projects" id="project-center">${icon('layout-grid')}项目库</button>
     <span class="application-tagline">把想法写成游戏</span>
-    <div class="application-actions"><button class="llm-connection" id="llm-connection" aria-label="LLM 连接状态"><span class="connection-dot"></span><span><strong>正在检查连接</strong><small>LLM 协作</small></span></button><button class="theme-toggle icon-button" data-theme-toggle aria-label="切换浅色主题"></button></div>
+    <div class="application-actions"><button class="tutorial-help icon-button" id="tutorial-help" data-tutorial="tutorial-help" aria-label="新手教程" title="新手教程">?</button><button class="llm-connection" id="llm-connection" data-tutorial="llm-connection" aria-label="LLM 连接状态"><span class="connection-dot"></span><span><strong>正在检查连接</strong><small>LLM 协作</small></span></button><button class="theme-toggle icon-button" data-theme-toggle aria-label="切换浅色主题"></button></div>
   </header>
   <button class="sidebar-scrim" id="sidebar-scrim" aria-label="收起项目目录"></button>
   <aside class="sidebar" id="project-sidebar" aria-label="当前项目文档目录">
     <button class="icon-button sidebar-close" id="sidebar-close" aria-label="收起项目面板" title="收起项目面板">${icon('panel-left')}</button>
     <div class="project-label">当前项目</div>
-    <button class="project project-opener" id="project-switch" aria-label="当前项目设置"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
-    <label class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索标题、规则…" autocomplete="off" aria-label="搜索策划内容"/><kbd>/</kbd></label>
+    <button class="project project-opener" id="project-switch" data-tutorial="project-switch" aria-label="当前项目设置"><span class="project-art">${icon('file-text')}</span><span><strong id="project-name">${escape(projectSnapshot?.project.name ?? '选择项目')}</strong><small id="project-description">${projectSnapshot?.project.isExample ? '虚构基础示例' : '独立文档 · 本地保存'}</small></span>${icon('chevron-right')}</button>
+    <label class="search-box" data-tutorial="search">${icon('search')}<input id="search" type="search" placeholder="搜索标题、规则…" autocomplete="off" aria-label="搜索策划内容"/><kbd>/</kbd></label>
     <details class="system-filter"><summary><span id="system-filter-label">全部系统</span><small><span id="system-count">${groups.length}</span> 个系统</small></summary>
     <div class="system-list">
       <button data-group="" class="group-button active"><span class="all-systems">${icon('circle-dot')}</span><span>全部系统</span><small>${nodes.length}</small></button>
       ${groups.map(group => `<button class="group-button" data-group="${group.id}"><span class="group-dot" style="--group-color:${categoryColor(group.color)}"></span><span>${escape(group.label)}</span><small>${nodes.filter(node => node.group === group.id).length}</small></button>`).join('')}
     </div>
     </details>
-    <div class="project-directory-host" id="project-directory-host"></div>
+    <div class="project-directory-host" id="project-directory-host" data-tutorial="project-directory"></div>
     <details class="reading-options"><summary>筛选与阅读记录</summary><button id="toggle-archived">显示已归档内容</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>大型图谱展开全部规则</label><button id="recent-reading">最近浏览</button><button id="save-reading-view">保存当前阅读视图</button><button id="reset-reading-filters">清除所有筛选</button></details>
     <div class="sidebar-section entry-heading"><span id="entry-heading">策划条目</span><span id="entry-count"></span></div>
     <div id="node-directory" class="node-directory" aria-label="可选择的策划条目"></div>
@@ -104,14 +106,14 @@ app.innerHTML = `
   </aside>
   <div class="workspace">
     <header class="topbar">
-      <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
-      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document">编辑</button><span></span><button class="secondary-button" id="project-statistics">统计</button><button class="secondary-button" id="project-history">版本</button><button class="secondary-button" id="organize-project">整理</button><button class="secondary-button" id="project-inquiry">问询</button><button class="secondary-button" id="project-exchange">交换</button><button class="sample-tag" id="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
+      <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" data-tutorial="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
+      <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document" data-tutorial="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document" data-tutorial="edit-document">编辑</button><span></span><button class="secondary-button" id="project-statistics" data-tutorial="project-statistics">统计</button><button class="secondary-button" id="project-history" data-tutorial="project-history">版本</button><button class="secondary-button" id="organize-project" data-tutorial="organize-project">整理</button><button class="secondary-button" id="project-inquiry" data-tutorial="project-inquiry">问询</button><button class="secondary-button" id="project-exchange" data-tutorial="project-exchange">交换</button><button class="sample-tag" id="refresh-project" data-tutorial="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
     </header>
     <main class="work-area">
       <section class="graph-view" id="graph-view" aria-label="知识空间">
         <header class="space-toolbar">
           <div class="space-heading"><button class="analysis-back" id="back-to-overview" hidden>${icon('arrow-left')}<span>返回星图总览</span></button><span class="eyebrow" id="space-eyebrow">KNOWLEDGE SPACE</span><h1><span id="space-title">设计星图</span><span id="space-count"></span></h1></div>
-          <div class="mode-switch" id="overview-switch" role="group" aria-label="总览布局">
+          <div class="mode-switch" id="overview-switch" data-tutorial="graph-modes" role="group" aria-label="总览布局">
             <button data-mode="galaxy" aria-pressed="true" class="active">${icon('orbit')}星图总览</button>
             <button data-mode="layers" aria-pressed="false">${icon('layers')}系统分层</button>
             <button data-mode="mindmap" aria-pressed="false">${icon('network')}设计脑图</button>
@@ -121,9 +123,9 @@ app.innerHTML = `
         </header>
         <div class="space-intro" id="space-intro">在系统之间，发现设计的联系</div>
         <div class="analysis-toolbar" id="analysis-toolbar" hidden><label>分析焦点<select id="analysis-focus" aria-label="选择关系分析焦点"><option value="">请选择条目</option><optgroup label="游戏总纲">${nodes.filter(node=>!node.group).map(node=>`<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}</select></label><span>建议复核 ≠ 必须修改 · 点击连线查看依据</span></div>
-        <div id="graph-canvas" class="graph-canvas"></div>
+        <div id="graph-canvas" class="graph-canvas" data-tutorial="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
-        <div class="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
+        <div class="graph-tools" data-tutorial="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
         <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">空白旋转 · Shift 框选 · 滚轮缩放</span></div>
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
@@ -145,6 +147,7 @@ let readingReady = false;
 let readingTimer: ReturnType<typeof setTimeout> | undefined;
 let recentNodes: string[] = [];
 const get = (id: string) => document.getElementById(id)!;
+const tutorialManager = new TutorialManager(designformTutorials, message => { const node = document.getElementById('announcement'); if (node) node.textContent = message; });
 /** 用户决定目录显隐；分辨率只决定并排还是抽屉，不覆盖已保存选择。 */
 let sidebarExpanded = !matchMedia('(max-width:1050px)').matches;
 try { const saved = localStorage.getItem('cewen-sidebar-expanded'); if (saved !== null) sidebarExpanded = saved === 'true'; } catch { /* 存储不可用时保留当前会话选择。 */ }
@@ -458,6 +461,7 @@ app.addEventListener('click', event => {
   }
   if ('group' in button.dataset) { state.group = button.dataset.group || null; state.directOnly = false; if (state.mode !== 'network') { state.selected = null; state.relationIndex = null; } (document.querySelector('.system-filter') as HTMLDetailsElement).open = false; sync(); return; }
   switch (button.id) {
+    case 'tutorial-help': openTutorialMenu(); break;
     case 'project-center': void workbench.projects().catch(reportProjectError); break;
     case 'project-switch': if(projectSnapshot)openProjectDetails(projectSnapshot,applyProject);else void workbench.projects().catch(reportProjectError);break;
     case 'project-statistics': if(projectSnapshot)openContentOverview(projectSnapshot);break;
@@ -640,7 +644,7 @@ document.addEventListener('pointerdown',event=>{if(!graphMenu.contains(event.tar
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeGraphMenu();});
 window.addEventListener('resize',closeGraphMenu);
 const graphCreate=document.createElement('button');graphCreate.className='secondary-button graph-create-button';graphCreate.textContent='＋ 新建';get('graph-canvas').parentElement!.append(graphCreate);graphCreate.addEventListener('click',()=>{const box=graphCreate.getBoundingClientRect();openGraphMenu({x:box.left,y:box.top-190});});
-const collaborationButton=document.createElement('button');collaborationButton.className='secondary-button';collaborationButton.textContent='与 LLM 协作';document.querySelector('.project-toolbar')!.append(collaborationButton);collaborationButton.addEventListener('click',()=>void openCollaboration(state.selected?'inquiry':'start',projectSnapshot,state.selected?[nodeById.get(state.selected)!.documentId].filter(Boolean):[]));
+const collaborationButton=document.createElement('button');collaborationButton.className='secondary-button';collaborationButton.dataset.tutorial='llm-collaboration';collaborationButton.textContent='与 LLM 协作';document.querySelector('.project-toolbar')!.append(collaborationButton);collaborationButton.addEventListener('click',()=>void openCollaboration(state.selected?'inquiry':'start',projectSnapshot,state.selected?[nodeById.get(state.selected)!.documentId].filter(Boolean):[]));
 window.addEventListener('cewen-theme-change',()=>{renderDirectory();renderInspector();renderCards();document.querySelectorAll<HTMLElement>('.system-list [data-group]').forEach(button=>{const group=groups.find(group=>group.id===button.dataset.group),dot=button.querySelector<HTMLElement>('.group-dot');if(group&&dot)dot.style.setProperty('--group-color',categoryColor(group.color));});document.querySelector('.legend')!.innerHTML=groups.map(group=>`<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');});
 const historyPanel = new HistoryPanel(() => projectSnapshot, applyProject);
 const workspacePanel = new WorkspacePanel(() => projectSnapshot, selectNode, item => workbench.publishAnnotation(item), (ids, title) => { state.scopeIds = ids; state.selected = null; state.relationIndex = null; sync(); get('announcement').textContent = `正在查看工作分组：${title}。清除筛选可返回全部。`; }, () => ({ ...state }), restoreReadingState, applyProject);
@@ -666,11 +670,22 @@ async function restoreReading() {
   const match = /^#cewen-doc=(.+)$/.exec(location.hash); if (match) { const nodeId = decodeURIComponent(match[1]); if (nodeById.has(nodeId)) { selectNode(nodeId); setView('document'); } }
   readingReady = true;
 }
+function openTutorialMenu() {
+  const existing = document.getElementById('tutorial-menu'); if (existing) { existing.remove(); return; }
+  const menu = document.createElement('div'); menu.id = 'tutorial-menu'; menu.className = 'tutorial-menu'; menu.setAttribute('role','dialog'); menu.setAttribute('aria-label','新手教程');
+  menu.innerHTML = `<header><strong>新手教程</strong><button data-close aria-label="关闭">×</button></header><p>选择完整导览或专题教程。教程可随时跳过、快进，并可从这里重新开始。</p><div class="tutorial-list">${tutorialManager.available().map(item => `<button data-tutorial-id="${item.id}"><span><strong>${item.title}</strong><small>${item.steps} 步 · ${item.progress?.status === 'completed' ? '已完成' : item.progress?.status === 'skipped' ? '已跳过' : '未开始'}</small></span><b>开始</b></button>`).join('')}</div><button class="tutorial-reset" data-reset>重置教程记录</button>`;
+  document.body.append(menu);
+  const anchor = get('tutorial-help').getBoundingClientRect(); menu.style.top = `${anchor.bottom + 8}px`; menu.style.right = `${Math.max(8, innerWidth - anchor.right)}px`;
+  menu.onclick = event => { const button=(event.target as HTMLElement).closest<HTMLButtonElement>('button'); if(!button)return; if(button.dataset.close!==undefined){menu.remove();return;} if(button.dataset.reset!==undefined){tutorialManager.reset();menu.remove();openTutorialMenu();return;} const id=button.dataset.tutorialId;if(id){menu.remove();void tutorialManager.start(id);} };
+  const outside=(event:PointerEvent)=>{if(!menu.contains(event.target as Node)&&!(event.target as HTMLElement).closest('#tutorial-help')){menu.remove();document.removeEventListener('pointerdown',outside);}}; setTimeout(()=>document.addEventListener('pointerdown',outside),0);
+}
+
 const collaborationPanel = new CollaborationPanel(() => projectSnapshot, applyProject);
 graph = mountGraph();
 sync();
 void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
 refreshIcons();
+if (projectSnapshot && tutorialManager.shouldAutoStart('first-launch')) window.setTimeout(() => { void tutorialManager.start('first-launch'); }, 700);
 if (!projectSnapshot) void workbench.projects().catch(reportProjectError);
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
 let refreshing = false;
