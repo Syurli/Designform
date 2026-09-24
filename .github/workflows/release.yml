@@ -46,24 +46,27 @@ jobs:
           git push origin "$TAG"
 
   windows:
-    if: github.event_name != 'workflow_run'
+    needs: [tag-version]
+    if: always() && (github.event_name != 'workflow_run' || needs.tag-version.result == 'success')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Validate release version
+      - name: Resolve and validate release version
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:RELEASE_TAG -ne "v$version") { throw '标签与 package.json 版本不一致' }
+          $releaseTag = if ("${{ github.event_name }}" -eq "workflow_run") { "v$version" } else { $env:REQUESTED_TAG }
+          if ($releaseTag -ne "v$version") { throw '标签与 package.json 版本不一致' }
+          "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: npm run package:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -71,7 +74,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           $packages = @(Get-ChildItem release/Designform-*-Windows-x64.zip)
           if ($packages.Count -ne 1) { throw '发行包数量异常' }
