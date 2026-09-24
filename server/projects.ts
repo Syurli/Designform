@@ -442,6 +442,14 @@ export class ProjectService {
 
   async work(id: string, update?: { baseRevision: number; item?: WorkspaceItem; remove?: string }) { await this.ready; return this.exclusive(id, () => workspace(this.project(id).path, update)); }
 
+  /** 按字符窗口读取单份当前文档，避免大项目只能全量上下文。 */
+  async collaborationDocument(id: string, documentId: string, offset = 0, limit = 50000) {
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100000) throw new ProjectError('INVALID_REQUEST', '文档窗口参数无效。');
+    const snapshot = await this.read(id), document = snapshot.documents.find(item => item.id === documentId);
+    if (!document) throw new ProjectError('MISSING_DOCUMENT', '文档不存在。');
+    return { revision: snapshot.revision, recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, document: { id: document.id, path: document.path, title: document.title, type: document.type, status: document.status, system: document.system, parent: document.parent, hash: document.hash, offset, total: document.text.length, text: document.text.slice(offset, offset + limit), hasMore: offset + limit < document.text.length } };
+  }
+
   /** MCP 只读状态投影：提供并发基准和诊断，不暴露私人工作区。 */
   async collaborationStatus(id: string) {
     const snapshot = await this.read(id);
