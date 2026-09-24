@@ -442,6 +442,38 @@ export class ProjectService {
 
   async work(id: string, update?: { baseRevision: number; item?: WorkspaceItem; remove?: string }) { await this.ready; return this.exclusive(id, () => workspace(this.project(id).path, update)); }
 
+  /** MCP 只读状态投影：提供并发基准和诊断，不暴露私人工作区。 */
+  async collaborationStatus(id: string) {
+    const snapshot = await this.read(id);
+    return {
+      format: DOCUMENT_FORMAT,
+      project: { id: snapshot.project.id, name: snapshot.project.name, entry: snapshot.projectEntry ? { text: snapshot.projectEntry.text, hash: snapshot.projectEntry.hash } : undefined, categories: snapshot.groups },
+      revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, fingerprint: snapshot.fingerprint,
+      recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, files: snapshot.files,
+      counts: { documents: snapshot.documents.length, nodes: snapshot.nodes.length, relations: snapshot.edges.length },
+    };
+  }
+
+  /** 只向协作端暴露项目级提案；私人工作项、批注和视图不随之返回。 */
+  async proposalStatus(id: string, proposalId?: string) {
+    const state = await this.work(id);
+    const proposals = state.items.filter(item => item.kind === 'proposal' && item.scope === 'project' && (!proposalId || item.id === proposalId))
+      .map(item => ({ id: item.id, title: item.title, state: item.state, targets: item.targets, text: item.text, payload: item.payload, appliedFiles: item.appliedFiles ?? {}, createdAt: item.createdAt, updatedAt: item.updatedAt }));
+    if (proposalId && !proposals.length) throw new ProjectError('MISSING_PROPOSAL', '提案不存在或不属于项目共享范围。');
+    return { revision: state.revision, proposals };
+  }
+
+  /** 为 MCP 返回受控图片附件；不接受任意磁盘路径，也不读取私人文件。 */
+  async collaborationAsset(id: string, relative: string, revision?: string) {
+    if (!/^docs\/assets\/[A-Za-z0-9_./ -]+\.(png|jpe?g|webp|gif)$/i.test(relative)) throw new ProjectError('INVALID_ASSET', 'MCP 只读取 docs/assets 下的 PNG、JPEG、WebP 或 GIF 图片。');
+    const bytes = await this.asset(id, relative, revision);
+    if (bytes.length > 5 * 1024 * 1024) throw new ProjectError('ASSET_TOO_LARGE', 'MCP 单张图片读取上限为 5 MB。');
+    const extension = path.extname(relative).toLowerCase();
+    const mimeType = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg';
+    return { path: relative, revision: revision ?? null, mimeType, bytes: bytes.length, hash: sha256(bytes), data: bytes.toString('base64') };
+  }
+
+
   /** 预检不会修改当前文档，模型与界面获得完全相同的候选批次。 */
   async importPlan(id: string, directory: string) { await this.ready; return this.exclusive(id, async () => { const project = this.project(id); return prepareImport(await this.load(project, true), project.path, directory); }); }
   /** 文本粘贴在用户工作目录形成独立暂存来源，仍经过同样的映射与差异审核。 */
@@ -493,7 +525,7 @@ export class ProjectService {
         annotationDocuments.push({ documentId: document.id, path, text: bytes.toString('utf8'), hash });
       }
     }
-    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry?.text }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), companions, annotationDocuments, annotations, instructions: '只修改指定当前文档，保留 ID 和用户原话；布局与笔画是所选文档的伴随文件，不是正文。未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
+    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry ? { text: snapshot.projectEntry.text, hash: snapshot.projectEntry.hash } : undefined }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, fingerprint: snapshot.fingerprint, recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, files: snapshot.files, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), companions, annotationDocuments, annotations, instructions: '先核对 recoveryRequired 与 diagnostics；只修改指定当前文档，保留 ID 和用户原话；布局与笔画是所选文档的伴随文件，不是正文。未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
     if (Buffer.byteLength(JSON.stringify(content)) > 4 * 1024 * 1024) throw new ProjectError('CONTEXT_TOO_LARGE', '上下文超过 4 MB，请选择较少的 DD；未静默截断。');
     return content;
   }
@@ -553,7 +585,7 @@ export class ProjectService {
     if (!/^[A-Za-z0-9_-]{1,150}$/.test(proposal.id) || !proposal.title?.trim() || !proposal.reason?.trim() || !Array.isArray(proposal.changes) || !proposal.changes.length || !proposal.baseRevision || !proposal.dependencies || !Array.isArray(proposal.questionIds)) throw new ProjectError('INVALID_PROPOSAL', '提案需要身份、理由、基础修订、文件变化、依赖及问题来源。');
     if (!(await this.versions(id)).some(entry => entry.valid && entry.manifest.id === proposal.baseRevision)) throw new ProjectError('UNKNOWN_BASE_REVISION', '提案基础修订不属于本项目。');
     for (const change of proposal.changes) {
-      assertDocumentPath(change.path); if (change.encoding || (change.text !== null && typeof change.text !== 'string')) throw new ProjectError('INVALID_PROPOSAL', '模型提案只支持 Markdown 文本修改。');
+      assertDocumentPath(change.path); if (change.encoding || (change.text !== null && typeof change.text !== 'string')) throw new ProjectError('INVALID_PROPOSAL', '模型提案只支持公开 Markdown 与受控伴随 JSON 的 UTF-8 文本修改；二进制附件需使用独立附件流程。');
       const original = snapshot.documents.find(document => document.path === change.path && document.type === 'question');
       if (original && (change.text === null || section(original.text, '用户原始回答').text !== section(change.text, '用户原始回答').text)) throw new ProjectError('ORIGINAL_ANSWER_CHANGED', '问题提案必须保留完整原始回答；不再使用的问题请归档。');
       if (!original && change.text && readHeader(change.text).metadata.type === 'question' && section(change.text, '用户原始回答').text.includes('### 回答 ')) throw new ProjectError('ORIGINAL_ANSWER_CHANGED', '新问题不能携带模型代填的用户答案。');
