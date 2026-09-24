@@ -117,6 +117,7 @@ export class TutorialManager {
         if (active >= steps.length - 1) manager.finish('completed'); else manager.instance?.moveNext();
       },
       onPrevClick: () => manager.instance?.movePrevious(),
+      onDoneClick: () => manager.finish('completed'),
     });
     this.instance.drive(this.currentStep);
     this.announce?.(`已开始“${tutorial.title}”，可随时跳过或快进。`);
