@@ -15,7 +15,9 @@
 | ComfyUI 仿真 | 提交确认、回环边界、并发重入、参考上传/节点绑定、负向映射、不确定提交、仅候选回导、安全取消通过；未运行实际生成模型 |
 | 万类 | 包格式、身份/哈希/过期检测与跨项目拒绝通过；未连接真实编辑器 |
 
-浏览器专项脚本 `scripts/check-090-browser.py` 对真实本地 HTTP 工作台操作，不拦截业务 API。远端运行日志与截图由本轮候选检查保存，结果必须以实际工作流为准，不从脚本存在推断通过。
+本机 Windows + Node 24.18.0 从 `a0d8912` 候选接续后执行 `npm ci`、`npm run build:all`、四项 `check-090.mjs` 检查及 `npm run package:win`，均以退出码 0 完成。独立虚构临时项目上的实际本地 HTTP 服务还通过了 stdio MCP 检查和 Chromium 浏览器专项流程，浏览器结果 `pageErrors=[]`。Windows ZIP 已解压并启动，应用窗口与工作台加载；桌面锁屏阻止了输入法、目录选择及媒体播放的人机交互检查，这些仍列为未验收。此记录只说明上述专项范围，不代表真实创作资料或外部模型验收。
+
+浏览器专项脚本 `scripts/check-090-browser.py` 对真实本地 HTTP 工作台操作，不拦截业务 API。远端候选检查 [36088751126](https://github.com/Syurli/Designform/actions/runs/36088751126) 在 `a0d8912` 通过了 Node 24 构建、四项专项检查、真实本地 HTTP 浏览器流程与 stdio MCP；六张截图和日志保存在该运行的 artifact。本轮新提交仍须单独通过 CI，不沿用旧绿色状态。
 
 ## 必须由真实环境继续验收
 
@@ -23,4 +25,4 @@ Windows ZIP 原生运行、输入法/剪贴板/文件夹选择，浏览器文件
 
 ## 关键发布保护
 
-固定提交建标签，Pages 成功后只响应精确版本的 release-intent；候选发为 prerelease，不取代稳定最新版。已有标签不重指，已有 Release/附件不覆盖。ZIP 附带 SHA256 与源码 SOURCE.json。
+固定 main 提交建标签；Pages 工作流成功后，精确版本的 `.github/release-intent.json` 才允许自动发布候选。候选发为 prerelease，不取代稳定最新版。已有标签不重指，已有 Release/附件不覆盖。先建立草稿、上传 ZIP/SHA256SUMS.txt/SOURCE.json，再核验附件和预发布状态。

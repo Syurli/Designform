@@ -40,7 +40,7 @@
 
 | | 独立网页版 | Windows 桌面版 |
 | --- | --- | --- |
-| 入口 | [GitHub Pages](https://syurli.github.io/Designform/) | [GitHub Releases](https://github.com/Syurli/Designform/releases/latest) |
+| 入口 | [GitHub Pages](https://syurli.github.io/Designform/) | [GitHub Releases](https://github.com/Syurli/Designform/releases) |
 | 运行方式 | 使用支持文件夹授权的桌面 Chrome / Edge，通过 HTTPS 或 localhost 打开。 | 解压 Windows x64 便携包，运行 `策问 Designform.exe`。 |
 | 项目存储 | 用户明确授权的本机文件夹。 | 用户指定的本机目录。 |
 | LLM 接入 | 文件协作与交换包；不提供独立的持续 MCP 服务。 | 文件协作、CLI 与本地 stdio MCP。 |
@@ -137,7 +137,7 @@ scripts/               构建、打包及资源处理
 docs/                  协议、设计说明、验收与发布记录
 ```
 
-当前候选修改尚未推送。`main` 为共享主线，任务分支使用 `codex/` 前缀。开发协作要求见 [AGENTS.md](AGENTS.md)；修改业务行为时应同步维护协议与验收记录。仓库默认不运行自动化测试套件，按任务执行必要的类型检查、构建和人工验收，并明确记录未覆盖项。
+0.9.0-rc.2 的应用源码已提交到功能分支，最终发布状态以 GitHub 上的 PR、Pages 部署和 Release 附件为准。`main` 为共享主线，任务分支使用 `codex/` 前缀。开发协作要求见 [AGENTS.md](AGENTS.md)；修改业务行为时应同步维护协议与验收记录。仓库默认不运行自动化测试套件，按任务执行必要的类型检查、构建和人工验收，并明确记录未覆盖项。
 
 ## 文档导航
 

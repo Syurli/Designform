@@ -1,8 +1,9 @@
 name: Verify 0.9 candidate
 on:
   push:
-    branches: [codex/090-completion-20260925]
-    paths: [.github/workflows/090-candidate-qa.yml]
+    branches: ['codex/090-*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
