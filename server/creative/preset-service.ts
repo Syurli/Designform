@@ -1,7 +1,7 @@
 import type { ProjectService } from '../projects.ts';
 import type { CreativeService } from './service.ts';
 import type { FileChange,ProjectSnapshot } from '../../shared/model.ts';
-import { buildPreset,presets } from '../../shared/creative/presets.ts';
+import { buildPreset,presets,presetGroups } from '../../shared/creative/presets.ts';
 import { buildCreativeIndex,objectBlock } from '../../shared/creative/content.ts';
 import { asString,asStrings,type CreativeObject } from '../../shared/creative/model.ts';
 import { setMetadata } from '../../shared/editing.ts';
@@ -13,21 +13,25 @@ const key=(v:unknown)=>{const s=asString(v);if(!/^[A-Za-z0-9_-]{1,60}$/.test(s))
 /** 预设只追加内容。任何预设都不写 capability 限制，也不删除已有对象。 */
 export class PresetService {
  constructor(private projects:ProjectService,private creative:CreativeService){}
- preview(input:Record<string,unknown>){const content=buildPreset(asString(input.preset),key(input.instanceId),input.sample===true);return {preset:input.preset,sample:input.sample===true,title:content.title,documents:content.documents.map(d=>({id:d.id,title:d.title,purpose:d.purpose,modules:d.objects.map(o=>o.type)})),allModulesAvailable:true,media:input.sample===true&&input.preset!=='blank'?18:0,notice:'追加到当前项目；共享对象使用新身份，不覆盖已有文档。示例回答、声音和画面均为演示资料。'};}
+ preview(input:Record<string,unknown>){const content=buildPreset(asString(input.preset),key(input.instanceId),input.sample===true);return {preset:input.preset,sample:input.sample===true,title:content.title,documents:content.documents.map(d=>({id:d.id,title:d.title,purpose:d.purpose,group:d.group,modules:d.objects.map(o=>o.type)})),allModulesAvailable:true,media:input.sample===true&&input.preset!=='blank'?18:0,notice:'追加到当前项目；共享对象使用新身份，不覆盖已有文档。示例回答、声音和画面均为演示资料。'};}
  async apply(id:string,input:Record<string,unknown>){let snapshot=await this.projects.read(id);if(snapshot.project.format!==2)throw new ProjectError('FORMAT_UPGRADE_REQUIRED','请先在副本升级为格式 2');const preset=presets.find(p=>p.id===input.preset);if(!preset)throw new ProjectError('INVALID_PRESET','未知预设');const prefix=key(input.instanceId),requestId=key(input.requestId),media:Record<string,string>={},descriptors:FileChange[]=[];
   if(input.sample===true&&preset.id!=='blank'){
    const {sampleMedia}=await import('../../shared/creative/sample-media.generated.ts');
    const index=buildCreativeIndex(snapshot);
    for(const file of sampleMedia){const stored=await this.projects.storeMedia(id,Buffer.from(file.data,'base64')),mediaId=`media-${stored.sha256}`;media[file.name]=mediaId;if(index.objects.some(x=>x.object.id===mediaId)||descriptors.some(d=>d.path===`docs/media/${mediaId}.md`))continue;
     const o:CreativeObject={schema:1,id:mediaId,type:'media',title:file.name,status:'confirmed',data:{...stored,durationMs:file.durationMs,originalName:file.name,permission:'虚构示例专用。二维图由项目生成器编写；eSpeak Mandarin 演示音，不含真人克隆。',demo:true}};
-    descriptors.push({path:`docs/media/${mediaId}.md`,baseHash:null,text:`---\nid: doc-${mediaId}\ntype: guide\nstatus: draft\n---\n\n# ${file.name}\n\n${objectBlock(o)}\n`});
+    descriptors.push({path:`docs/media/${mediaId}.md`,baseHash:null,text:`---\nid: doc-${mediaId}\ntype: guide\nstatus: draft\nsystem: ${prefix}-group-media\nexample: true\n---\n\n# ${file.name}\n\n${objectBlock(o)}\n`});
    }
   }
   const content=buildPreset(preset.id,prefix,input.sample===true,media);
   snapshot=await this.projects.runOperation(id,{...input,requestId},()=>{
-   const changes:FileChange[]=[...descriptors,...content.documents.map(d=>({path:`docs/creative/${d.id}.md`,baseHash:null,text:`---\nid: ${d.id}\ntype: ${d.purpose==='quest'?'guide':(!snapshot.rootDocumentId&&['game','mixed'].includes(preset.id)&&d.id===prefix+'-doc-brief')?'gdd':'dd'}\nstatus: draft\npurpose: ${d.purpose}\nexample: ${input.sample===true}\n---\n\n# ${d.title}\n\n${d.body}\n\n${d.objects.map(objectBlock).join('\n\n')}\n`}))];
+   const changes:FileChange[]=[...descriptors,...content.documents.map(d=>({path:`docs/creative/${d.id}.md`,baseHash:null,text:`---\nid: ${d.id}\ntype: ${d.purpose==='quest'?'guide':(!snapshot.rootDocumentId&&['game','mixed'].includes(preset.id)&&d.id===prefix+'-doc-brief')?'gdd':'dd'}\nstatus: draft\npurpose: ${d.purpose}\nsystem: ${prefix}-group-${d.group}\nexample: ${input.sample===true}\n---\n\n# ${d.title}\n\n${d.body}\n\n${d.objects.map(objectBlock).join('\n\n')}\n`}))];
    const entry=snapshot.projectEntry!;const metadata=readHeader(entry.text).metadata,applied=Array.isArray(metadata.presets)?metadata.presets:[];
-   changes.push({path:'PROJECT.md',baseHash:entry.hash,text:setMetadata(entry.text,{presets:[...applied,{id:preset.id,instanceId:prefix,sample:input.sample===true}],minimumAppVersion:'0.9.0-rc.2'})});
+   // 只添加本次用到的组及其父组；ID 含实例前缀，多次追加不会与旧分类碰撞。
+   const used=new Set<string>(content.documents.map(d=>d.group));if(descriptors.length)used.add('media');
+   for(const group of [...presetGroups].reverse())if(used.has(group.key)&&'parent' in group)used.add(group.parent);
+   const existing=Array.isArray(metadata.systems)?metadata.systems:snapshot.groups.filter(group=>group.id!=='system-unassigned').map(group=>({id:group.id,title:group.label,color:group.color,...(group.parent?{parent:group.parent}:{})})),added=presetGroups.filter(group=>used.has(group.key)).map(group=>({id:`${prefix}-group-${group.key}`,title:group.title,color:group.color,...('parent' in group?{parent:`${prefix}-group-${group.parent}`}:{})}));
+   changes.push({path:'PROJECT.md',baseHash:entry.hash,text:setMetadata(entry.text,{systems:[...existing,...added],presets:[...applied,{id:preset.id,instanceId:prefix,sample:input.sample===true}],minimumAppVersion:'0.9.0-rc.3'})});
    return {projectId:id,requestId,baseRevision:snapshot.revision,actor:'user',reason:`追加${input.sample===true?'虚构示例':'起步框架'}：${content.title}（预设不限制模块）`,changes};
   });
   if(input.sample===true&&content.questIds.length)await this.seedDemonstration(id,prefix,content.questIds,content.standaloneTargets);

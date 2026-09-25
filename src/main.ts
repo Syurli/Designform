@@ -1,6 +1,7 @@
 import './creative/creative.css';
 import { CreativeWorkspace } from './creative/workspace';
 import { openPresetDialog } from './creative/preset-dialog';
+import { openExampleHub } from './examples/example-hub';
 import './style.css';
 import './workbench.css';
 import './features.css';
@@ -700,7 +701,7 @@ function openTutorialMenu() {
  const close=()=>{menu.remove();document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',key);closeTutorialMenu=undefined;get('tutorial-help').focus();};
  const outside=(e:PointerEvent)=>{if(!menu.contains(e.target as Node)&&!(e.target as HTMLElement).closest('#tutorial-help'))close();};const key=(e:KeyboardEvent)=>{if(e.key==='Escape'){e.preventDefault();close();}};
  closeTutorialMenu=close;document.addEventListener('pointerdown',outside);document.addEventListener('keydown',key);
- menu.onclick=e=>{const b=(e.target as HTMLElement).closest<HTMLButtonElement>('button');if(!b)return;if(b.hasAttribute('data-close'))return close();if(b.hasAttribute('data-reset')){tutorialManager.reset();close();openTutorialMenu();return;}const id=b.dataset.tutorialId??b.dataset.replay;if(id){close();if(id.endsWith('-practice')&&(!projectSnapshot||!isPracticeProject(projectSnapshot.project.id))){void openPresetDialog(undefined,next=>{applyProject(next);setPracticeProject(next.project.id);void tutorialManager.start(id,0);},false,{practice:true}).catch(reportProjectError);}else void tutorialManager.start(id,b.dataset.replay?0:undefined);}};
+ menu.onclick=e=>{const b=(e.target as HTMLElement).closest<HTMLButtonElement>('button');if(!b)return;if(b.hasAttribute('data-close'))return close();if(b.hasAttribute('data-reset')){tutorialManager.reset();close();openTutorialMenu();return;}const id=b.dataset.tutorialId??b.dataset.replay;if(id){close();if(id.endsWith('-practice')&&(!projectSnapshot||!isPracticeProject(projectSnapshot.project.id))){openExampleHub({practice:true,onCreated:next=>{applyProject(next);setPracticeProject(next.project.id);void tutorialManager.start(id,0);}});}else void tutorialManager.start(id,b.dataset.replay?0:undefined);}};
  menu.querySelector<HTMLButtonElement>('button')?.focus();
 }
 

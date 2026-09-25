@@ -1,4 +1,5 @@
 /** 主题是应用偏好，不进入任何游戏的 Markdown 或版本历史。 */
+import { APP_VERSION } from '../shared/version';
 export type Theme = 'dark' | 'light';
 export type DesktopCommand = 'browser' | 'hide' | 'quit' | 'reload' | 'save' | 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll' | 'zoomIn' | 'zoomOut' | 'resetZoom';
 declare global {
@@ -45,10 +46,20 @@ export function mountDesktopChrome() {
   if (!window.cewenDesktop) return;
   // 品牌只在主应用栏展示；桌面最上方留给菜单、拖动及系统窗口按钮。
   const bar = document.createElement('header'); bar.className = 'desktop-titlebar'; bar.setAttribute('aria-label','桌面菜单与窗口拖动区');
-  bar.innerHTML = `<div class="desktop-titlebar-content"><details class="desktop-menu"><summary>应用</summary><div><button data-desktop-command="browser">在浏览器打开</button><button data-desktop-command="hide">收起到系统托盘</button><button data-theme-toggle></button><hr/><button data-desktop-command="quit">退出策问</button></div></details><details class="desktop-menu"><summary>编辑</summary><div>${[['save','保存 Ctrl+S'],['undo','撤销'],['redo','重做'],['cut','剪切'],['copy','复制'],['paste','粘贴'],['selectAll','全选']].map(([command,label]) => `<button data-desktop-command="${command}">${label}</button>`).join('')}</div></details><details class="desktop-menu"><summary>视图</summary><div>${[['reload','重新加载'],['zoomIn','放大'],['zoomOut','缩小'],['resetZoom','恢复显示比例']].map(([command,label]) => `<button data-desktop-command="${command}">${label}</button>`).join('')}</div></details></div>`;
+  bar.innerHTML = `<div class="desktop-titlebar-content"><details class="desktop-menu"><summary>应用</summary><div><button data-desktop-command="browser">在浏览器打开</button><button data-desktop-command="hide">收起到系统托盘</button><button data-theme-toggle></button><hr/><button data-about>关于策问</button><button data-desktop-command="quit">退出策问</button></div></details><details class="desktop-menu"><summary>编辑</summary><div>${[['save','保存 Ctrl+S'],['undo','撤销'],['redo','重做'],['cut','剪切'],['copy','复制'],['paste','粘贴'],['selectAll','全选']].map(([command,label]) => `<button data-desktop-command="${command}">${label}</button>`).join('')}</div></details><details class="desktop-menu"><summary>视图</summary><div>${[['reload','重新加载'],['zoomIn','放大'],['zoomOut','缩小'],['resetZoom','恢复显示比例']].map(([command,label]) => `<button data-desktop-command="${command}">${label}</button>`).join('')}</div></details></div>`;
   document.body.prepend(bar);
   let editingFocus:HTMLElement|null=null;document.addEventListener('focusin',event=>{const target=event.target as HTMLElement;if(!bar.contains(target))editingFocus=target;});
   bar.addEventListener('click', event => {
+    if ((event.target as HTMLElement).closest('[data-about]')) {
+      bar.querySelectorAll('details').forEach(item => item.open = false);
+      // 版本从 package.json 注入，避免桌面菜单与发行包号漂移。
+      const about = document.createElement('dialog');
+      about.className = 'project-dialog desktop-about';
+      about.innerHTML = `<header class="project-dialog-header"><div><span class="eyebrow">ABOUT DESIGNFORM</span><h1>关于策问 Designform</h1></div><button type="button" data-close aria-label="关闭">×</button></header><div class="desktop-about-content"><p><strong>版本</strong> ${APP_VERSION}</p><p><strong>作者</strong> BAIGE</p><p><strong>仓库</strong> <a href="https://github.com/Syurli/Designform" target="_blank" rel="noopener noreferrer">github.com/Syurli/Designform</a></p></div>`;
+      about.addEventListener('click', e => { if ((e.target as HTMLElement).closest('[data-close]')) about.close(); });
+      about.addEventListener('close', () => about.remove());
+      document.body.append(about); about.showModal(); return;
+    }
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-desktop-command]');
     if (button) { const command=button.dataset.desktopCommand as DesktopCommand;bar.querySelectorAll('details').forEach(item=>item.open=false);if(['save','undo','redo','cut','copy','paste','selectAll'].includes(command)){editingFocus?.focus({preventScroll:true});const action=new CustomEvent('cewen:editing-command',{detail:command,cancelable:true});window.dispatchEvent(action);if(action.defaultPrevented||command==='save')return;}void window.cewenDesktop!.command(command); }
   });

@@ -25,6 +25,7 @@ type Directory = FileSystemDirectoryHandle & { queryPermission(options: { mode: 
 type PickerWindow = Window & { showDirectoryPicker?: (options: { mode: string; id: string }) => Promise<Directory> };
 const mounts = new Map<string, Directory>();
 let ready: Promise<void> | undefined;
+let exampleReady: Promise<void> | undefined;
 let database: IDBDatabase;
 /** IndexedDB 仅保存用户授权的句柄；正文始终直接读取文件夹。 */
 function databaseReady(): Promise<IDBDatabase> {
@@ -43,14 +44,21 @@ async function initialize() {
   });
   records[0].forEach((key, index) => mounts.set(String(key), records[1][index] as Directory));
   mounts.set('/app', await navigator.storage.getDirectory() as Directory);
-  const sources = import.meta.glob('../templates/example/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
-  for (const [name, content] of Object.entries(sources)) {
-    const destination = `/app/templates/example/${name.split('/templates/example/')[1]}`;
-    await rawWrite(destination, Buffer.from(content));
-  }
   await directory('/app/projects', true);
 }
 export function initializeFilesystem() { return ready ??= initialize(); }
+/** 内置基础示例平时直接从发行资源预览；仅用户明确创建练习副本时才写入浏览器文件系统。 */
+export async function ensureExampleTemplate() {
+  await initializeFilesystem();
+  exampleReady ??= (async () => {
+    const sources = import.meta.glob('../templates/example/**/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+    for (const [name, content] of Object.entries(sources)) {
+      const destination = `/app/templates/example/${name.split('/templates/example/')[1]}`;
+      await rawWrite(destination, Buffer.from(content));
+    }
+  })().catch(error => { exampleReady = undefined; throw error; });
+  return exampleReady;
+}
 function ioError(code: string, message: string) { return Object.assign(new Error(message), { code }); }
 function translate(error: unknown): never {
   if (error instanceof DOMException) {

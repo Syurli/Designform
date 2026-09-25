@@ -1,0 +1,14 @@
+.example-hub { width: min(1100px, 94vw); max-height: 90vh; }
+.example-hub-layout { display: grid; grid-template-columns: minmax(190px, 260px) minmax(0, 1fr); gap: 1.2rem; min-height: 420px; }
+.example-hub-list, .example-hub-docs, .example-hub-tree { display: flex; flex-direction: column; gap: .4rem; }
+.example-hub-list button, .example-hub-docs button, .example-hub-tree button { text-align: left; border: 1px solid var(--line, #74777a); border-radius: 8px; padding: .65rem; background: transparent; color: inherit; cursor: pointer; }
+.example-hub-list button[aria-current=true], .example-hub-docs button[aria-current=true], .example-hub-tree button[aria-current=true] { border-color: var(--accent, #a9c7d8); background: color-mix(in srgb, currentColor 8%, transparent); }
+.example-hub-list span, .example-hub-docs small, .example-hub-tree small { display: block; opacity: .7; font-size: .82em; }
+.example-hub-content { min-width: 0; overflow: auto; max-height: 65vh; }
+.example-hub-docs, .example-hub-tree { max-height: 260px; overflow: auto; margin: 1rem 0; }
+.example-hub-tree section { margin-bottom: .6rem; }
+.example-hub-tree .example-hub-child { margin-left: 1rem; padding-left: .65rem; border-left: 2px solid var(--line, #74777a); }
+.example-hub-tree h3 { margin: .25rem 0; font-size: .95rem; }
+.example-hub-reading { padding: 1rem; border: 1px solid var(--line, #74777a); border-radius: 8px; line-height: 1.65; }
+.example-hub-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+@media (max-width: 680px) { .example-hub-layout { grid-template-columns: 1fr; } .example-hub-list { flex-direction: row; overflow: auto; } .example-hub-list button { min-width: 150px; } .example-hub-footer { flex-direction: column; align-items: stretch; } }

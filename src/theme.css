@@ -55,3 +55,7 @@ textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent-stron
 .reading-navigation{display:flex;gap:24px;flex-wrap:wrap}.document-reading-footer{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}.document-reading-footer .document-source{margin-top:10px}
 .document-link-preview{position:fixed;z-index:90;width:305px;max-width:calc(100vw - 24px);padding:18px 20px;border:1px solid var(--line-active,#7894b55c);border-radius:11px;background:var(--surface-raised,#182339);color:var(--text-strong,#d7e1f2);box-shadow:0 12px 36px var(--theme-shadow,#0005);pointer-events:auto;line-height:1.7}
 .document-link-preview[hidden]{display:none}.document-link-preview small{display:block;font-size:10px;color:var(--text-muted,#93a3bb);margin-bottom:7px}.document-link-preview strong{display:block;font-size:15px;font-weight:550}.document-link-preview p{font-size:12px;line-height:1.85;margin:10px 0;color:var(--text-body,#a7b8d0);overflow-wrap:anywhere}.document-link-preview>span{font-size:10px;color:var(--text-muted,#7f93b0)}
+.desktop-about { width: min(480px, 92vw); }
+.desktop-about-content { padding: 1.25rem 1.5rem; line-height: 1.8; }
+.desktop-about-content strong { display: inline-block; min-width: 4rem; }
+.desktop-about-content a { overflow-wrap: anywhere; }

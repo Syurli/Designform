@@ -1,5 +1,5 @@
 {
-  "version": "0.9.0-rc.2",
+  "version": "0.9.0-rc.3",
   "channel": "prerelease",
   "reason": "用户明确要求本轮合并、部署 Pages 并发布 Windows 包，随后手动验收。"
 }

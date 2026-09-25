@@ -4,7 +4,7 @@ import { Buffer } from 'buffer';
 import { detectMedia } from '../shared/creative/media.ts';
 import { ProjectService } from '../server/projects.ts';
 import { ProjectError } from '../server/files.ts';
-import { initializeFilesystem } from './platform.ts';
+import { initializeFilesystem,ensureExampleTemplate } from './platform.ts';
 import type { CommitRequest, DocumentDraft, ProjectSnapshot } from '../shared/model.ts';
 
 let service: ProjectService | undefined;
@@ -22,6 +22,7 @@ export async function browserApi(route: string, value?: unknown): Promise<unknow
     if (!['blank','basic','example'].includes(str('kind'))) throw new ProjectError('INVALID_TEMPLATE','请选择有效模板。');
     const directory = str('directory');
     if (input.kind !== 'example' && !directory.startsWith('/folders/')) throw new ProjectError('FOLDER_REQUIRED','请先选择本机的项目保存文件夹。');
+    if (input.kind === 'example') await ensureExampleTemplate();
     return prepareSnapshot(await service.create(str('name'), input.kind as 'blank'|'basic'|'example', directory, input.setup as Parameters<ProjectService['create']>[3]));
   }
   if (url.pathname === '/api/projects/open') return prepareSnapshot(await service.read((await service.open(str('path'))).id));
