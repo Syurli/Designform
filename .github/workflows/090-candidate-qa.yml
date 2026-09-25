@@ -1,0 +1,63 @@
+name: Verify 0.9 candidate
+on:
+  push:
+    branches: [codex/090-completion-20260925]
+    paths: [.github/workflows/090-candidate-qa.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: npm run build:all
+      - name: Explicit isolated scenario and protocol checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qa-output
+          export CEWEN_CHECK_HOME="$RUNNER_TEMP/cewen-acceptance"
+          timeout 180 node scripts/check-090.mjs scenario 2>&1 | tee qa-output/scenario.log
+          for name in completion migration connectors; do
+            timeout 180 node scripts/check-090.mjs "$name" 2>&1 | tee "qa-output/$name.log"
+          done
+      - name: Install isolated browser fixture
+        run: |
+          python -m pip install playwright==1.55.0
+          python -m playwright install --with-deps chromium
+      - name: Verify actual HTTP workbench and stdio MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CEWEN_HOME="$RUNNER_TEMP/cewen-acceptance"
+          export CEWEN_URL=http://127.0.0.1:5199
+          export CEWEN_QA_OUTPUT=qa-output
+          PORT=5199 node runtime/serve.js > qa-output/host.log 2>&1 &
+          host_pid=$!
+          trap 'kill "$host_pid" || true' EXIT
+          for i in $(seq 1 40); do
+            if curl --fail --silent "$CEWEN_URL" > /dev/null; then break; fi
+            sleep 1
+          done
+          timeout 120 node scripts/check-090-mcp.mjs 2>&1 | tee qa-output/mcp.log
+          timeout 300 python scripts/check-090-browser.py 2>&1 | tee qa-output/browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-acceptance
+          path: qa-output
+          retention-days: 14
