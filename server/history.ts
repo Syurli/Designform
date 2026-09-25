@@ -1,3 +1,5 @@
+import { collectMediaFromTexts, MEDIA_PATH } from '../shared/creative/content.ts';
+import { readHeader } from '../shared/markdown.ts';
 import { randomUUID, mkdir, readdir, rename, cp, rm, path, Buffer } from './platform.ts';
 import { DOCUMENT_FORMAT, type CommitRequest, type RevisionManifest } from '../shared/model.ts';
 import { assertPublicFilePath, fingerprint, hashFiles, optionalBytes, ProjectError, resolveInside, sha256, writeBytes } from './files.ts';
@@ -47,15 +49,22 @@ export async function history(root: string, projectId: string, verify = true): P
       const source = await optionalBytes(root, `versions/${label}/manifest.json`);
       if (!source) throw new Error('缺少最后写入的完成记录。');
       manifest = JSON.parse(source.toString('utf8')) as RevisionManifest;
-      if (manifest.state !== 'complete' || manifest.format !== DOCUMENT_FORMAT || manifest.projectId !== projectId || manifest.label !== label || typeof manifest.id !== 'string' || !manifest.files || typeof manifest.files !== 'object' || Array.isArray(manifest.files) || typeof manifest.reason !== 'string' || typeof manifest.requestId !== 'string' || typeof manifest.requestHash !== 'string' || !Array.isArray(manifest.changedPaths) || manifest.changedPaths.some(name => typeof name !== 'string') || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('版本身份、格式或完成标记不正确。');
+      if (manifest.state !== 'complete' || ![1,2].includes(manifest.format) || manifest.projectId !== projectId || manifest.label !== label || typeof manifest.id !== 'string' || !manifest.files || typeof manifest.files !== 'object' || Array.isArray(manifest.files) || typeof manifest.reason !== 'string' || typeof manifest.requestId !== 'string' || typeof manifest.requestHash !== 'string' || !Array.isArray(manifest.changedPaths) || manifest.changedPaths.some(name => typeof name !== 'string') || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('版本身份、格式或完成标记不正确。');
       if (manifest.parent !== parent) throw new Error('父版本链不完整，不能认定为可信连续历史。');
       if (verify) {
+        const verifiedTextFiles = new Map<string, Buffer>();
         for (const [relative, hash] of Object.entries(manifest.files)) {
           if (relative !== 'PROJECT.md' && relative !== 'README.md' && !relative.startsWith('docs/')) throw new Error('历史文件清单包含不支持的路径。');
           if (relative.startsWith('docs/')) assertPublicFilePath(relative);
           const content = await optionalBytes(root, `versions/${label}/${relative}`);
           if (!content || sha256(content) !== hash) throw new Error(`文件校验失败：${relative}`);
+          if (relative !== 'README.md') verifiedTextFiles.set(relative, content);
           if (companionKind(relative)) validateCompanionFile(relative, new TextDecoder('utf-8', { fatal: true }).decode(content));
+        }
+        if (manifest.format === 2) {
+          for (const [name, hash] of Object.entries(manifest.media ?? {})) if (!MEDIA_PATH.test(name) || MEDIA_PATH.exec(name)![1] !== hash) throw new Error('历史媒体地址无效');
+          const referencedMedia = collectMediaFromTexts(verifiedTextFiles);
+          if (JSON.stringify(Object.entries(referencedMedia).sort()) !== JSON.stringify(Object.entries(manifest.media ?? {}).sort())) throw new Error('历史媒体清单与该修订正文描述不一致');
         }
         if (!manifest.files['PROJECT.md'] || !manifest.files['README.md']) throw new Error('版本快照缺少项目说明或变更说明。');
         const currentHashes = Object.fromEntries(Object.entries(manifest.files).filter(([name]) => name !== 'README.md'));
@@ -86,7 +95,10 @@ export async function publishRevision(root: string, projectId: string, current: 
   for (const [relative, bytes] of current) await writeBytes(root, `${staged}/${relative}`, bytes);
   const explanation = `# ${label} · ${request.reason.replace(/[\r\n]+/g, ' ')}\n\n- 时间：${createdAt}\n- 来源：${{ user: '手工保存', external: '外部文件修改', import: '资料导入', restore: '恢复历史', llm: '模型协作' }[request.actor]}\n- 稳定修订 ID：${id}\n${request.restoredFrom ? `- 恢复来源修订：${request.restoredFrom}\n` : ''}- 上一版本：${previous ? `[${previous.label}](../${previous.label}/README.md)` : '初始版本'}\n\n## 改动文件\n\n${changedPaths.map(name => `- ${name}`).join('\n') || '- 建立项目版本'}\n\n## 阅读\n\n[项目说明](PROJECT.md) · [当前版本文档约定](docs/README.md)\n`;
   await writeBytes(root, `${staged}/README.md`, explanation);
-  const manifest: RevisionManifest = { format: DOCUMENT_FORMAT, state: 'complete', projectId, id, label, parent: previous?.id ?? null, createdAt, actor: request.actor, reason: request.reason, requestId: request.requestId, requestHash, bytes: [...current.values()].reduce((total, bytes) => total + bytes.byteLength, 0) + Buffer.byteLength(explanation), files: { ...hashes, 'README.md': sha256(explanation) }, fingerprint: fingerprint(hashes), changedPaths, ...(request.restoredFrom ? { restoredFrom: request.restoredFrom } : {}) };
+  const format = Number(readHeader(current.get('PROJECT.md')!.toString('utf8')).metadata.format);
+  const media = format === 2 ? collectMediaFromTexts(current) : {};
+  for (const [name, hash] of Object.entries(media)) { const bytes = await optionalBytes(root, name); if (!bytes || sha256(bytes) !== hash) throw new ProjectError('MEDIA_MISSING', `媒体缺失或损坏：${name}`); }
+  const manifest: RevisionManifest = { format, ...(format === 2 ? { media } : {}), state: 'complete', projectId, id, label, parent: previous?.id ?? null, createdAt, actor: request.actor, reason: request.reason, requestId: request.requestId, requestHash, bytes: [...current.values()].reduce((total, bytes) => total + bytes.byteLength, 0) + Buffer.byteLength(explanation), files: { ...hashes, 'README.md': sha256(explanation) }, fingerprint: fingerprint(hashes), changedPaths, ...(request.restoredFrom ? { restoredFrom: request.restoredFrom } : {}) };
   // 完成清单最后生成；没有它的暂存目录不属于可选择的历史版本。
   await writeBytes(root, `${staged}/manifest.json`, JSON.stringify(manifest, null, 2));
   await rename(await resolveInside(root, staged), await resolveInside(root, `versions/${label}`));

@@ -1,5 +1,6 @@
 /** 策问公开文档格式；格式号独立于应用发行版本和接口协议。 */
-export const DOCUMENT_FORMAT = 1;
+export const DOCUMENT_FORMAT = 2;
+export const SUPPORTED_DOCUMENT_FORMATS = [1, 2] as const;
 /** 文件交换与本地接口共用的协议号。 */
 export const PROTOCOL_VERSION = 1;
 /** 总纲以下的公开分类与文档层级上限，阅读时旧资料不会被自动改写。 */
@@ -69,7 +70,7 @@ export interface KnowledgeEdge {
   type: RelationType;
   note: string;
   /** 修改关系时精确定位其公开来源；不把派生关系误当手工关系删除。 */
-  origin?: { kind: 'classification' | 'section' | 'catalog' | 'manual' | 'markdown' | 'question'; path: string; occurrences?: { start: number; end: number; label: string; url: string; reference: boolean }[] };
+  origin?: { kind: 'classification' | 'section' | 'catalog' | 'manual' | 'markdown' | 'question' | 'creative'; path: string; occurrences?: { start: number; end: number; label: string; url: string; reference: boolean }[] };
 }
 
 /** 各视图共用的中文关系图例。 */
@@ -149,6 +150,8 @@ export interface ProjectSnapshot extends KnowledgeData {
   revisionLabel?: string;
   /** 公开文件清单用于附件和完整恢复的并发校验。 */
   files?: Record<string, string>;
+  /** 格式 2：不变媒体引用单列，不把字节重复嵌入每次快照。 */
+  media?: Record<string, string>;
   /** 受控公开排版和笔画文件；不作为 Markdown 正文解析。 */
   companions?: Record<string, { text: string; hash: string }>;
 }
@@ -191,6 +194,7 @@ export interface RevisionManifest {
   /** 同一个请求 ID 携带不同内容时必须拒绝，不能误当作成功重试。 */
   requestHash: string;
   files: Record<string, string>;
+  media?: Record<string, string>;
   fingerprint: string;
   changedPaths: string[];
   restoredFrom?: string;

@@ -1,7 +1,7 @@
 {
   "name": "baige-designform",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0-rc.2",
   "type": "module",
   "main": "runtime/desktop.js",
   "description": "策问 Designform — 游戏策划知识空间",
@@ -19,7 +19,13 @@
     "dev:web": "vite --mode web --host 127.0.0.1 --port 5174",
     "build:web": "tsc --noEmit && vite build --mode web",
     "build:all": "npm run build && npm run build:web && npm run build:runtime",
-    "licenses": "node scripts/collect-licenses.mjs"
+    "licenses": "node scripts/collect-licenses.mjs",
+    "demos": "node scripts/generate-demo-media.mjs",
+    "prebuild": "npm run demos",
+    "prebuild:web": "npm run demos",
+    "predev": "npm run demos",
+    "predev:web": "npm run demos",
+    "prebuild:runtime": "npm run demos"
   },
   "dependencies": {
     "@milkdown/crepe": "7.22.1",
