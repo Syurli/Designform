@@ -32,9 +32,8 @@ export function prepareDirectoryFields(container: HTMLElement) {
   }
   if (container.querySelector('[data-form="create"]')) {
     const note = document.createElement('p'); note.className = 'edition-note quiet';
-    note.textContent = '网页版 · 正式项目直接保存在你选择的本机文件夹，不上传。虚构示例暂存在当前浏览器，清除网站数据会删除示例和最近入口；请用资料交换导出需保留的示例。';
+    note.textContent = '网页版 · 正式项目直接保存在你选择的本机文件夹，不上传。浏览示例不会创建项目；明确创建的虚构练习副本暂存在当前浏览器，请及时导出需保留的内容。';
     container.querySelector('.project-dialog-header')?.after(note);
-    const example = container.querySelector('[data-action="example"] span'); if (example) example.textContent = '浏览器示例 · 可导出为本机项目';
   }
 }
 let folderPicker: (() => Promise<string>) | undefined;

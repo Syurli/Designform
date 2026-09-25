@@ -56,6 +56,20 @@ jobs:
           done
           timeout 120 node scripts/check-090-mcp.mjs 2>&1 | tee qa-output/mcp.log
           timeout 300 python scripts/check-090-browser.py 2>&1 | tee qa-output/browser.log
+      - name: Verify read-only example hub on an empty fictional workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CEWEN_HOME="$RUNNER_TEMP/cewen-example-readonly"
+          export CEWEN_URL=http://127.0.0.1:5203
+          PORT=5203 node runtime/serve.js > qa-output/example-host.log 2>&1 &
+          host_pid=$!
+          trap 'kill "$host_pid" || true' EXIT
+          for i in $(seq 1 40); do
+            if curl --fail --silent "$CEWEN_URL" > /dev/null; then break; fi
+            sleep 1
+          done
+          timeout 120 python scripts/check-090-examples.py 2>&1 | tee qa-output/examples.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -20,6 +20,7 @@ import { relativeLink, linkTarget } from '../shared/links';
 import { projectAssetUrl } from './project-client';
 import type { DocumentDraft, ProjectDocument, ProjectSnapshot, WorkspaceItem } from '../shared/model.ts';
 import { prepareDirectoryFields } from './edition';
+import { openExampleHub } from './examples/example-hub';
 import { readHeader, parseKnowledge } from '../shared/markdown.ts';
 import { documentSections, moveSection, setMetadata, setTitle, putRelation, removeRelation, questionDocument } from '../shared/editing.ts';
 import { projectMarkdown } from './document-reading';
@@ -126,9 +127,9 @@ export class ProjectWorkbench {
   async projects() {
     this.flushRich(); await this.flushDraft(); this.draft = null; this.setup = undefined;
     try { this.library = await listProjects(); } catch { this.library = await connectProjects(); }
-    this.shell('项目库', '继续你的设计，或为一个新想法留出空间。', `<div class="library-heading"><h2>最近项目 <span>${this.library.projects.length}</span></h2><button class="primary-button" data-action="create-project">＋ 新建游戏设想</button><button class="primary-button" data-action="creative-project" data-tutorial="preset-create">跨领域预设与综合示例</button></div>
+    this.shell('项目库', '继续你的设计，或为一个新想法留出空间。', `<div class="library-heading"><h2>最近项目 <span>${this.library.projects.length}</span></h2><button class="primary-button" data-action="create-project">＋ 新建游戏设想</button><button class="primary-button" data-action="creative-project" data-tutorial="preset-create">从预设新建项目</button></div>
       <div class="library-projects">${this.library.projects.map(project => `<article class="library-project"><button class="library-project-open" data-project-path="${html(project.path)}"><span class="library-project-mark">${project.isExample?'◇':'▤'}</span><strong>${html(project.name)}</strong><small>${project.isExample?'虚构示例 · ':''}${html(project.path)}</small><span class="library-enter">打开项目 →</span></button><details class="library-project-menu"><summary aria-label="${html(project.name)}的更多操作">···</summary><div><button data-copy-project="${project.id}">复制为新项目</button><button data-forget-project="${project.id}">移除最近记录</button></div></details></article>`).join('') || '<div class="library-empty"><h3>从第一个游戏想法开始</h3><p>创建独立的策划文件夹，或打开已有项目。</p><button class="primary-button" data-action="create-project">新建项目</button></div>'}</div>
-      <div class="library-footer"><form data-form="open" class="workbench-form open-project-form"><label>打开本机项目<input name="path" required placeholder="选择包含 PROJECT.md 的文件夹"/></label><button class="secondary-button" type="submit">打开项目</button></form><button class="example-button" data-action="example"><strong>体验基础示例 →</strong><span>用虚构内容熟悉星图、文档与关系</span></button></div>`, true);
+      <div class="library-footer"><form data-form="open" class="workbench-form open-project-form"><label>打开本机项目<input name="path" required placeholder="选择包含 PROJECT.md 的文件夹"/></label><button class="secondary-button" type="submit">打开项目</button></form><button class="example-button" data-action="example"><strong>浏览示例 →</strong><span>先选示例阅读；只有明确创建练习副本才写入本地文件</span></button></div>`, true);
     this.dialog.classList.add('library-dialog');
   }
 
@@ -603,7 +604,7 @@ export class ProjectWorkbench {
       case 'create-project': this.creation(); break;
       case 'blank-project': this.setup=undefined;this.projectDetails();break;
       case 'close-inspector': this.dialog.querySelector('#conflict-details')!.replaceChildren();break;
-      case 'example': button.disabled = true; try { this.onChange(await createProject('纸上远行 · 基础示例', 'example', this.library.defaultDirectory)); this.dialog.close(); } finally { button.disabled = false; } break;
+      case 'example': openExampleHub({ onCreated: snapshot => { this.onChange(snapshot); this.dialog.close(); } }); break;
       case 'new-document': await this.flushDraft(); this.draft = null; this.newDocument(); break;
       case 'handoff': await openCollaboration('handoff',this.getSnapshot());break;
       case 'drafts': await this.drafts(); break;

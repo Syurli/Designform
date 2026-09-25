@@ -2,19 +2,46 @@ import { moduleRegistry } from './registry.ts';
 import { asString,type CreativeObject,type Data } from './model.ts';
 export const presets = [
  {id:'blank',title:'空白创作',description:'从空白开始；随时使用所有模块。',sample:'空白练习'},
- {id:'game',title:'游戏设计',description:'规则、战斗与关卡设计；也可以插入分镜和配音。',sample:'纸上远行 · 进阶练习'},
+ {id:'game',title:'游戏设计',description:'规则、战斗与关卡设计；也可以插入分镜和配音。',sample:'雾港来信 · 游戏章节'},
  {id:'narrative',title:'叙事与世界观',description:'角色、地点、剧情分支与创作问策。',sample:'雾港来信 · 世界观'},
  {id:'screenplay',title:'剧本开发',description:'场次、角色、对白与剧情线；不限制地图和其他模块。',sample:'雨夜候车室'},
  {id:'film',title:'微电影制作',description:'分镜、配音、素材任务与二维有声排演。',sample:'最后一盏灯'},
  {id:'mixed',title:'综合创作',description:'同源地图连通战斗设计、剧情和影像。',sample:'雾港来信'},
 ] as const;
-export interface PresetDocument {id:string;title:string;purpose:string;body:string;objects:CreativeObject[]}
+/** 分类属于公开项目结构，预设只决定初始目录，不限制后续可插入的模块。 */
+export const presetGroups = [
+ {key:'start',title:'创作起点',color:'#EBC58D'},
+ {key:'world',title:'共享世界',color:'#7CBFFF'},
+ {key:'space',title:'地点与地图',color:'#7CBFFF',parent:'world'},
+ {key:'people',title:'角色与声音',color:'#B5A3F5',parent:'world'},
+ {key:'story',title:'故事与规则',color:'#79D9C3'},
+ {key:'design',title:'设计专题',color:'#79D9C3',parent:'story'},
+ {key:'scenes',title:'剧情与场次',color:'#79D9C3',parent:'story'},
+ {key:'film',title:'影像表达',color:'#ED9FAD'},
+ {key:'boards',title:'分镜与排演',color:'#ED9FAD',parent:'film'},
+ {key:'collaboration',title:'协作与制作',color:'#D9B58C'},
+ {key:'quests',title:'Quest 与问题',color:'#D9B58C',parent:'collaboration'},
+ {key:'media',title:'演示素材',color:'#D9B58C',parent:'collaboration'},
+] as const;
+export type PresetGroupKey = typeof presetGroups[number]['key'];
+/** 根据内容职责归组，分镜随影像、场次随剧情，地图使用层仍引用共享地图。 */
+function documentGroup(key:string):PresetGroupKey {
+ if(key==='brief')return 'start';
+ if(/^map|^location/.test(key))return 'space';
+ if(/^character|^voice/.test(key))return 'people';
+ if(/^dd/.test(key))return 'design';
+ if(/^scene|^storyline|^speech/.test(key))return 'scenes';
+ if(/^shots|^camera-map|^sequence|^shot/.test(key))return 'boards';
+ if(/^quest/.test(key))return 'quests';
+ return 'start';
+}
+export interface PresetDocument {id:string;title:string;purpose:string;group:PresetGroupKey;body:string;objects:CreativeObject[]}
 export interface PresetContent {title:string;documents:PresetDocument[];questIds:string[];standaloneTargets:string[];prefix:string}
 export function buildPreset(presetId:string,prefix:string,sample:boolean,media:Record<string,string>={}):PresetContent {
  const preset=presets.find(p=>p.id===presetId);if(!preset)throw new Error('未知预设');
  const id=(s:string)=>`${prefix}-${s}`,documents:PresetDocument[]=[],questIds:string[]=[];
  const object=(type:string,key:string,title:string,data:Data={})=>{const o=moduleRegistry.get(type)!.create(id(key),title);o.data={...o.data,...data};o.description=sample?'完全虚构的演示内容，非用户真实决定。':'';return o;};
- const doc=(key:string,title:string,objects:CreativeObject[],body='',purpose='creative')=>documents.push({id:id('doc-'+key),title,purpose,objects,body});
+ const doc=(key:string,title:string,objects:CreativeObject[],body='',purpose='creative')=>documents.push({id:id('doc-'+key),title,purpose,group:documentGroup(key),objects,body});
  if(presetId==='blank')return {title:preset.sample,documents,questIds,standaloneTargets:[],prefix};
  if(!sample){
   doc('brief','创作目标',[],'## 目标体验\n\n## 约束与范围\n\n## 尚未决定\n\n此预设仅提供起步结构。全部模块可在任意文档使用。');
@@ -23,7 +50,8 @@ export function buildPreset(presetId:string,prefix:string,sample:boolean,media:R
   return {title:preset.title,documents,questIds,standaloneTargets:[documents[0].id],prefix};
  }
  const sceneCount=presetId==='screenplay'?3:presetId==='film'?2:4,shotCount=presetId==='film'?8:12;
- doc('brief','创作总览',[],'## 一个雨夜，一封没有收件人的信\n\n送信人来到雾港货运站，在灯灭之前决定从哪条路离开。游戏章节、剧本和短片共用角色与地图。\n\n**这是演示资料，不是真实项目。示意图不是最终美术，合成配音不是表演成品。**\n\n## 练习主线\n\n先阅读战斗 DD，再从地图发起 Quest，调整出口暴露时机，查看分镜与排演，导出生产任务并回导候选。');
+ const focus=({game:'从战斗路线与资源风险切入，再观察同一地图如何服务剧情和镜头。',narrative:'从人物动机、地点与分支切入，再核对地图和场次的共同来源。',screenplay:'从雨夜候车室的场次、对白与潜台词切入，再检查分镜和声音。',film:'从灯下信件的连续画面、声音和排演节奏切入，再追溯剧情依据。',mixed:'从共享地图开始，贯通战斗 DD、剧情线、Quest、分镜和素材生产。'} as Record<string,string>)[presetId]??'';
+ doc('brief','创作总览',[],`## 一个雨夜，一封没有收件人的信\n\n送信人来到雾港货运站，在灯灭之前决定从哪条路离开。游戏章节、剧本和短片共用角色与地图。\n\n**这是演示资料，不是真实项目。示意图不是最终美术，合成配音不是表演成品。**\n\n## 本示例的学习重点\n\n${focus}\n\n## 练习主线\n\n先阅读对应专题，再从共享地图发起 Quest，调整出口暴露时机，查看分镜与排演，导出生产任务并回导候选。`);
  doc('map','货运站共享地图',[object('map','map-station','货运站',{mediaId:media['map-0.png']??'',points:[{id:'gate',x:.12,y:.66,label:'正门'},{id:'bridge',x:.88,y:.55,label:'桥下出口'},{id:'platform',x:.50,y:.83,label:'站台'}]})]);
  doc('map2','街区共享地图',[object('map','map-town','旧城街区',{mediaId:media['map-1.png']??'',points:[{id:'lamp',x:.45,y:.30,label:'最后一盏灯'}]})]);
  const overlay=(key:string,title:string,purpose:string)=>object('map-use',key,title,{mapId:id('map-station'),purpose,points:[{id:`${key}-focus`,x:key==='use-combat'?.30:.70,y:.5,label:purpose}],paths:[{id:`${key}-path`,label:purpose,points:key==='use-combat'?'0.12,0.66;0.35,0.60;0.50,0.83':'0.50,0.83;0.72,0.64;0.88,0.55'}]});
