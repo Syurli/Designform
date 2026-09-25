@@ -1,0 +1,47 @@
+name: Recover verified 0.9 candidate
+on:
+  push:
+    branches: [codex/090-completion-20260925]
+    paths: [.github/workflows/090-recover.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify interrupted transfer records
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import os, json, base64, urllib.request, zlib, hashlib, pathlib
+          ids = ['90c31be46d333248cdc2006d4c7b37f8ea82ff94','f20457dde27e3707b2208a95ecd7a22a581c86aa','d8ba6a5b43214b20493ca46e26dc2ccb5e5b0155','8ca206fb0a108ace8d70703d42e2338ddeb66079','6708427f0f169d686305fdd22d6dd32bba70458d','e7729eaab9eccc55d57a3407878e0004f821b4d3','06cd475112871624e60f476d632d345e765b95e2','b8eb16f78d611fb96905b6e86d840431eeff03bf','a4040a6c3155e9cb4f3a4c9d6ef688784861a753','70d47f5c62a9bf4f4e2a5933214b28b875359dbf','474dfc4132c0496f8d1259661673aa07ca287562','15cfc28a526019d6a2691c658a45aeac335036ab','743fd303462fa4651ff59d7a4c6701cc9c13cde5']
+          rows={}; bad=[]
+          for sha in ids:
+            try:
+              req=urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              obj=json.load(urllib.request.urlopen(req)); data=base64.b64decode(obj['content'])
+              assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()==sha
+              count=0
+              for line in data.decode().splitlines():
+                num,crc,text=line.split(':',2); idx=int(num)
+                if f'{zlib.crc32(text.encode()):08x}'!=crc:
+                  bad.append({'blob':sha,'row':idx,'reason':'crc'}); continue
+                if idx in rows and rows[idx]!=text: raise ValueError('conflicting valid record')
+                rows[idx]=text; count+=1
+              print('VERIFIED',sha,count,flush=True)
+            except Exception as exc:
+              print('BLOB_ERROR',sha,str(exc),flush=True)
+          missing=[i for i in range(1656) if i not in rows]
+          report={'verifiedRows':len(rows),'missingRows':missing,'badRows':bad}
+          pathlib.Path('transfer-audit.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps(report),flush=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transfer-audit
+          path: transfer-audit.json
+          retention-days: 3
