@@ -73,3 +73,24 @@ export const readWorkspace = (id: string) => request<WorkspaceState>(`/api/proje
 export const updateWorkspace = (id: string, update: { baseRevision: number; item?: WorkspaceItem; remove?: string }) => request<WorkspaceState>(`/api/projects/${encodeURIComponent(id)}/workspace`, update);
 /** 各业务面板共享会话和错误处理，不再建立第二条直接文件写入通道。 */
 export const projectAction = <T>(id: string, action: string, input?: unknown) => request<T>(`/api/projects/${encodeURIComponent(id)}/${action}`, input);
+
+/** 创作模块共享原会话、错误模型和事务服务。 */
+export const creativeAction = <T>(id: string, action: string, input: Record<string,unknown> = {}) => projectAction<T>(id,'creative',{...input,action});
+export async function loadMediaUrl(snapshot: ProjectSnapshot, filename: string) {
+  if (!isWebEdition) return projectAssetUrl(snapshot,filename);
+  webApi ??= await import('../browser/api'); return webApi.loadBrowserMedia(snapshot,filename);
+}
+export async function uploadProjectMedia(id: string, file: File, input: { requestId: string; permission: string; durationMs?: number }) {
+  if(file.size > 64*1024*1024) throw new ClientError({code:'MEDIA_TOO_LARGE',message:'单个媒体文件不能超过 64 MiB'});
+  if(isWebEdition) { webApi ??= await import('../browser/api'); return webApi.uploadBrowserMedia(id,file,{...input,originalName:file.name}); }
+  const query=new URLSearchParams({requestId:input.requestId,name:file.name,permission:input.permission,durationMs:String(input.durationMs??0)});
+  const response=await fetch(`/api/projects/${encodeURIComponent(id)}/media-upload?${query}`,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Cewen-Session':session},body:file});
+  const result=await response.json();if(!response.ok||result.error)throw new ClientError(result.error??{code:'UPLOAD_FAILED',message:'媒体上传失败'});
+  return result as {snapshot:ProjectSnapshot;mediaId:string;duplicate:boolean};
+}
+
+/** 长时间排演持有媒体租约，离开时释放；网页缓存只逐出未被使用的 Blob。 */
+export async function acquireMediaUrl(snapshot: ProjectSnapshot, filename: string): Promise<{url:string;release:()=>void}> {
+  if (!isWebEdition) return {url:projectAssetUrl(snapshot,filename),release:()=>{}};
+  webApi ??= await import('../browser/api'); return webApi.acquireBrowserMedia(snapshot,filename);
+}

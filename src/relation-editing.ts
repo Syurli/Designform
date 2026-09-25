@@ -25,7 +25,7 @@ export async function editEdge(snapshot:ProjectSnapshot,id:string):Promise<Graph
     if(action==='remove')return{kind:'reference',edgeId:id,occurrence:Number(occurrence)};
     const target=await pickDocument(snapshot,{title:'改为引用哪个设计？',exclude:[]});return target&&typeof target!=='string'?{kind:'reference',edgeId:id,occurrence:Number(occurrence),target:target.id}:undefined;
   }
-  if(edge.origin?.kind!=='manual'){await chooseAction('这条线来自文档结构',[{id:'close',label:edge.origin?.kind==='section'?'章节属于所在 DD，请在正文中调整章节':'此关系来自总纲目录或问询对象，请编辑对应文档'}]);return;}
+  if(edge.origin?.kind!=='manual'){await chooseAction('这条线来自文档结构',[{id:'close',label:edge.origin?.kind==='creative'?'此关系来自共享模块字段，请在创作模块中编辑源对象':edge.origin?.kind==='section'?'章节属于所在 DD，请在正文中调整章节':'此关系来自总纲目录或问询对象，请编辑对应文档'}]);return;}
   const action=await chooseAction(`${title(edge.source)} → ${title(edge.target)}`,[{id:'target',label:'改接目标条目'},{id:'source',label:'改接来源条目'},{id:'remove',label:'断开这条手工关联',description:'正文中的引用和分类归属保持原样。'}]);if(!action)return;
   if(action==='remove')return{kind:'disconnect',edgeIds:[id]};
   const target=await pickDocument(snapshot,{title:action==='source'?'新的来源条目':'新的目标条目',exclude:[action==='source'?edge.target:edge.source]});return target&&typeof target!=='string'?{kind:'reconnect',edgeId:id,end:action as 'source'|'target',nodeId:target.id}:undefined;

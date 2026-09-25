@@ -1,3 +1,5 @@
+import { registerCreativeTools } from './creative.ts';
+import { APP_VERSION } from '../shared/version.ts';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -6,7 +8,7 @@ import type { ProjectSnapshot } from '../shared/model.ts';
 import { createPresence } from './presence.ts';
 
 /** 本地 stdio 适配器只使用公开服务；输出通道仅用于 MCP，日志走标准错误。 */
-const server = new McpServer({ name: 'baige-cewen', version: '0.7.1' }), local = new LocalClient();
+const server = new McpServer({ name: 'baige-cewen', version: APP_VERSION }), local = new LocalClient();
 const presence = createPresence(server);
 /** 记录访问的项目和时间，不把工具参数或文档正文泄露到连接面板。 */
 const client = { request<T = unknown>(route: string, input?: unknown) { presence.activity(route); return local.request<T>(route, input); } };
@@ -45,4 +47,5 @@ server.registerTool('cewen_checkpoint', { description: '用户已授权直接修
 server.registerTool('cewen_begin_batch', { description: '用户授权外部工具直接写多个公开文件前开始一轮，自动同步暂不发布中途版本。必须在落盘完成后结束。', inputSchema: { projectId: project, requestId: z.string() } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/begin-batch`, input)));
 server.registerTool('cewen_end_batch', { description: '验证已完成的外部文件批次并创建一个版本。格式错误会保留批次供修正后重试。', inputSchema: { projectId: project, batch: z.string(), reason: z.string() } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/end-batch`, input)));
 
+registerCreativeTools(server,client);
 await server.connect(new StdioServerTransport());

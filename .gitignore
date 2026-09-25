@@ -13,3 +13,6 @@ dist-web/
 Thumbs.db
 *.sqlite-wal
 *.sqlite-shm
+
+# Generated from tracked schematic generator and synthetic demo voice fixtures.
+shared/creative/sample-media.generated.ts

@@ -34,3 +34,14 @@ description: 通过策问 Designform 的独立 Markdown 项目、交换包或本
 模型换任务或换厂商时，交接当前修订、相关文档 ID、问题与未采纳提案即可。不要读取 `.cewen/` 私人记录，除非用户明确选择了这些内容作为上下文。历史快照不直接改写；恢复旧稿应生成新的修订。
 
 按当前任务选择阅读：[导入流程](references/IMPORT.md)、[问询流程](references/INQUIRY.md)、[更新流程](references/UPDATE.md)。
+
+
+## 0.9 候选的创作与 Quest
+
+先读取实际 `cewen_capabilities`；预设不会限制模块，游戏项目可用分镜、剧本可引用地图。新模块只在格式2中可写，旧项目需要用户明确在副本升级，不能让模型直接更改格式号。
+
+Quest先读取 `cewen_quest_read`，按需读取 `cewen_object_context`；已有游标使用 `cewen_quest_events`，失效时完整重读。使用 `cewen_quest_round` 原子追加少量问题，保留 requestId 与哈希用于同请求重试，不代填答案。用户已回答、已决定、已落实必须分别确认；提案用既有 `cewen_propose` 等待用户审核。
+
+生成素材前准备 `cewen_production_preview`，核对稳定任务身份、依据和提示词；MCP不直接执行工作流或自动采用结果。看图/听声音需用 `cewen_media` 实际取得内容，路径和文字描述不是视觉/听觉验收。原图、原始回答、共享地图和本处覆盖层各有来源，不因排版或生成便利而复制后独立修改。
+
+续轮请求可以复制交给宿主，不能仅凭MCP心跳声称模型会自动继续。当前候选的剩余范围见仓库开发状态，不能把接口预留或静态示意当作全部实现。

@@ -1,3 +1,4 @@
+import {buildCreativeIndex,contentHash} from './creative/content.ts';
 import { parseDocument as parseYaml } from 'yaml';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfm } from 'micromark-extension-gfm';
@@ -78,11 +79,11 @@ export function parseProjectInfo(file: MarkdownFile, path = ''): ProjectInfo {
   const { metadata, body } = readHeader(file.text);
   const id = identity(metadata.id);
   if (!id) throw new Error('PROJECT.md 缺少有效的稳定项目 ID。');
-  if (metadata.format !== DOCUMENT_FORMAT) throw new Error(`不支持文档格式 ${String(metadata.format)}，请使用对应版本或迁移副本。`);
+  if (typeof metadata.format !== 'number' || ![1, 2].includes(metadata.format)) throw new Error(`不支持文档格式 ${String(metadata.format)}，请使用对应版本或迁移副本。`);
   const icon = metadata.icon;
   const projectIcon = icon && typeof icon === 'object' && !Array.isArray(icon) && ['text', 'symbol', 'image'].includes(String((icon as Record<string, unknown>).kind)) && typeof (icon as Record<string, unknown>).value === 'string'
     ? { kind: (icon as Record<string, unknown>).kind as 'text' | 'symbol' | 'image', value: (icon as Record<string, string>).value } : undefined;
-  return { id, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: DOCUMENT_FORMAT, path, isExample: metadata.example === true, ...(projectIcon ? { icon: projectIcon } : {}), notes: string(metadata.notes) };
+  return { id, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: Number(metadata.format), path, isExample: metadata.example === true, ...(projectIcon ? { icon: projectIcon } : {}), notes: string(metadata.notes) };
 }
 
 /**
@@ -314,6 +315,14 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
       if (typeof target !== 'string') { issue(item.file.path, 'INVALID_QUESTION_TARGET', '问题目标需要稳定条目 ID。'); continue; }
       appendEdge({ id: `question:${item.document.id}:${target}`, source: item.document.id, target, type: 'references', note: '此问题讨论的设计条目；问题尚未决定时不表示规则已确定。', origin: {kind:'question',path:item.file.path} }, item.file.path);
     }
+  }
+  // 创作模块关系投影为文档之间的引用；只来源于显式字段，不由布局位置推断。
+  const creative = buildCreativeIndex({documents});
+  const objectsById = new Map(creative.objects.map(item=>[item.object.id,item]));
+  for(const use of creative.references){const source=objectsById.get(use.ownerId),target=objectsById.get(use.targetId);if(!source||!target||source.documentId===target.documentId||!nodeIds.has(source.documentId)||!nodeIds.has(target.documentId))continue;
+    const edgeId=`creative:${source.object.id}:${target.object.id}:${contentHash(use.role).slice(0,12)}`;
+    if(edges.some(edge=>edge.id===edgeId))continue;
+    appendEdge({id:edgeId,source:source.documentId,target:target.documentId,type:'references',note:`模块「${source.object.title}」通过「${use.role}」引用「${target.object.title}」。请在源模块字段中维护。`,origin:{kind:'creative',path:source.path}},source.path);
   }
   // 断链保留为诊断；不把不存在端点交给渲染器，更不制造虚假的目标节点。
   const validEdges = edges.filter(edge => {

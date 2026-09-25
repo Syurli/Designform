@@ -19,7 +19,7 @@ export async function startHost(options: { root: string; home?: string; port?: n
       const file = path.resolve(staticRoot, relative), check = path.relative(staticRoot, file);
       if (!check || check.startsWith('..') || path.isAbsolute(check) || !(await stat(file).catch(() => null))?.isFile()) { response.writeHead(404); response.end('Not found'); return; }
       const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain; charset=utf-8' };
-      response.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
+      response.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
       response.end(request.method === 'HEAD' ? undefined : await readFile(file));
     })().catch(error => { if (!response.headersSent) response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' }); response.end('本地服务未完成请求，请保留当前草稿并重试。'); console.error(error); });
   });

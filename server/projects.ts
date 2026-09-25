@@ -1,3 +1,5 @@
+import { buildCreativeIndex, collectMediaFromTexts, MEDIA_PATH } from '../shared/creative/content.ts';
+import { detectMedia } from '../shared/creative/media.ts';
 import { randomUUID, cp, mkdir, readdir, realpath, rm, watch, type FSWatcher, path, defaultTemplateRoot, Buffer, backupStateFile } from './platform.ts';
 import { stringify } from 'yaml';
 import { parseKnowledge, parseProjectInfo, readHeader, type MarkdownFile } from '../shared/markdown.ts';
@@ -67,6 +69,7 @@ export class ProjectService {
   private registry: Registry = { projects: [], current: null };
   private queues = new Map<string, Promise<unknown>>();
   private ready: Promise<void>;
+  private closing=false;
   private watchers = new Map<string, FSWatcher>();
   private observations = new Map<string, { fingerprint: string; since: number }>();
   private touched = new Map<string, number>();
@@ -107,18 +110,18 @@ export class ProjectService {
   private async saveRegistry() { await writeBytes(this.home, 'library.json', JSON.stringify(this.registry, null, 2)); }
   /** 监听只标记变化；哈希扫描仍负责判断真正内容，平台不支持时继续使用补扫。 */
   private observe(project: ProjectInfo) {
-    if (this.watchers.has(project.id)) return;
+    if (this.closing||this.watchers.has(project.id)) return;
     try {
       const watcher = watch(project.path, { recursive: true }, (_event, filename) => {
         const name = String(filename ?? '').replaceAll('\\', '/');
         if (name === 'PROJECT.md' || name.startsWith('docs/')) this.touched.set(project.id, Date.now());
         if (name === 'versions' || name.startsWith('versions/')) this.verifiedHistory.delete(project.id);
       });
-      watcher.on('error', () => { watcher.close(); this.watchers.delete(project.id); this.verifiedHistory.delete(project.id); });
+      watcher.on('error', () => { watcher.close(); if(this.watchers.get(project.id)===watcher)this.watchers.delete(project.id); this.verifiedHistory.delete(project.id); });
       this.watchers.set(project.id, watcher);
     } catch { /* 部分文件系统不支持监听，定期扫描和窗口焦点刷新仍然有效。 */ }
   }
-  close() { this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
+  close() { this.closing=true;this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
   private libraryView() { return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
 
   /** 项目库身份以各项目当前 PROJECT.md 为准；失联或损坏项目保留最近登记，供用户重新定位。 */
@@ -168,6 +171,8 @@ export class ProjectService {
       }
       const duplicate = this.registry.projects.find(entry => entry.id === project.id && entry.path.toLowerCase() !== canonical.toLowerCase());
       if (duplicate) throw new ProjectError('DUPLICATE_PROJECT', '同一项目身份已经从另一目录打开，请恢复原入口或复制为新项目。', { existingPath: duplicate.path });
+      // 同身份副本切换后不能沿用旧目录的已验证历史或稳定观察窗口。
+      this.verifiedHistory.delete(project.id); this.observations.delete(project.id); this.touched.delete(project.id);
       this.registry.projects = [project, ...this.registry.projects.filter(entry => entry.id !== project.id)];
       this.registry.current = project.id;
       await this.saveRegistry();
@@ -176,8 +181,9 @@ export class ProjectService {
   }
 
   /** 新建始终使用空目标目录；模板只复制虚构材料，绝不以真实资料作为默认。 */
-  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home, setup?: { brief?: string; categories?: import('../shared/model.ts').KnowledgeGroup[] }): Promise<ProjectSnapshot> {
+  async create(name: string, kind: 'blank' | 'basic' | 'example', parent = this.home, setup?: { creationRequestId?:string; example?:boolean; brief?: string; categories?: import('../shared/model.ts').KnowledgeGroup[] }): Promise<ProjectSnapshot> {
     await this.ready;
+    if(setup?.creationRequestId){for(const registered of this.registry.projects){const entry=await optionalBytes(registered.path,'PROJECT.md');if(entry&&readHeader(entry.toString('utf8')).metadata.creationRequestId===setup.creationRequestId)return this.read(registered.id);}}
     name = name.trim();
     if (!name || name.length > 100) throw new ProjectError('INVALID_NAME', '请输入 1～100 个字符的项目名称。');
     if (setup && (typeof setup !== 'object' || (setup.brief !== undefined && (typeof setup.brief !== 'string' || setup.brief.length > 20000)) || (setup.categories !== undefined && (!Array.isArray(setup.categories) || setup.categories.length > 60 || setup.categories.some(group => !group || !/^[A-Za-z0-9_-]{1,120}$/.test(group.id) || typeof group.label !== 'string' || !group.label.trim() || !/^#[0-9a-f]{6}$/i.test(group.color) || group.parent !== undefined && !/^[A-Za-z0-9_-]{1,120}$/.test(group.parent)))))) throw new ProjectError('INVALID_SETUP','创作起点或分类内容无效，请保留草稿后重新选择。');
@@ -195,8 +201,8 @@ export class ProjectService {
     // 浏览器版也通过同一个服务创建，因而与桌面版保持相同的公开目录。
     const exampleEntry = kind === 'example' ? await optionalBytes(directory, 'PROJECT.md') : null;
     const projectText = exampleEntry
-      ? setTitle(setMetadata(exampleEntry.toString('utf8'), { id, name, format: DOCUMENT_FORMAT, example: true, minimumAppVersion: '0.7.0' }), name)
-      : `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: '', example: false, minimumAppVersion: '0.7.0', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color, ...(group.parent ? { parent: group.parent } : {}) })) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`;
+      ? setTitle(setMetadata(exampleEntry.toString('utf8'), { id, name, format: DOCUMENT_FORMAT, example: true, minimumAppVersion: '0.9.0-rc.2' }), name)
+      : `---\n${stringify({ id, name, format: DOCUMENT_FORMAT, description: '', example: setup?.example===true, ...(setup?.creationRequestId?{creationRequestId:setup.creationRequestId}:{}), minimumAppVersion: '0.9.0-rc.2', systems: (setup?.categories ?? []).map(group => ({ id: group.id, title: group.label, color: group.color, ...(group.parent ? { parent: group.parent } : {}) })) })}---\n\n# ${name.replace(/[\r\n]+/g, ' ')}\n\n当前策划保存在 docs，历史版本保存在 versions。\n${setup?.brief?.trim() ? `\n## 创作起点（待细化）\n\n${setup.brief.trim()}\n` : ''}`;
     await writeBytes(directory, 'PROJECT.md', projectText);
     if (kind === 'basic') await writeBytes(directory, 'docs/gdd/GDD.md', `---\nid: gdd-${randomUUID()}\ntype: gdd\nstatus: draft\n---\n\n# ${name} · 游戏总纲\n\n## 目标体验\n\n## 核心循环\n\n## 首版范围\n\n## 尚未决定\n`);
     const project = await this.open(directory);
@@ -239,6 +245,7 @@ export class ProjectService {
     if (actual.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '磁盘项目 ID 已变化，请核对身份后重新打开，未继续写入。');
     const knowledge = parseKnowledge(files), hashes = hashFiles(current), currentFingerprint = fingerprint(hashes);
     knowledge.diagnostics.push(...companionDiagnostics(current));
+    if (actual.format === 2) knowledge.diagnostics.push(...buildCreativeIndex(knowledge).diagnostics);
     knowledge.diagnostics.push(...diagnoseLinks(new Map([...current].map(([name,bytes]) => [name, name.endsWith('.md') ? bytes.toString('utf8') : null]))));
     const cached = this.verifiedHistory.get(project.id);
     const versions = cached && this.watchers.has(project.id) && Date.now() - cached.at < 60000 ? cached.entries : await history(project.path, project.id), pending = await this.pending(project.path);
@@ -258,7 +265,7 @@ export class ProjectService {
       if (stable && fingerprint(hashFiles(check)) === currentFingerprint) { head = await publishRevision(project.path, project.id, current, { actor: head ? 'external' : 'user', reason: head ? '同步外部文档修改' : '建立项目初始版本', requestId: `observed-${randomUUID()}` }, currentFingerprint, changedPaths(hashes, head?.files)); this.verifiedHistory.delete(project.id); }
       else knowledge.diagnostics.push({ path: 'docs/', code: 'FILES_CHANGING', severity: 'warning', message: '文件仍在变化，稍后重新扫描；本次未发布版本。' });
     }
-    const snapshot: ProjectSnapshot = { project: actual, ...knowledge, companions: companionFiles(current), fingerprint: currentFingerprint, revision: head?.id ?? null, revisionLabel: head?.label, files: hashes, recoveryRequired: pending.length > 0 || invalid.length > 0 };
+    const snapshot: ProjectSnapshot = { project: actual, ...knowledge, companions: companionFiles(current), fingerprint: currentFingerprint, revision: head?.id ?? null, revisionLabel: head?.label, files: hashes, recoveryRequired: pending.length > 0 || invalid.length > 0, media: actual.format === 2 ? collectMediaFromTexts(current) : {} };
     // 索引失败不遮蔽磁盘稿，保留诊断并允许用户继续读取公开文件。
     try { await indexSnapshot(project.path, snapshot); } catch (error) { snapshot.diagnostics.push({ path: '.cewen/index.sqlite', code: 'INDEX_UNAVAILABLE', severity: 'warning', message: `索引暂不可用：${error instanceof Error ? error.message : String(error)}` }); }
     return snapshot;
@@ -294,7 +301,7 @@ export class ProjectService {
     return this.exclusive(id, async () => {
       const project = this.project(id), saved = await readRevision(project.path, id, revision), files = markdownFiles(saved.files);
       const actual = parseProjectInfo(files.find(file => file.path === 'PROJECT.md')!, project.path);
-      return { project: actual, ...parseKnowledge(files), companions: companionFiles(saved.files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false };
+      return { project: actual, ...parseKnowledge(files), companions: companionFiles(saved.files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false, media: saved.manifest.media ?? {} };
     });
   }
 
@@ -450,11 +457,19 @@ export class ProjectService {
     return { revision: snapshot.revision, recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, document: { id: document.id, path: document.path, title: document.title, type: document.type, status: document.status, system: document.system, parent: document.parent, hash: document.hash, offset, total: document.text.length, text: document.text.slice(offset, offset + limit), hasMore: offset + limit < document.text.length } };
   }
 
+  /** 本机产线回执是私人运行记录，不进入 LLM 上下文和公开版本。 */
+  async connectorRecord(id:string, value?:Record<string,unknown>):Promise<Record<string,unknown>> {
+    await this.ready;return this.exclusive(id,async()=>{const root=this.project(id).path;
+      if(value!==undefined){const text=JSON.stringify(value);if(Buffer.byteLength(text)>2*1024*1024)throw new ProjectError('CONNECTOR_RECORD_TOO_LARGE','产线回执过大');await writeBytes(root,'.cewen/connectors/comfy.json',text);return value;}
+      const bytes=await optionalBytes(root,'.cewen/connectors/comfy.json');return bytes?JSON.parse(bytes.toString('utf8')):{runs:[]};
+    });
+  }
+
   /** MCP 只读状态投影：提供并发基准和诊断，不暴露私人工作区。 */
   async collaborationStatus(id: string) {
     const snapshot = await this.read(id);
     return {
-      format: DOCUMENT_FORMAT,
+      format: snapshot.project.format,
       project: { id: snapshot.project.id, name: snapshot.project.name, entry: snapshot.projectEntry ? { text: snapshot.projectEntry.text, hash: snapshot.projectEntry.hash } : undefined, categories: snapshot.groups },
       revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, fingerprint: snapshot.fingerprint,
       recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, files: snapshot.files,
@@ -473,11 +488,10 @@ export class ProjectService {
 
   /** 为 MCP 返回受控图片附件；不接受任意磁盘路径，也不读取私人文件。 */
   async collaborationAsset(id: string, relative: string, revision?: string) {
-    if (!/^docs\/assets\/[A-Za-z0-9_./ -]+\.(png|jpe?g|webp|gif)$/i.test(relative)) throw new ProjectError('INVALID_ASSET', 'MCP 只读取 docs/assets 下的 PNG、JPEG、WebP 或 GIF 图片。');
-    const bytes = await this.asset(id, relative, revision);
-    if (bytes.length > 5 * 1024 * 1024) throw new ProjectError('ASSET_TOO_LARGE', 'MCP 单张图片读取上限为 5 MB。');
-    const extension = path.extname(relative).toLowerCase();
-    const mimeType = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : extension === '.gif' ? 'image/gif' : 'image/jpeg';
+    if (relative.includes('\\') || relative.split('/').some(part=>!part||part==='.'||part==='..') || !relative.startsWith('docs/assets/') && !MEDIA_PATH.test(relative)) throw new ProjectError('INVALID_ASSET','只能读取已引用的项目图片');
+    const bytes=await this.asset(id,relative,revision);
+    if(bytes.length>5*1024*1024)throw new ProjectError('ASSET_TOO_LARGE','MCP 单图上限 5 MiB');
+    const info=detectMedia(bytes);if(info.kind!=='image')throw new ProjectError('INVALID_ASSET','此工具只读取图片');const mimeType=info.mime;
     return { path: relative, revision: revision ?? null, mimeType, bytes: bytes.length, hash: sha256(bytes), data: bytes.toString('base64') };
   }
 
@@ -533,7 +547,7 @@ export class ProjectService {
         annotationDocuments.push({ documentId: document.id, path, text: bytes.toString('utf8'), hash });
       }
     }
-    const content = { format: DOCUMENT_FORMAT, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry ? { text: snapshot.projectEntry.text, hash: snapshot.projectEntry.hash } : undefined }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, fingerprint: snapshot.fingerprint, recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, files: snapshot.files, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), companions, annotationDocuments, annotations, instructions: '先核对 recoveryRequired 与 diagnostics；只修改指定当前文档，保留 ID 和用户原话；布局与笔画是所选文档的伴随文件，不是正文。未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
+    const content = { format: snapshot.project.format, project: { id: snapshot.project.id, name: snapshot.project.name, categories: snapshot.groups, entry: snapshot.projectEntry ? { text: snapshot.projectEntry.text, hash: snapshot.projectEntry.hash } : undefined }, revision: snapshot.revision, revisionLabel: snapshot.revisionLabel, fingerprint: snapshot.fingerprint, recoveryRequired: snapshot.recoveryRequired, diagnostics: snapshot.diagnostics, files: snapshot.files, documents: selected.map(({ id, path, text, hash }) => ({ id, path, text, hash })), relations: snapshot.edges.filter(edge => nodeIds.has(edge.source) || nodeIds.has(edge.target)), companions, annotationDocuments, annotations, instructions: '先核对 recoveryRequired 与 diagnostics；只修改指定当前文档，保留 ID 和用户原话；布局与笔画是所选文档的伴随文件，不是正文。未决问题不是已决定规则。提交候选提案并由用户采纳。每轮正式修改形成版本。' };
     if (Buffer.byteLength(JSON.stringify(content)) > 4 * 1024 * 1024) throw new ProjectError('CONTEXT_TOO_LARGE', '上下文超过 4 MB，请选择较少的 DD；未静默截断。');
     return content;
   }
@@ -548,6 +562,9 @@ export class ProjectService {
       const request = await build(); await writeBytes(root, name, JSON.stringify({ digest, request }, null, 2)); return request;
     });
   }
+
+  /** 领域扩展复用原有持久化幂等计划和正式事务，不另写一套版本。 */
+  async runOperation(id:string,input:{requestId:string},build:()=>Promise<CommitRequest>|CommitRequest) { await this.ready; return this.commit(await this.operation(id,input,build)); }
 
   /** 发布问询可以由模型完成；推荐选项不会自动变成用户答案。 */
   async publishQuestions(id: string, input: { requestId: string; round: string; questions: { id: string; title: string; background: string; options: string[]; targets: string[]; mode?: 'single' | 'multiple'; follows?: string; condition?: string; when?: { questionId: string; option?: string } }[] }) {
@@ -664,17 +681,20 @@ export class ProjectService {
         selected.set('.cewen/workspace-export.json', Buffer.from(JSON.stringify({ ...state, items: included.map(item => ({ ...item, parent: item.parent && ids.has(item.parent) ? item.parent : undefined })) }, null, 2)));
       }
       for (const [name, bytes] of selected) await writeBytes(destination, name, bytes);
+      const media: Record<string,string> = { ...snapshot.media };
+      if (mode !== 'current') for (const entry of await history(project.path,id)) Object.assign(media,entry.manifest.media);
+      for (const [name, hash] of Object.entries(media)) { const bytes=await optionalBytes(project.path,name); if(!bytes||sha256(bytes)!==hash)throw new ProjectError('MEDIA_MISSING',`导出媒体缺失：${name}`); await writeBytes(destination,name,bytes); }
       if (fingerprint(hashFiles(await readCurrentFiles(project.path))) !== snapshot.fingerprint) throw new ProjectError('BACKUP_CHANGED', '导出期间文档变化，副本未标记完成，请重新导出。', { directory: destination });
       if (mode !== 'current' && (await history(destination, id)).some(entry => !entry.valid)) throw new ProjectError('BACKUP_HISTORY_CHANGED', '副本历史校验未通过，未发布完成标记。');
       for (const [name, bytes] of selected) if (name.startsWith('versions/')) { const actual = await optionalBytes(project.path, name); if (!actual || sha256(actual) !== sha256(bytes)) throw new ProjectError('BACKUP_CHANGED', '导出期间历史变化，请重新导出。'); }
-      await writeBytes(destination, 'PACKAGE.json', JSON.stringify({ format: 1, state: 'complete', projectId: id, mode, includePersonal, createdAt: new Date().toISOString(), files: hashFiles(selected) }, null, 2));
+      await writeBytes(destination, 'PACKAGE.json', JSON.stringify({ format: 1, state: 'complete', projectId: id, mode, includePersonal, createdAt: new Date().toISOString(), files: { ...hashFiles(selected), ...media } }, null, 2));
       return { directory: destination, files: selected.size, mode, includePersonal };
     });
   }
 
   /** 每日首次稳定读取创建独立恢复点，仅轮换本功能登记且校验归属的旧副本。 */
   private async automaticBackup(id: string) {
-    if (this.backingUp.has(id)) return; this.backingUp.add(id);
+    if (this.closing||this.backingUp.has(id)) return; this.backingUp.add(id);
     try {
       const root = this.project(id).path, saved = await optionalBytes(root, backupStateFile);
       const state = saved ? JSON.parse(saved.toString('utf8')) : { records: [] };
@@ -708,19 +728,47 @@ export class ProjectService {
     const entry = setMetadata(current.get('PROJECT.md')!.toString('utf8'), { id: nextId, name, example: false, copiedFrom: { projectId: id, revision: snapshot.revision } });
     current.set('PROJECT.md', Buffer.from(entry));
     for (const [name, bytes] of current) await writeBytes(destination, name, bytes);
+    for (const [name, hash] of Object.entries(snapshot.media??{})) { const bytes=await optionalBytes(snapshot.project.path,name); if(!bytes||sha256(bytes)!==hash)throw new ProjectError('MEDIA_MISSING',`复制媒体缺失：${name}`);await writeBytes(destination,name,bytes); }
     await this.open(destination); return this.read(nextId);
   }
 
-  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); await this.saveRegistry(); return this.libraryView(); }); }
+  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); this.verifiedHistory.delete(id); this.observations.delete(id); this.touched.delete(id); await this.saveRegistry(); return this.libraryView(); }); }
 
   /** 图片等附件只从当前或已校验快照读取，不允许任意本机路径。 */
   async asset(id: string, relative: string, revision?: string) {
     await this.ready;
-    if (!relative.startsWith('docs/assets/')) throw new ProjectError('INVALID_ASSET', '只能读取项目附件。');
     const root = this.project(id).path;
+    if (relative.startsWith('assets/objects/')) {
+      if(!MEDIA_PATH.test(relative))throw new ProjectError('INVALID_ASSET','媒体地址无效');
+      const hashes=revision?(await readRevision(root,id,revision)).manifest.media:collectMediaFromTexts(await readCurrentFiles(root));
+      if(!hashes?.[relative])throw new ProjectError('MISSING_ASSET','所选修订没有引用此媒体');
+      const bytes=await optionalBytes(root,relative); if(!bytes||sha256(bytes)!==hashes[relative])throw new ProjectError('MEDIA_DAMAGED','媒体缺失或内容校验失败');
+      detectMedia(bytes); return bytes;
+    }
+    if (!relative.startsWith('docs/assets/')) throw new ProjectError('INVALID_ASSET', '只能读取项目附件。');
     const bytes = revision ? (await readRevision(root, id, revision)).files.get(relative) : await optionalBytes(root, relative);
     if (!bytes) throw new ProjectError('MISSING_ASSET', '附件不存在。');
     return bytes;
+  }
+
+  /** 原始媒体专用通道；每个内容地址只写一次，之后由描述对象引用。 */
+  async storeMedia(id: string, bytes: Uint8Array) {
+    await this.ready; const root=this.project(id).path,info=detectMedia(bytes),buffer=Buffer.from(bytes),hash=sha256(buffer),relative=`assets/objects/${hash}/content.${info.extension}`;
+    return this.exclusive(id,async()=>{const entry=await optionalBytes(root,'PROJECT.md');if(!entry||parseProjectInfo({path:'PROJECT.md',text:entry.toString('utf8'),hash:sha256(entry)},root).format!==2)throw new ProjectError('FORMAT_UPGRADE_REQUIRED','媒体版本需要格式 2，请先升级副本');
+      const existing=await optionalBytes(root,relative);if(existing&&sha256(existing)!==hash)throw new ProjectError('MEDIA_DAMAGED','已有不变媒体损坏，未覆盖');if(!existing)await writeBytes(root,relative,buffer);
+      return {...info,path:relative,sha256:hash,bytes:bytes.byteLength};});
+  }
+
+  /** 在独立副本升级，原目录与所有旧历史逐字保留；成功后只切换最近入口。 */
+  async upgradeCopy(id:string, parent:string) {
+    const original=await this.read(id);if(original.project.format===2)return original;
+    const exported=await this.exportProject(id,parent,'full',true),destination=exported.directory;
+    // 完成包先记录导入凭据；升级后的新修订不能再用旧 PACKAGE 清单误判。
+    await writeBytes(destination,'.cewen/package-opened.json',JSON.stringify({sourceRevision:original.revision,upgradedCopy:true}));
+    const isolated=new ProjectService(path.join(this.home,'.migration',randomUUID()),this.templateRoot);
+    try {await isolated.open(destination);const current=await isolated.read(id);await isolated.commit({projectId:id,requestId:randomUUID(),baseRevision:current.revision,actor:'user',reason:'在副本升级至公开格式 2（原历史不变）',changes:[{path:'PROJECT.md',baseHash:current.projectEntry!.hash,text:setMetadata(current.projectEntry!.text,{format:2,minimumAppVersion:'0.9.0-rc.2'})}]});}
+    finally{isolated.close();}
+    await this.forget(id);try{await this.open(destination);return this.read(id);}catch(error){await this.open(original.project.path);throw error;}
   }
 
   /** 草稿按窗口身份分开落盘，不将一次按键写成公开版本。 */
@@ -798,10 +846,20 @@ export class ProjectService {
         if (beforeHashes[name] !== hash) throw new ProjectError('DEPENDENCY_CHANGED', '本次修改依赖的文档已变化，需要重新核对。', { path: name });
       }
       const candidateFiles = markdownFiles(candidate);
+      if(request.actor==='llm'){
+        const oldObjects=new Map(buildCreativeIndex(snapshot).objects.map(o=>[o.object.id,o.object]));
+        for(const next of buildCreativeIndex({documents:parseKnowledge(candidateFiles).documents}).objects){
+          if(next.object.type==='decision'&&JSON.stringify(next.object.data.confirmation??null)!==JSON.stringify(oldObjects.get(next.object.id)?.data.confirmation??null))throw new ProjectError('USER_CONFIRMATION_REQUIRED','模型提案不得新增或改写用户决定确认记录。');
+        }
+      }
+
       const candidateProject = parseProjectInfo(candidateFiles.find(file => file.path === 'PROJECT.md')!, root);
       if (candidateProject.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '保存不能改变项目身份，请使用复制项目。');
       const diagnostics = parseKnowledge(candidateFiles).diagnostics.filter(issue => issue.severity === 'error');
       diagnostics.push(...companionDiagnostics(candidate));
+      if (candidateProject.format === 2) diagnostics.push(...buildCreativeIndex({documents:parseKnowledge(candidateFiles).documents}).diagnostics.filter(issue=>issue.severity==='error'));
+      else if (candidateFiles.some(file=>buildCreativeIndex({documents:parseKnowledge([file]).documents}).objects.some(item=>item.language==='cewen-object'))) throw new ProjectError('FORMAT_UPGRADE_REQUIRED','创作模块需要格式 2，请先在副本升级。');
+      if (snapshot.project.format === 2 && candidateProject.format !== 2) throw new ProjectError('FORMAT_DOWNGRADE_DENIED','不能把新项目直接降级并丢失媒体语义。');
       if (diagnostics.length) throw new ProjectError('DOCUMENT_INVALID', '修改后存在重复身份、缺失目标或格式错误；草稿已保留，请先修正。', diagnostics);
       if (fingerprint(beforeHashes) === fingerprint(hashFiles(candidate))) return this.load(project, false);
 
@@ -880,6 +938,7 @@ export class ProjectService {
           if (fingerprint(hashFiles(candidate)) !== fingerprint(hashFiles(preview))) throw new ProjectError('RECOVERY_CONFLICT', '恢复期间出现额外外部修改，未发布版本。');
           const diagnostics = parseKnowledge(markdownFiles(candidate)).diagnostics;
           diagnostics.push(...companionDiagnostics(candidate));
+          diagnostics.push(...buildCreativeIndex({documents:parseKnowledge(markdownFiles(candidate)).documents}).diagnostics.filter(issue=>issue.severity==='error'));
           if (diagnostics.some(issue => issue.severity === 'error')) throw new ProjectError('DOCUMENT_INVALID', '恢复候选仍有格式、引用或伴随文件问题，未发布完成版本。', diagnostics);
           const revision = await publishRevision(root, id, candidate, transaction.request, transaction.requestHash, transaction.request.changes.map(change => change.path));
           transaction.revision = revision.id; transaction.phase = 'complete';

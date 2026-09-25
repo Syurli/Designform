@@ -1,3 +1,6 @@
+import './creative/creative.css';
+import { CreativeWorkspace } from './creative/workspace';
+import { openPresetDialog } from './creative/preset-dialog';
 import './style.css';
 import './workbench.css';
 import './features.css';
@@ -32,7 +35,7 @@ import { projectMarkdown, installReadingPreviews } from './document-reading';
 import { ConnectionPanel } from './connection-panel';
 import { isWebEdition } from './edition';
 import { TutorialManager } from './tutorial/tutorial-manager';
-import { designformTutorials } from './tutorial/tutorials';
+import { designformTutorials,setTutorialProject,setPracticeProject,isPracticeProject } from './tutorial/tutorials';
 
 /** 启动时读取独立项目目录；没有最近项目则进入项目中心，不自动接入真实资料。 */
 let projectSnapshot: ProjectSnapshot | undefined;
@@ -46,7 +49,7 @@ try {
 } catch (error) { connectionError = error instanceof Error ? error.message : '本地项目服务暂不可用。'; }
 
 /** 阅读状态与文档编辑数据分开，不把镜头与筛选写入策划正文。 */
-type View = 'graph' | 'document' | 'cards';
+type View = 'graph' | 'document' | 'cards' | 'creative' | 'quest' | 'animatic';
 type OverviewMode = Exclude<GraphMode, 'network'>;
 /** 分析是知识空间内的次级阅读页，返回时恢复进入前的选择及筛选。 */
 type AnalysisOrigin = { mode: OverviewMode; selected: string | null; group: string | null; query: string; directOnly: boolean };
@@ -56,6 +59,17 @@ const state = { view: 'graph' as View, mode: 'galaxy' as GraphMode, direction: '
 const nodeById = new Map(nodes.map(node => [node.id, node]));
 const app = document.getElementById('app')!;
 const closeReadingPreview = installReadingPreviews(() => projectSnapshot);
+/** 来源定位依赖稳定身份或唯一摘录；歧义不跳到猜测段落。 */
+window.addEventListener('cewen:locate-anchor',event=>{
+ const {anchor,resolved}=(event as CustomEvent<{anchor:{excerpt?:string};resolved:{documentId:string;objectId?:string;blockId?:string;state:string}}>).detail;
+ if(['missing','ambiguous'].includes(resolved.state))return;
+ if(resolved.objectId){window.dispatchEvent(new CustomEvent('cewen:creative-request',{detail:{action:'object',objectId:resolved.objectId}}));return;}
+ window.dispatchEvent(new CustomEvent('cewen:read-document',{detail:resolved.documentId}));
+ requestAnimationFrame(()=>{const article=document.getElementById('doc-'+resolved.documentId);if(!article)return;
+ const quote=anchor.excerpt?.trim();const blocks=Array.from(article.querySelectorAll<HTMLElement>('p,li,h2,h3,h4,blockquote'));const matches=quote?blocks.filter(el=>el.textContent?.includes(quote)):[];const target=matches.length===1?matches[0]:article;
+ target.scrollIntoView({block:'center',behavior:'instant'});target.tabIndex=-1;target.focus({preventScroll:true});get('announcement').textContent=matches.length===1?'已定位唯一来源摘录。':'已打开来源文档；正文重排后可按摘录核对。';
+ });
+});
 window.addEventListener('cewen:read-document', event => {
   const id = (event as CustomEvent<string>).detail; if (!nodeById.has(id)) return;
   state.scopeIds = null; selectNode(id); setView('document');
@@ -106,7 +120,7 @@ app.innerHTML = `
   </aside>
   <div class="workspace">
     <header class="topbar">
-      <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" data-tutorial="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
+      <div class="workspace-navigation"><button class="icon-button menu-button" id="menu-toggle" aria-label="展开或收起项目目录" aria-expanded="false">${icon('panel-left')}</button><nav class="main-nav" data-tutorial="main-nav" aria-label="查看方式"><button data-view="graph" class="active">${icon('orbit')}知识空间</button><button data-view="document">${icon('file-text')}策划案</button><button data-view="cards">${icon('layout-grid')}卡片库</button><button data-view="creative" data-tutorial="creative-nav">创作模块</button><button data-view="quest" data-tutorial="quest-nav">Quest</button><button data-view="animatic">排演</button></nav><div class="breadcrumb"><span id="breadcrumb-project">${escape(projectSnapshot?.project.name ?? '策问')}</span>${icon('chevron-right')}<strong id="view-title">知识空间</strong></div></div>
       <div class="project-toolbar" aria-label="当前项目操作"><button class="secondary-button" id="new-document" data-tutorial="new-document">${icon('plus')}新建文档</button><button class="secondary-button" id="edit-document" data-tutorial="edit-document">编辑</button><span></span><button class="secondary-button" id="project-statistics" data-tutorial="project-statistics">统计</button><button class="secondary-button" id="project-history" data-tutorial="project-history">版本</button><button class="secondary-button" id="organize-project" data-tutorial="organize-project">整理</button><button class="secondary-button" id="project-inquiry" data-tutorial="project-inquiry">问询</button><button class="secondary-button" id="project-exchange" data-tutorial="project-exchange">交换</button><button class="sample-tag" id="refresh-project" data-tutorial="refresh-project" title="重新扫描外部文档修改">${projectSnapshot?.project.isExample ? '虚构示例 · 刷新文件' : '本地文档 · 刷新文件'}</button></div>
     </header>
     <main class="work-area">
@@ -130,7 +144,7 @@ app.innerHTML = `
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
       <section class="cards-view" id="cards-view" hidden aria-label="策划卡片库"></section>
-      <aside class="inspector" id="inspector" aria-label="条目与关系详情"></aside>
+      <section class="creative-view" id="creative-view" hidden aria-label="通用创作工作区"></section><aside class="inspector" id="inspector" aria-label="条目与关系详情"></aside>
     </main>
     <footer class="workspace-footer"><span id="edition-state"><i></i>策问 · ${isWebEdition ? '网页版 · 本机文件' : '本地工作台'}</span><span id="footer-count">${nodes.length} 个条目 · ${edges.length} 条关系</span><span id="project-save-state">${projectSnapshot ? '文档已同步' : '尚未打开项目'}</span></footer>
   </div>
@@ -141,12 +155,14 @@ await initializeTheme();
 setNotebookTexture();
 
 let graph: KnowledgeGraph | undefined;
+let creativeWorkspace:CreativeWorkspace|undefined;
 let projectDirectory: ProjectDirectory | undefined;
 let editingSession:EditingSession|undefined;
 let readingReady = false;
 let readingTimer: ReturnType<typeof setTimeout> | undefined;
 let recentNodes: string[] = [];
 const get = (id: string) => document.getElementById(id)!;
+if(projectSnapshot)setTutorialProject(projectSnapshot.project.id);
 const tutorialManager = new TutorialManager(designformTutorials, message => { const node = document.getElementById('announcement'); if (node) node.textContent = message; });
 /** 用户决定目录显隐；分辨率只决定并排还是抽屉，不覆盖已保存选择。 */
 let sidebarExpanded = !matchMedia('(max-width:1050px)').matches;
@@ -184,7 +200,7 @@ function renderAnalysisControls() {
   get('back-to-overview').querySelector('span')!.textContent = `返回${names[analysisOrigin?.mode ?? overviewMode]}`;
   get('analysis-page-note').hidden = !analyzing;
   get('space-eyebrow').hidden = analyzing;
-  get('view-title').textContent = state.view === 'graph' ? (analyzing ? '脑图 · 聚焦' : '知识空间') : state.view === 'document' ? '策划案' : '卡片库';
+  get('view-title').textContent = state.view === 'graph' ? (analyzing ? '脑图 · 聚焦' : '知识空间') : ({document:'策划案',cards:'卡片库',creative:'创作模块',quest:'Quest / 问策',animatic:'分镜排演'})[state.view as Exclude<View,'graph'>];
   get('analysis-toolbar').hidden = !analyzing;
   (get('analysis-focus') as HTMLSelectElement).value = state.selected ?? '';
   (get('search') as HTMLInputElement).placeholder = analyzing ? '搜索目录，选择分析条目…' : '搜索标题、规则…';
@@ -346,7 +362,9 @@ function setView(view: View, deferGraph = false) {
   get('graph-view').hidden = view !== 'graph';
   get('reading-view').hidden = view !== 'document';
   get('cards-view').hidden = view !== 'cards';
-  get('view-title').textContent = { graph: '知识空间', document: '策划案', cards: '卡片库' }[view];
+  const creative=['creative','quest','animatic'].includes(view);get('creative-view').hidden=!creative;
+  if(creative)creativeWorkspace?.activate(view==='quest'?'quests':view==='animatic'?'sequences':'objects');else creativeWorkspace?.deactivate();
+  get('view-title').textContent = { graph: '知识空间', document: '策划案', cards: '卡片库',creative:'创作模块',quest:'Quest / 问策',animatic:'分镜排演' }[view];
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   graph?.setActive(view === 'graph', { deferLayout: deferGraph });
   sync(!deferGraph);
@@ -545,7 +563,8 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   const sameProject = projectSnapshot?.project.id === snapshot.project.id;
   if (!sameProject || projectSnapshot?.revision !== snapshot.revision) readingTrail.length = 0;
   const relationId = state.relationIndex === null ? null : edges[state.relationIndex]?.id;
-  projectSnapshot = snapshot;
+  projectSnapshot = snapshot;setTutorialProject(snapshot.project.id);
+  creativeWorkspace?.receive(snapshot);
   setKnowledgeData(snapshot);
   nodeById.clear(); nodes.forEach(node => nodeById.set(node.id, node));
   if (!sameProject) { readingReady = false; clearTimeout(readingTimer); Object.assign(state, { selected: null, relationIndex: null, group: null, query: '', directOnly: false, mode: overviewMode, scopeIds: null, includeArchived: false }); analysisOrigin = null; }
@@ -670,17 +689,27 @@ async function restoreReading() {
   const match = /^#cewen-doc=(.+)$/.exec(location.hash); if (match) { const nodeId = decodeURIComponent(match[1]); if (nodeById.has(nodeId)) { selectNode(nodeId); setView('document'); } }
   readingReady = true;
 }
+/** 教程菜单集中清理监听器，重开或键盘关闭不会留下游离监听。 */
+let closeTutorialMenu: (()=>void) | undefined;
 function openTutorialMenu() {
-  const existing = document.getElementById('tutorial-menu'); if (existing) { existing.remove(); return; }
-  const menu = document.createElement('div'); menu.id = 'tutorial-menu'; menu.className = 'tutorial-menu'; menu.setAttribute('role','dialog'); menu.setAttribute('aria-label','新手教程');
-  menu.innerHTML = `<header><strong>新手教程</strong><button data-close aria-label="关闭">×</button></header><p>选择完整导览或专题教程。教程可随时跳过、快进，并可从这里重新开始。</p><div class="tutorial-list">${tutorialManager.available().map(item => `<button data-tutorial-id="${item.id}"><span><strong>${item.title}</strong><small>${item.steps} 步 · ${item.progress?.status === 'completed' ? '已完成' : item.progress?.status === 'skipped' ? '已跳过' : '未开始'}</small></span><b>开始</b></button>`).join('')}</div><button class="tutorial-reset" data-reset>重置教程记录</button>`;
-  document.body.append(menu);
-  const anchor = get('tutorial-help').getBoundingClientRect(); menu.style.top = `${anchor.bottom + 8}px`; menu.style.right = `${Math.max(8, innerWidth - anchor.right)}px`;
-  menu.onclick = event => { const button=(event.target as HTMLElement).closest<HTMLButtonElement>('button'); if(!button)return; if(button.dataset.close!==undefined){menu.remove();return;} if(button.dataset.reset!==undefined){tutorialManager.reset();menu.remove();openTutorialMenu();return;} const id=button.dataset.tutorialId;if(id){menu.remove();void tutorialManager.start(id);} };
-  const outside=(event:PointerEvent)=>{if(!menu.contains(event.target as Node)&&!(event.target as HTMLElement).closest('#tutorial-help')){menu.remove();document.removeEventListener('pointerdown',outside);}}; setTimeout(()=>document.addEventListener('pointerdown',outside),0);
+ if(closeTutorialMenu){closeTutorialMenu();return;}
+ const menu=document.createElement('div');menu.id='tutorial-menu';menu.className='tutorial-menu';menu.setAttribute('role','dialog');menu.setAttribute('aria-label','教程中心');
+ const states:Record<string,string>={running:'可继续',paused:'已暂停',completed:'已完成',skipped:'已跳过',partial:'部分跳过'};
+ menu.innerHTML=`<header><strong>教程中心</strong><button data-close aria-label="关闭">×</button></header><p>普通导览只阅读；操作练习会核对实际完成动作，必须使用独立虚构副本。练习进度与导览分开。</p><div class="tutorial-list">${tutorialManager.available().map(item=>`<div class="tutorial-item"><button data-tutorial-id="${item.id}"><span><strong>${item.title}</strong><small>${item.steps} 步 · ${states[item.progress?.status??'']??'未开始'}</small></span><b>${['running','paused'].includes(item.progress?.status??'')?'继续':'开始'}</b></button><button data-replay="${item.id}" aria-label="重新开始${item.title}">重来</button></div>`).join('')}</div><button class="tutorial-reset" data-reset>重置所有教程记录</button>`;
+ document.body.append(menu);const anchor=get('tutorial-help').getBoundingClientRect();menu.style.top=`${anchor.bottom+8}px`;menu.style.right=`${Math.max(8,innerWidth-anchor.right)}px`;
+ const close=()=>{menu.remove();document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',key);closeTutorialMenu=undefined;get('tutorial-help').focus();};
+ const outside=(e:PointerEvent)=>{if(!menu.contains(e.target as Node)&&!(e.target as HTMLElement).closest('#tutorial-help'))close();};const key=(e:KeyboardEvent)=>{if(e.key==='Escape'){e.preventDefault();close();}};
+ closeTutorialMenu=close;document.addEventListener('pointerdown',outside);document.addEventListener('keydown',key);
+ menu.onclick=e=>{const b=(e.target as HTMLElement).closest<HTMLButtonElement>('button');if(!b)return;if(b.hasAttribute('data-close'))return close();if(b.hasAttribute('data-reset')){tutorialManager.reset();close();openTutorialMenu();return;}const id=b.dataset.tutorialId??b.dataset.replay;if(id){close();if(id.endsWith('-practice')&&(!projectSnapshot||!isPracticeProject(projectSnapshot.project.id))){void openPresetDialog(undefined,next=>{applyProject(next);setPracticeProject(next.project.id);void tutorialManager.start(id,0);},false,{practice:true}).catch(reportProjectError);}else void tutorialManager.start(id,b.dataset.replay?0:undefined);}};
+ menu.querySelector<HTMLButtonElement>('button')?.focus();
 }
 
 const collaborationPanel = new CollaborationPanel(() => projectSnapshot, applyProject);
+creativeWorkspace=new CreativeWorkspace(get('creative-view'),applyProject,()=>void collaborationPanel.open('proposals').catch(reportProjectError));
+if(projectSnapshot)creativeWorkspace.receive(projectSnapshot);
+window.addEventListener('cewen:creative-apply',event=>applyProject((event as CustomEvent<ProjectSnapshot>).detail));
+window.addEventListener('cewen:tutorial-navigation',event=>{const d=(event as CustomEvent).detail;if(!['objects','quests','sequences','production','presets'].includes(d?.tab))return;setView('creative');creativeWorkspace?.tutorialNavigate(d.tab,d.type);});
+window.addEventListener('cewen:creative-request',event=>{const detail=(event as CustomEvent).detail;if(detail.action==='new-project'){void openPresetDialog(undefined,applyProject).catch(reportProjectError);return;}if(!['creative','quest','animatic'].includes(state.view))setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);});
 graph = mountGraph();
 sync();
 void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
@@ -695,6 +724,6 @@ setInterval(scan, 4000);
 // 浏览器把页面暂存到前进后退缓存时保留场景；真正卸载时才释放显卡资源。
 window.addEventListener('pagehide', event => {
   if (event.persisted) graph?.setActive(false);
-  else { graph?.dispose(); connectionPanel.dispose(); }
+  else { tutorialManager.dispose();closeTutorialMenu?.();creativeWorkspace?.deactivate();graph?.dispose(); connectionPanel.dispose(); }
 });
 window.addEventListener('pageshow', event => { if (event.persisted) graph?.setActive(state.view === 'graph'); });

@@ -5,12 +5,17 @@ import path from 'node:path';
 import { PROTOCOL_VERSION, type CommitRequest, type DocumentDraft, type WorkspaceItem } from '../shared/model.ts';
 import { ProjectError } from './files.ts';
 import { ProjectService } from './projects.ts';
+import { createPresetProject } from './creative/create-project.ts';
+import { ComfyConnector } from './creative/comfy.ts';
+import { CreativeService } from './creative/service.ts';
+import { detectMedia, MEDIA_LIMIT } from '../shared/creative/media.ts';
 import { ConnectionRegistry } from './connections.ts';
 import { chooseNativeDirectory } from './native-dialog.ts';
 
 /** API 生命周期由本地宿主管理；开发、浏览器和桌面复用同一服务实现。 */
 export function createProjectApi(options: { home?: string; templateRoot?: string; root?: string; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string } = {}) {
   const service = new ProjectService(options.home ?? process.env.CEWEN_HOME ?? path.join(os.homedir(), 'Documents', '策问工作区', '开发沙盒'), options.templateRoot);
+  const creative = new CreativeService(service);
   const token = randomBytes(32).toString('hex');
   const connections = new ConnectionRegistry();
 
@@ -60,6 +65,8 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
         const root = options.root ?? path.resolve('.');
         send(response, { mode: 'local', root, skill: path.join(root,'integration/skills/cewen-collaborate/SKILL.md'), guide: path.join(root,options.installation?'integration/protocol/INTEGRATION.md':'docs/protocol/INTEGRATION.md'), launcher: options.installation ? path.join(options.installation,'策问MCP.cmd') : '', runtime: path.join(root,'runtime/mcp.js'), url: `http://${authority}` }); return true;
       }
+      if(url.pathname==='/api/creative-project'&&request.method==='POST'){send(response,await createPresetProject(service,await body(request)));return true;}
+      if (url.pathname === '/api/creative-capabilities' && request.method === 'GET') { send(response, creative.capabilities()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'GET') { send(response, connections.read()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'POST') { send(response, connections.update(await body(request))); return true; }
       if (url.pathname === '/api/projects' && request.method === 'GET') { send(response, await service.list()); return true; }
@@ -69,6 +76,18 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
         send(response, await service.create(required(input.name, '项目名称'), input.kind as 'blank' | 'basic' | 'example', typeof input.directory === 'string' && input.directory ? input.directory : undefined, input.setup as Parameters<ProjectService['create']>[3])); return true;
       }
       if (url.pathname === '/api/projects/open' && request.method === 'POST') { const input = await body(request); const project = await service.open(required(input.path, '项目目录')); send(response, await service.read(project.id)); return true; }
+      const creativeMatch = /^\/api\/projects\/([A-Za-z0-9_-]+)\/(creative|media-upload|upgrade-copy|comfy)$/.exec(url.pathname);
+      if (creativeMatch && request.method === 'POST') {
+        const [, id, operation] = creativeMatch;
+        if (operation === 'comfy') { send(response,await new ComfyConnector(service).action(id,await body(request))); return true; }
+        if (operation === 'media-upload') {
+          // 二进制上传与正文 JSON 分离；有界读取，绝不将客户端路径当作磁盘路径。
+          const chunks: Buffer[] = []; let size = 0;
+          for await (const chunk of request) { const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += bytes.length; if (size > MEDIA_LIMIT) throw new ProjectError('MEDIA_TOO_LARGE','单个媒体文件超过 64 MiB'); chunks.push(bytes); }
+          send(response, await creative.registerMedia(id, { requestId: required(url.searchParams.get('requestId'),'请求 ID'), name: url.searchParams.get('name') ?? 'media', permission: url.searchParams.get('permission') ?? '', durationMs: Number(url.searchParams.get('durationMs') ?? 0) }, Buffer.concat(chunks)));
+        } else { const input = await body(request); send(response, operation === 'upgrade-copy' ? await service.upgradeCopy(id, required(input.directory,'独立副本父目录')) : await creative.action(id, input)); }
+        return true;
+      }
       const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(commit|history|recover|drafts|revision|restore-plan|baseline|workspace|asset|import-plan|apply-import|context|questions|answers|proposals|accept-proposal|export|copy|forget|checkpoint|undo-plan|move-document|paste-import|review-import|backup-status|reading-view|begin-batch|end-batch|reverse-relation|archive-documents|collaboration-status|collaboration-document|proposal-status|collaboration-asset))?$/.exec(url.pathname);
       if (match) {
         const [, id, operation] = match;
@@ -107,7 +126,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
         if (operation === 'baseline' && request.method === 'POST') { const input = await body(request); send(response, await service.baseline(id, required(input.revision, '版本'), required(input.name, '基线名称'), input.baselineId as string | undefined, input.action as string | undefined)); return true; }
         if (operation === 'asset' && request.method === 'GET') {
           const relative = required(url.searchParams.get('path'), '附件路径'), bytes = await service.asset(id, relative, url.searchParams.get('revision') ?? undefined);
-          const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+          const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4' };
           response.writeHead(200, { 'Content-Type': types[path.extname(relative).toLowerCase()] ?? 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', ...(types[path.extname(relative).toLowerCase()] ? {} : { 'Content-Disposition': 'attachment' }) }); response.end(bytes); return true;
         }
         if (operation === 'drafts' && request.method === 'GET') { send(response, await service.drafts(id)); return true; }
@@ -137,5 +156,5 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
     }
     return true;
   }
-  return { service, handle };
+  return { service, creative, handle };
 }

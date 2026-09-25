@@ -10,6 +10,7 @@ import { mountDesignBlocks } from './rich-document-plugins';
 import { AnnotationLayer } from './annotation-layer';
 import { DocumentCanvas } from './document-canvas';
 import './document-presentation.css';
+import { mountCreativeBlocks, mountDocumentQuestions } from './creative/inline';
 
 /** 读取受控公开伴随文件；格式不完整时正文仍可正常阅读。 */
 function companion<T>(snapshot: ProjectSnapshot, path: string, parse: (text: string, path: string) => T): T | undefined {
@@ -44,6 +45,8 @@ export function mountDocumentPresentation(host: HTMLElement, doc: ProjectDocumen
   const disposers: (() => void)[] = [];
   if (layout && Object.keys(layout.blocks).length && hasMarkers) mountLayout(paper, doc, separated.content, body, snapshot, layout, options, disposers);
   else mountLinear(paper, doc, body, snapshot, options, disposers);
+  disposers.push(mountCreativeBlocks(paper,snapshot));
+  if(doc.type!=='question')disposers.push(mountDocumentQuestions(root,header,paper,doc,snapshot));
   // 笔画层使用稳定块 ID 定位；阅读模式没有绘画、拖动或保存回调。
   const annotation = new AnnotationLayer(paper, null, { shared: ink, personal: [], readonly: true, onChange: () => {}, resolveImage: path => projectAssetUrl(snapshot, path) });
   if(ink.items.length){const toggle=document.createElement('button');toggle.type='button';toggle.textContent='隐藏注释';toggle.setAttribute('aria-pressed','true');toggle.addEventListener('click',()=>{const hidden=paper.classList.toggle('hide-ink');toggle.textContent=hidden?'显示注释':'隐藏注释';toggle.setAttribute('aria-pressed',String(!hidden));});header.append(toggle);}
