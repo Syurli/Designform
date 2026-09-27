@@ -1,0 +1,29 @@
+import { presets,buildPreset } from '../shared/creative/presets';
+import type { ProjectSnapshot } from '../shared/model';
+import { listProjects,request } from './project-client';
+import { prepareDirectoryFields } from './edition';
+import { h } from './creative/render';
+
+/** 设想、可选项目预设、开场白和保存位置构成一个流程，提交前不会创建目录。 */
+export async function projectWizard(open:(snapshot:ProjectSnapshot)=>Promise<void>|void){
+  const library=await listProjects(),dialog=document.createElement('dialog');dialog.className='project-dialog desktop-task-dialog project-wizard';
+  let step=0,busy=false,preset='',goal='',audience='',scope='',name='',prompt='',directory=library.defaultDirectory;
+  let structure:{key:string;title:string;category:string;include:boolean}[]=[];let structurePreset:string|undefined;
+  const requestId=crypto.randomUUID();
+  const generate=()=>`我正在使用策问 Designform，准备创建一个项目。\n\n创作设想：${goal||'尚未确定，请先提问帮助我明确。'}\n面向谁：${audience||'待讨论'}\n本轮希望完成：${scope||'澄清设想、边界与第一份文档'}\n起步结构：${presets.find(p=>p.id===preset)?.title||'空白项目，逐步整理'}\n\n请先阅读项目入口和相关文档，区分已确认信息与待确认问题。一次聚焦一个问题，等待我的原话回答；不要替我回答，不批准自己的提案。建议以可审阅的文档变更提出，由我决定是否采纳。所有通用模块均可使用。`;
+  const capture=()=>{const data=new FormData(dialog.querySelector('form')!);if(step===0){goal=String(data.get('goal'));audience=String(data.get('audience'));scope=String(data.get('scope'));}if(step===1)preset=String(data.get('preset')??'');if(step===2){prompt=String(data.get('prompt'));structure=structure.map((row,i)=>({...row,title:String(data.get('doc-title-'+i)??row.title),category:String(data.get('doc-category-'+i)??row.category),include:data.has('doc-include-'+i)}));const extra=String(data.get('extra')??'').split('\n').map(s=>s.trim()).filter(Boolean);for(const title of extra)structure.push({key:'-custom-'+crypto.randomUUID().slice(0,8),title,category:'创作资料',include:true});}if(step===3){name=String(data.get('name'));directory=String(data.get('directory'));}};
+  const close=()=>{if(!busy){dialog.close();dialog.remove();}};
+  function render(){
+    if(step===2&&structurePreset!==preset){structure=buildPreset(preset||'blank','preview',false).documents.map(d=>({key:d.id.slice('preview'.length),title:d.title,category:'创作资料',include:true}));structurePreset=preset;}
+    const content=step===0?`<label>你想做什么？<textarea name="goal" rows="4" placeholder="例如：设计一个围绕探索与对话的游戏章节">${h(goal)}</textarea></label><label>面向谁？<input name="audience" value="${h(audience)}" placeholder="可以暂时留空"/></label><label>这轮希望完成什么？<input name="scope" value="${h(scope)}" placeholder="例如：先明确玩法与角色"/></label>`:step===1?`<p>按需要选择起步结构。也可以直接下一步，从空白开始。</p><div class="wizard-presets">${presets.filter(p=>p.id!=='blank').map(p=>`<label><input type="radio" name="preset" value="${p.id}" ${preset===p.id?'checked':''}/><strong>${p.title}</strong><small>${p.description}</small></label>`).join('')}</div><button type="button" data-empty>清除选择 · 从空白开始</button>`:step===2?`<p>这是可编辑的 LLM 开场白。创建工程和复制文字不会连接模型或发送请求。</p><label>开场白<textarea name="prompt" rows="12">${h(prompt)}</textarea></label><details open><summary>将创建的起步文档</summary><p>${preset?buildPreset(preset,'preview',false).documents.map(d=>h(d.title)).join(' · '):'空白项目，进入后创建第一份基础文档。'}</p></details>`:`<label>项目名称<input name="name" value="${h(name)}" required maxlength="100" autofocus/></label><label>项目保存父目录<input name="directory" value="${h(directory)}" required/></label><p>将在所选目录中创建独立项目文件夹。示例内容不会复制到新工程。</p>`;
+    dialog.innerHTML=`<form><header><div><small>新建项目 · ${step+1} / 4</small><h2>${['创作设想','选择起步结构','准备协作开场白','创建工程'][step]}</h2></div><button type="button" data-close aria-label="关闭">×</button></header><div class="task-body">${content}</div><p role="status"></p><footer><button type="button" data-back ${step===0?'disabled':''}>上一步</button><button type="button" data-close>取消</button><button type="submit" class="primary-button">${step===3?'创建并进入项目':'下一步'}</button></footer></form>`;
+    if(step===2){const details=dialog.querySelector('details')!;details.innerHTML='<summary>起步文档与分类 · 可修改</summary>'+structure.map((row,i)=>'<div class="wizard-structure-row"><label><input name="doc-include-'+i+'" type="checkbox" '+(row.include?'checked':'')+'/>创建</label><label>文档名<input name="doc-title-'+i+'" value="'+h(row.title)+'"/></label><label>分类<input name="doc-category-'+i+'" value="'+h(row.category)+'"/></label></div>').join('')+'<label>追加空白文档（每行一份）<textarea name="extra" rows="3"></textarea></label>';const copy=document.createElement('button');copy.type='button';copy.textContent='复制开场白';copy.onclick=()=>void navigator.clipboard.writeText(dialog.querySelector<HTMLTextAreaElement>('[name=prompt]')!.value).then(()=>{dialog.querySelector('[role=status]')!.textContent='已复制；尚未连接或发送给模型。';});details.before(copy);}
+    if(step===3)prepareDirectoryFields(dialog);
+  }
+  dialog.onclick=e=>{const b=(e.target as HTMLElement).closest('button');if(!b||busy)return;if(b.hasAttribute('data-close'))close();if(b.hasAttribute('data-back')){capture();step--;render();}if(b.hasAttribute('data-empty')){preset='';render();}};
+  dialog.oncancel=e=>{e.preventDefault();close();};
+  dialog.onsubmit=e=>{e.preventDefault();if(busy)return;capture();if(step<3){if(step===1&&!prompt)prompt=generate();step++;render();return;}busy=true;dialog.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.disabled=true);
+    void request<ProjectSnapshot>('/api/creative-project',{name,directory,preset:preset||'blank',requestId,brief:prompt,structure:structure.filter(r=>r.include).map(({key,title,category})=>({key,title,category})),sample:false,demo:false}).then(async snapshot=>{await open(snapshot);dialog.close();dialog.remove();}).catch(error=>{dialog.querySelector('[role=status]')!.textContent=error.message+'。输入已保留，可以重试。';}).finally(()=>{busy=false;dialog.querySelectorAll<HTMLButtonElement>('button').forEach(b=>b.disabled=false);});
+  };
+  render();document.body.append(dialog);dialog.showModal();
+}

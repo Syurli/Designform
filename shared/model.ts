@@ -86,6 +86,9 @@ export const relationTypes: RelationLegend[] = [
 
 /** 项目说明来自 PROJECT.md；路径只由本地项目服务补入。 */
 export interface ProjectInfo {
+  /** 首次创建与最后正式编辑时间；旧项目缺失时显示未知。 */
+  createdAt?: string;
+  updatedAt?: string;
   id: string;
   name: string;
   description: string;
@@ -173,6 +176,8 @@ export interface CommitRequest {
   reason: string;
   actor: 'user' | 'external' | 'import' | 'restore' | 'llm';
   changes: FileChange[];
+  /** 用户确认保存时才入库的不可变媒体，正文与引用在同次提交发布。 */
+  media?: {path:string;text:string}[];
   /** 被本次设计决定依赖但不直接修改的文件也需核对哈希。 */
   dependencies?: Record<string, string>;
   /** 恢复来源独立于父修订，不能截断既有历史。 */

@@ -73,14 +73,15 @@ export class GraphInteraction {
   private click=(event:MouseEvent)=>{if(this.blockClick){event.preventDefault();event.stopImmediatePropagation();this.blockClick=false;}else if(event.shiftKey){const id=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]')?.dataset.graphNode;if(id&&this.surface.nodes().some(n=>n.data.id===id&&n.visible&&!n.label.hidden)){event.preventDefault();event.stopImmediatePropagation();if(!this.multi.size&&this.surface.selected())this.multi.add(this.surface.selected()!);this.multi.has(id)?this.multi.delete(id):this.multi.add(id);this.update();}}};
   private down=(event:PointerEvent)=>{
     this.finishSettling();
-    if(!this.enabled||!event.isPrimary||event.button!==0||document.querySelector('dialog[open]'))return;
+    if(!this.enabled||!event.isPrimary||![0,2].includes(event.button)||document.querySelector('dialog[open]'))return;
     const port=(event.target as HTMLElement).closest<HTMLElement>('[data-port]');
     const label=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]');
     const found=label?this.surface.nodes().find(n=>n.data.id===label.dataset.graphNode):this.hit(event.clientX,event.clientY);
     const edge=this.surface.edge(),id=port?.dataset.node??found?.data.id,node=this.surface.nodes().find(n=>n.data.id===id);
     if(!node){
-      // 二维空白左键框选；三维仅 Shift+左键框选，普通左键仍旋转。右键和中键交给镜头平移。
-      if(event.target!==this.surface.canvas || this.surface.container.classList.contains('graph-transitioning') || (this.surface.mode()==='galaxy'&&!event.shiftKey))return;
+      // 二维右键框选；三维 Shift+左键显式框选。普通左键统一平移，三维右键旋转。
+      const marquee=this.surface.mode()==='galaxy'?event.button===0&&event.shiftKey:event.button===2;
+      if(event.target!==this.surface.canvas || this.surface.container.classList.contains('graph-transitioning') || !marquee)return;
       event.preventDefault();event.stopImmediatePropagation();
       const rect=this.surface.container.getBoundingClientRect();
       const previous=new Set(this.multi),base=new Set(previous);
@@ -89,6 +90,7 @@ export class GraphInteraction {
       this.box={pointer:event.pointerId,startX:event.clientX-rect.left,startY:event.clientY-rect.top,width:rect.width,height:rect.height,append:event.shiftKey,previous,base,moved:false};
       return;
     }
+    if(event.button!==0)return;
     if(event.shiftKey){
       // 星点本身没有 DOM 按钮时也维持 Shift 点击累选，并截断画布的普通单选事件。
       if(event.target===this.surface.canvas){event.preventDefault();event.stopImmediatePropagation();this.shiftNode={pointer:event.pointerId,id:id!,x:event.clientX,y:event.clientY,moved:false};}

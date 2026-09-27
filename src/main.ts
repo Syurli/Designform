@@ -1,3 +1,6 @@
+import { DocumentDesktop } from './document-desktop';
+import { isTransientProject } from '../shared/transient';
+let documentDesktop:DocumentDesktop|undefined;
 import './creative/creative.css';
 import { CreativeWorkspace } from './creative/workspace';
 import { openPresetDialog } from './creative/preset-dialog';
@@ -45,7 +48,7 @@ try {
   const library = await connectProjects();
   const linkedProject = new URL(location.href).searchParams.get('project');
   if (linkedProject && library.projects.some(project => project.id === linkedProject)) projectSnapshot = await readProject(linkedProject);
-  else if (library.current) projectSnapshot = await readProject(library.current);
+  // 默认进入项目库，不自动读取上次项目。
   if (projectSnapshot) setKnowledgeData(projectSnapshot);
 } catch (error) { connectionError = error instanceof Error ? error.message : '本地项目服务暂不可用。'; }
 
@@ -72,7 +75,7 @@ window.addEventListener('cewen:locate-anchor',event=>{
  });
 });
 window.addEventListener('cewen:read-document', event => {
-  const id = (event as CustomEvent<string>).detail; if (!nodeById.has(id)) return;
+  const id = (event as CustomEvent<string>).detail; if(documentDesktop&&!projectSnapshot?.historical){documentDesktop.openDocument(id.split('/')[0],true);return;} if (!nodeById.has(id)) return;
   state.scopeIds = null; selectNode(id); setView('document');
   const node = nodeById.get(id)!;
   const anchor = node.anchor && get('reading-view').querySelector(`#doc-${CSS.escape(node.documentId)} [id="${CSS.escape(node.anchor)}"]`);
@@ -141,7 +144,7 @@ app.innerHTML = `
         <div id="graph-canvas" class="graph-canvas" data-tutorial="graph-canvas"></div>
         <div class="graph-empty" id="graph-empty" hidden><strong id="graph-empty-title">没有匹配的条目</strong><p id="graph-empty-description">尝试其他关键词，或清除当前筛选。</p><button class="secondary-button" id="clear-filters">清除筛选</button></div>
         <div class="graph-tools" data-tutorial="graph-tools"><button class="tool-button" id="reset-view" aria-label="返回全图">${icon('focus')}<span>全图</span></button><span class="tool-divider"></span><button class="icon-button" id="zoom-in" aria-label="放大关系图">${icon('plus')}</button><button class="icon-button" id="zoom-out" aria-label="缩小关系图">${icon('minus')}</button><span class="tool-divider"></span><button class="tool-button" id="toggle-labels" aria-pressed="false">标签</button><button class="tool-button" id="toggle-motion" aria-pressed="false" title="暂停关联线上的方向粒子">静止</button></div>
-        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">空白旋转 · Shift 框选 · 滚轮缩放</span></div>
+        <div class="space-bottom"><div class="legend">${groups.map(group => `<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('')}</div><span class="gesture" id="gesture">左键平移 · 右键旋转 · 滚轮缩放</span></div>
       </section>
       <section class="reading-view" id="reading-view" hidden aria-label="策划案阅读"></section>
       <section class="cards-view" id="cards-view" hidden aria-label="策划卡片库"></section>
@@ -359,6 +362,8 @@ function clearOverviewSelection() {
 
 /** 导航批量更新时先恢复页面尺寸，延后场景同步，由后续 setMode 一次完成过渡。 */
 function setView(view: View, deferGraph = false) {
+  if(view==='document'&&documentDesktop&&!projectSnapshot?.historical){documentDesktop.show();const id=state.selected?nodeById.get(state.selected)?.documentId:projectSnapshot?.documents[0]?.id;if(id)documentDesktop.openDocument(id,true);return;}
+  if(documentDesktop)documentDesktop.root.hidden=true;app.classList.remove('document-canvas-open');get('inspector').hidden=false;
   state.view = view;
   get('graph-view').hidden = view !== 'graph';
   get('reading-view').hidden = view !== 'document';
@@ -367,6 +372,7 @@ function setView(view: View, deferGraph = false) {
   if(creative)creativeWorkspace?.activate(view==='quest'?'quests':view==='animatic'?'sequences':'objects');else creativeWorkspace?.deactivate();
   get('view-title').textContent = { graph: '知识空间', document: '策划案', cards: '卡片库',creative:'创作模块',quest:'Quest / 问策',animatic:'分镜排演' }[view];
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  if(view==='graph'&&!graph)graph=mountGraph();
   graph?.setActive(view === 'graph', { deferLayout: deferGraph });
   sync(!deferGraph);
 }
@@ -391,7 +397,7 @@ function setGraphMode(mode: OverviewMode) {
 function updateSpaceNavigation() {
   const mode = state.mode;
   document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(item => { const active=item.dataset.mode===(mode==='network'?'mindmap':mode);item.classList.toggle('active',active); item.setAttribute('aria-pressed',String(active)); });
-  get('gesture').textContent = mode === 'galaxy' ? '空白旋转 · Shift 框选 · 滚轮缩放' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '空白拖动框选 · 右键平移 · 滚轮缩放';
+  get('gesture').textContent = mode === 'galaxy' ? '左键平移 · 右键旋转 · 滚轮缩放' : mode === 'network' ? '滚动阅读 · 点击卡片更换焦点 · 点击连线看依据' : '左键平移 · 右键框选 · 滚轮缩放';
   get('space-intro').textContent = { galaxy: '在系统之间，发现设计的联系', network: '当前节点的直接联系 · 点击相邻卡片继续追踪', layers: '按系统归位，从总纲逐层阅读到规则', mindmap:'从总纲展开设计脉络 · 点击卡片聚焦关系' }[mode];
 }
 
@@ -480,12 +486,12 @@ app.addEventListener('click', event => {
   }
   if ('group' in button.dataset) { state.group = button.dataset.group || null; state.directOnly = false; if (state.mode !== 'network') { state.selected = null; state.relationIndex = null; } (document.querySelector('.system-filter') as HTMLDetailsElement).open = false; sync(); return; }
   switch (button.id) {
-    case 'tutorial-help': openTutorialMenu(); break;
-    case 'project-center': void workbench.projects().catch(reportProjectError); break;
-    case 'project-switch': if(projectSnapshot)openProjectDetails(projectSnapshot,applyProject);else void workbench.projects().catch(reportProjectError);break;
+    case 'tutorial-help': void documentDesktop?.examples().catch(reportProjectError); break;
+    case 'project-center': void documentDesktop?.showLibrary().catch(reportProjectError); break;
+    case 'project-switch': if(projectSnapshot)openProjectDetails(projectSnapshot,applyProject);else void documentDesktop?.showLibrary().catch(reportProjectError);break;
     case 'project-statistics': if(projectSnapshot)openContentOverview(projectSnapshot);break;
-    case 'new-document': void workbench.newDocument(state.group??'').catch(reportProjectError); break;
-    case 'edit-document': void workbench.edit(state.selected ? nodeById.get(state.selected)?.documentId : undefined).catch(reportProjectError); break;
+    case 'new-document': documentDesktop?.show();void documentDesktop?.newDocument(state.group??'').catch(reportProjectError); break;
+    case 'edit-document': if(state.selected)documentDesktop?.openDocument(nodeById.get(state.selected)?.documentId??state.selected,true); break;
     case 'item-history': if (state.selected) void historyPanel.itemHistory(state.selected, false).catch(reportProjectError); break;
     case 'document-history': if (state.selected) void historyPanel.itemHistory(nodeById.get(state.selected)!.documentId, true).catch(reportProjectError); break;
     case 'copy-node-link': if (state.selected && projectSnapshot) { const url = new URL(location.href); url.searchParams.set('project', projectSnapshot.project.id); url.hash = `cewen-doc=${encodeURIComponent(state.selected)}`; void navigator.clipboard.writeText(url.href).then(() => { get('announcement').textContent = '条目链接已复制。'; }).catch(reportProjectError); } break;
@@ -527,6 +533,7 @@ app.addEventListener('change', event => {
 });
 get('search').addEventListener('input', event => { state.query = (event.target as HTMLInputElement).value; sync(); });
 document.addEventListener('keydown', event => {
+  if(documentDesktop?.visible)return;
   if(event.defaultPrevented||event.isComposing||document.querySelector('dialog[open]'))return;
   const typing = !!(event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]');
   if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); setSidebarExpanded(!sidebarExpanded); return; }
@@ -542,6 +549,8 @@ document.addEventListener('keydown', event => {
 
 /** 显卡不可用时仍保留可阅读的策划和卡片，明确提示而不是留下一块空白。 */
 function mountGraph(): KnowledgeGraph | undefined {
+  // 文档工作台隐藏旧画布时延迟初始化，避免零尺寸标签和后台渲染。
+  if (!get('graph-canvas').clientWidth || !get('graph-canvas').clientHeight) return undefined;
 try {
   graph = new KnowledgeGraph(get('graph-canvas'), id=>{if(state.mode==='mindmap')enterAnalysis(id);else selectNode(id);}, count => {
     get('space-count').textContent = `${count} 个条目`;
@@ -567,6 +576,7 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   projectSnapshot = snapshot;setTutorialProject(snapshot.project.id);
   creativeWorkspace?.receive(snapshot);
   setKnowledgeData(snapshot);
+  get('footer-count').textContent=nodes.length+' 个条目 · '+edges.length+' 条关系';
   nodeById.clear(); nodes.forEach(node => nodeById.set(node.id, node));
   if (!sameProject) { readingReady = false; clearTimeout(readingTimer); Object.assign(state, { selected: null, relationIndex: null, group: null, query: '', directOnly: false, mode: overviewMode, scopeIds: null, includeArchived: false }); analysisOrigin = null; }
   else {
@@ -589,17 +599,18 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
   else if (snapshot.historical || !graph.updateText(snapshot)) graph.updateData(snapshot);
-  graph?.setActive(state.view === 'graph');graph?.setEditable(!snapshot.historical);
+  graph?.setActive(state.view === 'graph' && !documentDesktop?.visible);graph?.setEditable(!snapshot.historical);
   if (nodes.length > 500) get('announcement').textContent = '大项目总览先展示系统和文档。选择系统、搜索或点击条目展开规则，也可在筛选中展开全部。';
   get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
   connectionError = '';
   updateSpaceNavigation(); sync(); refreshIcons();
   historyPanel.sync(snapshot);
-  if (!sameProject) { readingReady = false; void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError); }
+  if (!sameProject&&!isTransientProject(snapshot.project.id)) { readingReady = false; void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError); }
   (get('edit-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   (get('new-document') as HTMLButtonElement).disabled = Boolean(snapshot.historical);
   if (snapshot.historical) get('project-save-state').textContent = `${snapshot.revisionLabel} · 历史只读`;
   renderEditingState();
+  documentDesktop?.receive(snapshot);
 }
 
 /** 外部变化到来时只替换已读投影，正在编辑的原稿基准由工作面板独立保留。 */
@@ -677,7 +688,7 @@ function restoreReadingState(value: unknown) {
   state.directOnly = saved.directOnly === true; state.labelsAll = saved.labelsAll === true; state.paused = saved.paused === true;
   get('toggle-labels').setAttribute('aria-pressed', String(state.labelsAll));
   get('toggle-motion').setAttribute('aria-pressed', String(state.paused));
-  if (saved.view && ['graph','document','cards'].includes(saved.view)) setView(saved.view);
+  if (!documentDesktop?.visible && saved.view && ['graph','document','cards'].includes(saved.view)) setView(saved.view);
   state.direction = saved.direction === 'horizontal' ? 'horizontal' : 'vertical';graph?.setDirection(state.direction);
   if (saved.mode === 'galaxy' || saved.mode === 'layers' || saved.mode === 'mindmap') setGraphMode(saved.mode);
   (get('search') as HTMLInputElement).value = state.query; sync();
@@ -710,16 +721,23 @@ creativeWorkspace=new CreativeWorkspace(get('creative-view'),applyProject,()=>vo
 if(projectSnapshot)creativeWorkspace.receive(projectSnapshot);
 window.addEventListener('cewen:creative-apply',event=>applyProject((event as CustomEvent<ProjectSnapshot>).detail));
 window.addEventListener('cewen:tutorial-navigation',event=>{const d=(event as CustomEvent).detail;if(!['objects','quests','sequences','production','presets'].includes(d?.tab))return;setView('creative');creativeWorkspace?.tutorialNavigate(d.tab,d.type);});
-window.addEventListener('cewen:creative-request',event=>{const detail=(event as CustomEvent).detail;if(detail.action==='new-project'){void openPresetDialog(undefined,applyProject).catch(reportProjectError);return;}if(!['creative','quest','animatic'].includes(state.view))setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);});
+window.addEventListener('cewen:creative-request',event=>{const detail=(event as CustomEvent).detail;if(documentDesktop&&!projectSnapshot?.historical){void documentDesktop.handleCreative(detail).catch(reportProjectError);return;}if(detail.action==='new-project'){void openPresetDialog(undefined,applyProject).catch(reportProjectError);return;}if(!['creative','quest','animatic'].includes(state.view))setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);});
 graph = mountGraph();
 sync();
 void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
 refreshIcons();
 if (projectSnapshot && tutorialManager.shouldAutoStart('first-launch')) window.setTimeout(() => { void tutorialManager.start('first-launch'); }, 700);
-if (!projectSnapshot) void workbench.projects().catch(reportProjectError);
+documentDesktop=new DocumentDesktop({apply:applyProject,document:()=>{app.classList.add('document-canvas-open');state.view='document';for(const id of ['graph-view','cards-view','reading-view','creative-view','inspector'])get(id).hidden=true;graph?.setActive(false);get('view-title').textContent='策划案';document.querySelectorAll('.main-nav [data-view]').forEach(b=>b.classList.toggle('active',(b as HTMLElement).dataset.view==='document'));},graph:(mode,id)=>{app.hidden=false;setView('graph');if(mode)setGraphMode(mode);if(id)enterAnalysis(id);},history:()=>void historyPanel.open().catch(reportProjectError),connections:()=>get('llm-connection').click(),proposals:()=>void collaborationPanel.open('proposals'),legacyAction:detail=>{documentDesktop!.root.hidden=true;app.hidden=false;setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);}});
+app.hidden=true;
+window.addEventListener('cewen:relation-preview',e=>{if(documentDesktop)documentDesktop.root.hidden=true;setView('graph');enterAnalysis((e as CustomEvent<string>).detail);});
+window.addEventListener('cewen:open-project',e=>void documentDesktop!.open((e as CustomEvent<ProjectSnapshot>).detail).catch(reportProjectError));
+window.addEventListener('cewen:request-save-as',()=>void documentDesktop!.saveAs().catch(reportProjectError));
+document.querySelectorAll<HTMLElement>('[data-view="creative"],[data-view="quest"],[data-view="animatic"]').forEach(el=>el.remove());
+
+if(projectSnapshot)void documentDesktop.open(projectSnapshot).catch(reportProjectError);
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
 let refreshing = false;
-const scan = () => { if (refreshing || !projectSnapshot || document.hidden) return; refreshing = true; void refreshProject().catch(reportProjectError).finally(() => { refreshing = false; }); };
+const scan = () => { if (refreshing || !projectSnapshot || document.hidden || documentDesktop?.isHome || isTransientProject(projectSnapshot.project.id)) return; refreshing = true; void refreshProject().catch(reportProjectError).finally(() => { refreshing = false; }); };
 window.addEventListener('focus', scan);
 setInterval(scan, 4000);
 // 浏览器把页面暂存到前进后退缓存时保留场景；真正卸载时才释放显卡资源。

@@ -2,6 +2,7 @@ import path from 'path-browserify';
 import { Buffer } from 'buffer';
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { WorkspaceState } from '../shared/model.ts';
+import { memoryFiles, memoryPath } from './memory-files.ts';
 
 export { path, Buffer };
 export const randomUUID = () => crypto.randomUUID();
@@ -81,6 +82,7 @@ async function file(filename: string, create = false) {
   try { return await (await directory(path.dirname(filename))).getFileHandle(path.basename(filename), { create }); } catch (error) { return translate(error); }
 }
 async function rawWrite(filename: string, value: Uint8Array) {
+  if (memoryPath(filename)) { memoryFiles.write(filename, value); return; }
   await directory(path.dirname(filename), true);
   const target = await file(filename, true), writer = await target.createWritable();
   try { await writer.write(new Uint8Array(value)); await writer.close(); } catch (error) { await writer.abort().catch(() => {}); translate(error); }
@@ -112,8 +114,9 @@ export function requestDirectoryPermission(filename: string): Promise<void> {
     return handle.requestPermission({ mode: 'readwrite' }).then(state => { if (state !== 'granted') throw ioError('PERMISSION_REQUIRED', '未取得文件夹读写授权，原文件没有修改。'); });
   } catch (error) { return Promise.reject(error); }
 }
-export async function realpath(filename: string) { await initializeFilesystem(); await directory(filename); return path.resolve(filename); }
+export async function realpath(filename: string) { if (memoryPath(filename)) { memoryFiles.stat(filename); return path.resolve(filename); } await initializeFilesystem(); await directory(filename); return path.resolve(filename); }
 export async function mkdir(filename: string, options: { recursive?: boolean } = {}) {
+  if (memoryPath(filename)) return memoryFiles.mkdir(filename, options.recursive);
   await initializeFilesystem();
   if (!options.recursive) { try { await lstat(filename); throw ioError('EEXIST', '目标目录已经存在。'); } catch (error) { if ((error as {code?:string}).code !== 'ENOENT') throw error; } }
   if (options.recursive) await directory(filename, true);
@@ -123,26 +126,34 @@ type Entry = { name: string; isDirectory(): boolean; isFile(): boolean; isSymbol
 export function readdir(filename: string): Promise<string[]>;
 export function readdir(filename: string, options: { withFileTypes: true }): Promise<Entry[]>;
 export async function readdir(filename: string, options?: { withFileTypes: boolean }): Promise<string[] | Entry[]> {
+  if (memoryPath(filename)) { const values = memoryFiles.list(filename); return options?.withFileTypes ? values : values.map(item => item.name); }
   await initializeFilesystem(); const values: Entry[] = [];
   for await (const [name, handle] of (await directory(filename)).entries()) values.push({ name, isDirectory: () => handle.kind === 'directory', isFile: () => handle.kind === 'file', isSymbolicLink: () => false });
   return options?.withFileTypes ? values : values.map(value => value.name);
 }
 export async function lstat(filename: string) {
+  if (memoryPath(filename)) return memoryFiles.stat(filename);
   await initializeFilesystem();
   try { await directory(filename); return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false, size: 0 }; }
   catch (error) { if (!(error instanceof DOMException && error.name === 'TypeMismatchError') && (error as {code?:string}).code !== 'ENOENT') throw error; }
   const value = await (await file(filename)).getFile();
   return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false, size: value.size };
 }
-export async function readFile(filename: string) { await initializeFilesystem(); try { return Buffer.from(await (await (await file(filename)).getFile()).arrayBuffer()); } catch (error) { return translate(error); } }
+export async function readFile(filename: string) { if (memoryPath(filename)) return memoryFiles.read(filename); await initializeFilesystem(); try { return Buffer.from(await (await (await file(filename)).getFile()).arrayBuffer()); } catch (error) { return translate(error); } }
 export async function open(filename: string, flags: string) {
+  if (memoryPath(filename)) {
+    if (flags === 'wx') { try { memoryFiles.stat(filename); throw Object.assign(new Error('文件已存在。'), { code: 'EEXIST' }); } catch (error) { if ((error as {code?:string}).code !== 'ENOENT') throw error; } }
+    memoryFiles.write(filename, '');
+    return { writeFile: async (value: string | Uint8Array) => memoryFiles.write(filename, value), sync: async () => {}, close: async () => {} };
+  }
   await initializeFilesystem();
   if (flags === 'wx') { try { await lstat(filename); throw ioError('EEXIST', '文件已经存在。'); } catch (error) { if ((error as {code?:string}).code !== 'ENOENT') throw error; } }
   await file(filename, true);
   return { writeFile: (value: string | Uint8Array) => rawWrite(filename, typeof value === 'string' ? Buffer.from(value) : value), sync: async () => {}, close: async () => {} };
 }
-export async function unlink(filename: string) { await initializeFilesystem(); try { await (await directory(path.dirname(filename))).removeEntry(path.basename(filename)); } catch (error) { translate(error); } }
+export async function unlink(filename: string) { if (memoryPath(filename)) return memoryFiles.remove(filename); await initializeFilesystem(); try { await (await directory(path.dirname(filename))).removeEntry(path.basename(filename)); } catch (error) { translate(error); } }
 export async function rm(filename: string, options: { recursive?: boolean; force?: boolean } = {}) {
+  if (memoryPath(filename)) return memoryFiles.remove(filename, options.recursive, options.force);
   await initializeFilesystem(); mounted(filename);
   try { await (await directory(path.dirname(filename))).removeEntry(path.basename(filename), { recursive: options.recursive }); } catch (error) { if (options.force && error instanceof DOMException && error.name === 'NotFoundError') return; translate(error); }
 }
@@ -158,6 +169,13 @@ export async function cp(source: string, destination: string, options: { recursi
   }
 }
 export async function rename(source: string, destination: string) { await cp(source,destination,{recursive:true}); await rm(source,{recursive:true}); }
+/** 浏览器无法调用回收站，只允许删除已授权父目录中的确切子项目。 */
+export async function recycleDirectory(filename: string) {
+  if(memoryPath(filename))return memoryFiles.remove(filename,true);
+  const mount=mounted(filename);
+  if(path.dirname(filename)==='/folders')throw new Error('请先授权项目的父目录，再删除子项目；浏览器不能删除授权根目录。');
+  await rm(filename,{recursive:true});
+}
 /** 旧版整理数据库只读迁移一次，原始 SQLite 文件保留在项目中。 */
 export async function readLegacyWorkspace(filename: string): Promise<WorkspaceState> {
   const [{ default: init }, { default: wasmUrl }] = await Promise.all([import('sql.js'), import('sql.js/dist/sql-wasm.wasm?url')]);

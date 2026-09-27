@@ -1,3 +1,5 @@
+import { showAppMenu } from './app-menu';
+import { isTransientProject } from '../shared/transient';
 import type { FileChange, KnowledgeGroup, ProjectDocument, ProjectSnapshot } from '../shared/model';
 import { setMetadata, setTitle } from '../shared/editing';
 import { readHeader } from '../shared/markdown';
@@ -50,6 +52,7 @@ export class ProjectDirectory {
     this.root.setAttribute('aria-label', '项目文档目录');
     host.append(this.root);
     this.root.addEventListener('click', this.click);
+    this.root.addEventListener('contextmenu',event=>{const row=(event.target as HTMLElement).closest<HTMLElement>('.project-directory-row,.project-directory-category-row');if(!row||this.options.linkOnly||this.snapshot?.historical)return;const id=row.dataset.id??row.dataset.group;if(!id)return;event.preventDefault();this.menu(id,!!row.dataset.group,row,event);});
     this.root.addEventListener('dblclick', this.doubleClick);
     this.root.addEventListener('keydown', this.keydown);
     this.root.addEventListener('input', this.input);
@@ -68,6 +71,7 @@ export class ProjectDirectory {
 
   private storageKey() { return `cewen-directory:${this.snapshot?.project.id ?? ''}`; }
   private loadState() {
+    if(isTransientProject(this.snapshot?.project.id)){this.state=initialState();return;}
     try {
       const raw = JSON.parse(localStorage.getItem(this.storageKey()) ?? '{}') as Partial<DirectoryState>;
       this.state = { ...initialState(), ...raw, favorites: Array.isArray(raw.favorites) ? raw.favorites : [], recent: Array.isArray(raw.recent) ? raw.recent : [], pinned: Array.isArray(raw.pinned) ? raw.pinned : [] };
@@ -76,7 +80,7 @@ export class ProjectDirectory {
       if (typeof raw.groupLevel !== 'string') this.state.groupLevel = this.group(this.state.group)?.parent ?? '';
     } catch { this.state = initialState(); }
   }
-  private saveState() { try { localStorage.setItem(this.storageKey(), JSON.stringify(this.state)); } catch { /* 本地偏好写入失败不阻断公开文档编辑。 */ } }
+  private saveState() { if(isTransientProject(this.snapshot?.project.id))return;try { localStorage.setItem(this.storageKey(), JSON.stringify(this.state)); } catch { /* 本地偏好写入失败不阻断公开文档编辑。 */ } }
   private rememberScroll() {
     const list = this.root.querySelector<HTMLElement>('.project-directory-items');
     if (list && this.renderedKey) this.listScroll.set(this.renderedKey, list.scrollTop);
@@ -141,7 +145,7 @@ export class ProjectDirectory {
     return terms.some(value => value.toLocaleLowerCase().includes(query));
   }
   private visibleDocuments() {
-    const docs = this.snapshot!.documents.filter(doc => doc.type !== 'guide' && doc.status !== 'archived' && !this.core(doc));
+    const docs = this.snapshot!.documents.filter(doc => !doc.path.startsWith('docs/media/') && !['docs/README.md','docs/INDEX.md'].includes(doc.path) && !doc.id.startsWith('unidentified:') && doc.status !== 'archived' && !this.core(doc));
     const query = this.query.trim().toLocaleLowerCase();
     if (query) return this.ordered(docs.filter(doc => this.matched(doc, query)));
     if (this.state.tab === 'favorites') return this.ordered(docs.filter(doc => this.state.favorites.includes(doc.id)));
@@ -286,12 +290,10 @@ export class ProjectDirectory {
     return panel;
   }
 
-  private menu(id: string, category: boolean, anchor: HTMLElement) {
-    this.root.querySelector('.project-directory-popup')?.remove();
-    const popup = document.createElement('div'); popup.className = 'project-directory-popup';
-    const entries = category ? [['edit:category', '修改名称与颜色'], ['pin-group', this.state.pinned.includes(id) ? '取消置顶' : '置顶分类'], ['group-order:-1', '分类上移'], ['group-order:1', '分类下移'], ['hierarchy:outdent', '升一级'], ['hierarchy:indent', '降一级']] : [['edit:title', '改名'], ['edit:aliases', '管理别名'], ['edit:color', '条目颜色'], ['edit:group', '移动分类'], ['order:-1', '上移'], ['order:1', '下移'], ['hierarchy:outdent', '升一级'], ['hierarchy:indent', '降一级']];
-    for (const [action, label] of entries) { const button = this.button(label, `${action}:${id}`); popup.append(button); }
-    anchor.after(popup);
+  /** 目录菜单进入应用顶层，右键、更多按钮和键盘入口共享同一命令。 */
+  private menu(id:string,category:boolean,anchor:HTMLElement,event?:MouseEvent){
+    const entries=category?[['edit:category','修改名称与颜色'],['pin-group',this.state.pinned.includes(id)?'取消置顶':'置顶分类'],['group-order:-1','分类上移'],['group-order:1','分类下移'],['hierarchy:outdent','升一级'],['hierarchy:indent','降一级']]:[['open-document','打开文档画布'],['preview-relations','卡片关系预览'],['edit:title','改名'],['edit:aliases','管理别名'],['edit:color','条目颜色'],['edit:group','移动分类'],['order:-1','上移'],['order:1','下移'],['hierarchy:outdent','升一级'],['hierarchy:indent','降一级']];
+    showAppMenu(entries.map(([action,label])=>({label,run:()=>{const button=this.button(label,action+':'+id);button.hidden=true;this.root.append(button);button.click();button.remove();}})),anchor,event?{x:event.clientX,y:event.clientY}:undefined);
   }
   private openEdit(kind: EditKind, id: string) { if (this.snapshot?.historical) return; this.edit = { kind, id }; this.draw(); this.root.querySelector<HTMLInputElement>('.project-directory-editor input:not([type=checkbox]),.project-directory-editor select')?.focus(); }
   private select(id: string) {
@@ -304,6 +306,8 @@ export class ProjectDirectory {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]'); if (!button) return;
     event.stopPropagation();
     const action = button.dataset.action!;
+    if(action.startsWith('open-document:')){window.dispatchEvent(new CustomEvent('cewen:read-document',{detail:action.slice(14)}));return;}
+    if(action.startsWith('preview-relations:')){window.dispatchEvent(new CustomEvent('cewen:relation-preview',{detail:action.slice(18)}));return;}
     if (action.startsWith('tab:')) { this.rememberScroll(); this.state.tab = action.slice(4) as DirectoryTab; this.saveState(); this.draw(); return; }
     if (action.startsWith('group:')) {
       this.rememberScroll(); this.state.group = action.slice(6);
@@ -338,6 +342,7 @@ export class ProjectDirectory {
   private doubleClick = (event: MouseEvent) => { const title = (event.target as HTMLElement).closest<HTMLElement>('.project-directory-title'); if (title?.dataset.id && !this.options.linkOnly) { event.preventDefault(); this.openEdit('title', title.dataset.id); } };
   private keydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && this.edit) { this.edit = undefined; this.draw(); return; }
+    if((event.key==='ContextMenu'||event.shiftKey&&event.key==='F10')&&!this.options.linkOnly){const row=(event.target as HTMLElement).closest<HTMLElement>('.project-directory-row,.project-directory-category-row');const id=row?.dataset.id??row?.dataset.group;if(row&&id){event.preventDefault();this.menu(id,!!row.dataset.group,row);}return;}
     if (event.key !== 'F2' || this.options.linkOnly) return;
     const row = (event.target as HTMLElement).closest<HTMLElement>('.project-directory-row');
     if (row?.dataset.id) { event.preventDefault(); this.openEdit('title', row.dataset.id); }

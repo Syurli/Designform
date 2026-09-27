@@ -4,6 +4,9 @@ export interface LayoutCompanion {
   documentId: string;
   blocks: Record<string, { x: number; y: number; width?: number; height?: number; z?: number; section?: string }>;
   dialogues?: Record<string, Record<string, { x: number; y: number }>>;
+  /** 内容组只影响共同选择和移动，不改变 Markdown 阅读或分类。 */
+  groups?: Record<string,string[]>;
+  locked?: string[];
 }
 
 /** 坐标相对稳定块或章节，便于正文重排后重新定位。 */
@@ -49,7 +52,9 @@ export function inkCompanionPath(documentId: string) { if (!companionIdPattern.t
 
 /** 布局属性只允许有限数值及稳定身份，不接受正文副本或任意扩展字段。 */
 export function validateLayoutCompanion(value: unknown, path?: string): value is LayoutCompanion {
-  if (!record(value) || !keys(value, ['format', 'documentId', 'blocks', 'dialogues']) || value.format !== 1 || !identity(value.documentId) || (path && path !== layoutCompanionPath(value.documentId)) || !record(value.blocks)) return false;
+  if (!record(value) || !keys(value, ['format', 'documentId', 'blocks', 'dialogues','groups','locked']) || value.format !== 1 || !identity(value.documentId) || (path && path !== layoutCompanionPath(value.documentId)) || !record(value.blocks)) return false;
+  if(value.groups!==undefined&&(!record(value.groups)||!Object.entries(value.groups).every(([id,items])=>identity(id)&&Array.isArray(items)&&items.length>=2&&items.every(identity)&&new Set(items).size===items.length)))return false;
+  if(value.locked!==undefined&&(!Array.isArray(value.locked)||!value.locked.every(identity)))return false;
   if (!Object.entries(value.blocks).every(([id, position]) => identity(id) && record(position) && keys(position, ['x', 'y', 'width', 'height', 'z', 'section']) && number(position.x) && number(position.y) && (position.width === undefined || number(position.width) && position.width > 0) && (position.height === undefined || number(position.height) && position.height > 0) && (position.z === undefined || number(position.z)) && (position.section === undefined || identity(position.section)))) return false;
   return value.dialogues === undefined || record(value.dialogues) && Object.entries(value.dialogues).every(([dialogueId, positions]) => identity(dialogueId) && record(positions) && Object.entries(positions).every(([nodeId, position]) => identity(nodeId) && point(position)));
 }
