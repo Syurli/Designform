@@ -1,9 +1,12 @@
 import type { ApiError, CommitRequest, DocumentDraft, ProjectInfo, ProjectSnapshot, RevisionManifest, WorkspaceItem, WorkspaceState } from '../shared/model.ts';
 import { isWebEdition } from './edition';
+import { isTransientProject,transientAssetUrls,draftMediaUrls } from '../shared/transient';
 
 let webApi: typeof import('../browser/api') | undefined;
 /** 统一提供附件链接：网页端返回本机 Blob，桌面端走受保护的回环接口。 */
 export function projectAssetUrl(snapshot: ProjectSnapshot, filename: string) {
+  const draft=draftMediaUrls.get(snapshot.project.id+':'+filename);if(draft&&!snapshot.historical)return draft;
+  if (isTransientProject(snapshot.project.id)) return transientAssetUrls.get(snapshot.project.id+':'+filename) ?? '';
   if (isWebEdition) return webApi?.browserAssetUrl(snapshot,filename) ?? '';
   return `/api/projects/${snapshot.project.id}/asset?path=${encodeURIComponent(filename)}${snapshot.historical ? `&revision=${encodeURIComponent(snapshot.revision!)}` : ''}`;
 }
@@ -20,6 +23,8 @@ export class ClientError extends Error {
 
 /** 断开时抛错，不伪造成功或静默改用浏览器缓存。 */
 export async function request<T>(url: string, input?: unknown, reconnect = true): Promise<T> {
+  const temporaryId = /\/api\/projects\/([A-Za-z0-9_-]+)/.exec(url)?.[1];
+  if (isTransientProject(temporaryId)) { webApi ??= await import('../browser/api'); return (await import('../browser/transient-projects')).transientApi(url,input) as Promise<T>; }
   if (isWebEdition) {
     try { webApi ??= await import('../browser/api'); return await webApi.browserApi(url,input) as T; }
     catch (error) { const failure = error as Error & { code?: string; details?: unknown }; throw new ClientError({ code: failure.code ?? 'LOCAL_IO_ERROR', message: failure.message, details: failure.details }); }
@@ -58,9 +63,10 @@ export const commitProject = (value: UiCommitRequest): Promise<ProjectSnapshot> 
 export const recoverProject = (id: string, direction: 'continue' | 'rollback') => request<ProjectSnapshot>(`/api/projects/${encodeURIComponent(id)}/recover`, { direction });
 export const projectHistory = (id: string) => request<{ manifest: RevisionManifest; valid: boolean; problem?: string }[]>(`/api/projects/${encodeURIComponent(id)}/history`);
 /** 浏览器应急草稿只在本地保存；服务恢复后仍需正式保存，不能伪称已落盘。 */
-export function cacheDraft(id: string, draft: DocumentDraft) { try { localStorage.setItem(`cewen-draft:${id}:${draft.id}`, JSON.stringify({ ...draft, updatedAt: new Date().toISOString() })); } catch { /* 容量不足时继续依赖页面离开提醒与文件草稿。 */ } }
+export function cacheDraft(id: string, draft: DocumentDraft) { if (isTransientProject(id)) return; try { localStorage.setItem(`cewen-draft:${id}:${draft.id}`, JSON.stringify({ ...draft, updatedAt: new Date().toISOString() })); } catch { /* 容量不足时继续依赖页面离开提醒与文件草稿。 */ } }
 export async function projectDrafts(id: string) {
   const values = await request<DocumentDraft[]>(`/api/projects/${encodeURIComponent(id)}/drafts`), drafts = new Map(values.map(draft => [draft.id, draft]));
+  if (isTransientProject(id)) return values;
   for (const key of Object.keys(localStorage).filter(key => key.startsWith(`cewen-draft:${id}:`))) { try { const draft = JSON.parse(localStorage.getItem(key)!) as DocumentDraft; if (!drafts.has(draft.id) || draft.updatedAt > drafts.get(draft.id)!.updatedAt) drafts.set(draft.id, draft); } catch { /* 损坏应急副本不替代服务草稿。 */ } }
   return [...drafts.values()].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -77,11 +83,14 @@ export const projectAction = <T>(id: string, action: string, input?: unknown) =>
 /** 创作模块共享原会话、错误模型和事务服务。 */
 export const creativeAction = <T>(id: string, action: string, input: Record<string,unknown> = {}) => projectAction<T>(id,'creative',{...input,action});
 export async function loadMediaUrl(snapshot: ProjectSnapshot, filename: string) {
+  const draft=draftMediaUrls.get(snapshot.project.id+':'+filename);if(draft&&!snapshot.historical)return draft;
+  if (isTransientProject(snapshot.project.id)) return (await import('../browser/transient-projects')).transientMedia(snapshot, filename);
   if (!isWebEdition) return projectAssetUrl(snapshot,filename);
   webApi ??= await import('../browser/api'); return webApi.loadBrowserMedia(snapshot,filename);
 }
 export async function uploadProjectMedia(id: string, file: File, input: { requestId: string; permission: string; durationMs?: number }) {
   if(file.size > 64*1024*1024) throw new ClientError({code:'MEDIA_TOO_LARGE',message:'单个媒体文件不能超过 64 MiB'});
+  if (isTransientProject(id)) return (await import('../browser/transient-projects')).transientUpload(id,file,input);
   if(isWebEdition) { webApi ??= await import('../browser/api'); return webApi.uploadBrowserMedia(id,file,{...input,originalName:file.name}); }
   const query=new URLSearchParams({requestId:input.requestId,name:file.name,permission:input.permission,durationMs:String(input.durationMs??0)});
   const response=await fetch(`/api/projects/${encodeURIComponent(id)}/media-upload?${query}`,{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Cewen-Session':session},body:file});
@@ -91,6 +100,8 @@ export async function uploadProjectMedia(id: string, file: File, input: { reques
 
 /** 长时间排演持有媒体租约，离开时释放；网页缓存只逐出未被使用的 Blob。 */
 export async function acquireMediaUrl(snapshot: ProjectSnapshot, filename: string): Promise<{url:string;release:()=>void}> {
+  const draft=draftMediaUrls.get(snapshot.project.id+':'+filename);if(draft&&!snapshot.historical)return {url:draft,release:()=>{}};
+  if (isTransientProject(snapshot.project.id)) return {url:await loadMediaUrl(snapshot,filename),release:()=>{}};
   if (!isWebEdition) return {url:projectAssetUrl(snapshot,filename),release:()=>{}};
   webApi ??= await import('../browser/api'); return webApi.acquireBrowserMedia(snapshot,filename);
 }

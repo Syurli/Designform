@@ -1,3 +1,4 @@
+import { isTransientProject } from '../../shared/transient';
 import type { TutorialDefinition } from './tutorial-manager';
 
 export const designformTutorials: TutorialDefinition[] = [
@@ -66,7 +67,7 @@ designformTutorials.push(
 /** 操作练习单独记进度。只接收当前独立练习项目内的实际界面操作回执。 */
 let practiceProject='';let activeProject='';const evidence=new Map<string,number>();
 export function setTutorialProject(id:string){if(activeProject!==id)evidence.clear();activeProject=id;}
-export function setPracticeProject(id:string){practiceProject=id;activeProject=id;evidence.clear();try{localStorage.setItem('cewen-tutorial-practice-project',id);}catch{}}
+export function setPracticeProject(id:string){practiceProject=id;activeProject=id;evidence.clear();try{if(!isTransientProject(id))localStorage.setItem('cewen-tutorial-practice-project',id);}catch{}}
 try{practiceProject=localStorage.getItem('cewen-tutorial-practice-project')??'';}catch{}
 export function isPracticeProject(id:string){return id===practiceProject&&!!id;}
 window.addEventListener('cewen:tutorial-evidence',event=>{const detail=(event as CustomEvent<{name:string;projectId?:string}>).detail;if(!detail?.name||activeProject!==practiceProject||detail.projectId&&detail.projectId!==activeProject)return;evidence.set(detail.name,(evidence.get(detail.name)??0)+1);});

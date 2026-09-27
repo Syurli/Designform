@@ -1,6 +1,16 @@
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { WorkspaceState, WorkspaceItem } from '../shared/model.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+/** 删除操作由上层确认精确项目根目录；Windows 移入回收站，失败不降级为永久删除。 */
+export async function recycleDirectory(directory: string) {
+  if(process.platform!=='win32')throw new Error('当前平台未提供回收站，请在系统文件管理器中删除此项目。');
+  const script = `Add-Type -AssemblyName Microsoft.VisualBasic
+[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:CEWEN_RECYCLE_TARGET, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin, [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)`;
+  await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',globalThis.Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,env:{...process.env,CEWEN_RECYCLE_TARGET:directory}});
+}
 
 /** 桌面文件能力集中在边界模块；网页构建替换此模块，业务规则与版本格式继续共用。 */
 export { cp, mkdir, readdir, realpath, rm, lstat, open, readFile, rename, unlink } from 'node:fs/promises';

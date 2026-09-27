@@ -848,8 +848,9 @@ export class KnowledgeGraph {
     this.controls.enableRotate = mode === 'galaxy';
     this.controls.enableZoom = mode !== 'network';
     this.controls.maxDistance = mode === 'network' ? 10000 : 3400;
-    this.controls.mouseButtons.LEFT = mode === 'galaxy' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
-    this.controls.touches.ONE = mode === 'galaxy' ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
+    this.controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+    this.controls.mouseButtons.RIGHT = mode === 'galaxy' ? THREE.MOUSE.ROTATE : undefined;
+    this.controls.touches.ONE = THREE.TOUCH.PAN;
     this.container.dataset.mode = mode;
 
     // 先更新真实画布比例，再把导航前的屏幕点反投影到新的画布，避免高度切换时跳位。

@@ -1,3 +1,4 @@
+import { documentPresets } from './document-presets.ts';
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import os from 'node:os';
@@ -25,7 +26,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
     for await (const chunk of request) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       length += bytes.length;
-      if (length > 8 * 1024 * 1024) throw new ProjectError('REQUEST_TOO_LARGE', '本次提交内容过大，请分批处理。');
+      if (length > (request.url === '/api/projects/save-as'||/\/commit$/.test(request.url??'') ? 256 : request.url==='/api/document-presets'?32:8) * 1024 * 1024) throw new ProjectError('REQUEST_TOO_LARGE', '本次提交内容过大，请分批处理。');
       chunks.push(bytes);
     }
     try {
@@ -69,6 +70,8 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       if (url.pathname === '/api/creative-capabilities' && request.method === 'GET') { send(response, creative.capabilities()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'GET') { send(response, connections.read()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'POST') { send(response, connections.update(await body(request))); return true; }
+      if (url.pathname === '/api/document-presets') { await service.list(); send(response, await documentPresets(service.home, request.method === 'POST' ? await body(request) : undefined)); return true; }
+      if (url.pathname === '/api/projects/save-as' && request.method === 'POST') { send(response,await service.saveAs(await body(request) as never));return true; }
       if (url.pathname === '/api/projects' && request.method === 'GET') { send(response, await service.list()); return true; }
       if (url.pathname === '/api/projects' && request.method === 'POST') {
         const input = await body(request);
@@ -88,7 +91,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
         } else { const input = await body(request); send(response, operation === 'upgrade-copy' ? await service.upgradeCopy(id, required(input.directory,'独立副本父目录')) : await creative.action(id, input)); }
         return true;
       }
-      const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(commit|history|recover|drafts|revision|restore-plan|baseline|workspace|asset|import-plan|apply-import|context|questions|answers|proposals|accept-proposal|export|copy|forget|checkpoint|undo-plan|move-document|paste-import|review-import|backup-status|reading-view|begin-batch|end-batch|reverse-relation|archive-documents|collaboration-status|collaboration-document|proposal-status|collaboration-asset))?$/.exec(url.pathname);
+      const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(commit|history|recover|drafts|revision|restore-plan|baseline|workspace|asset|import-plan|apply-import|context|questions|answers|proposals|accept-proposal|export|copy|forget|delete|checkpoint|undo-plan|move-document|paste-import|review-import|backup-status|reading-view|begin-batch|end-batch|reverse-relation|archive-documents|collaboration-status|collaboration-document|proposal-status|collaboration-asset))?$/.exec(url.pathname);
       if (match) {
         const [, id, operation] = match;
         if (!operation && request.method === 'GET') { send(response, await service.read(id, true, url.searchParams.get('verify') === '1')); return true; }
@@ -117,6 +120,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
         if (operation === 'accept-proposal' && request.method === 'POST') { const input = await body(request); if (!Array.isArray(input.paths) || input.paths.some(name => typeof name !== 'string')) throw new ProjectError('INVALID_SELECTION', '请选择需要采纳的文件。'); send(response, await service.acceptProposal(id, required(input.proposalId, '提案'), input.paths as string[], input.edits as Record<string, string> | undefined)); return true; }
         if (operation === 'export' && request.method === 'POST') { const input = await body(request); if (!['current','history','full'].includes(String(input.mode))) throw new ProjectError('INVALID_EXPORT', '请选择导出内容。'); send(response, await service.exportProject(id, required(input.directory, '输出父目录'), input.mode as 'current' | 'history' | 'full', input.includePersonal === true)); return true; }
         if (operation === 'copy' && request.method === 'POST') { const input = await body(request); send(response, await service.copyProject(id, required(input.name, '新项目名称'), required(input.directory, '保存父目录'))); return true; }
+        if (operation === 'delete' && request.method === 'POST') { const input=await body(request); send(response,await service.deleteProject(id,required(input.path,'确认路径'),required(input.name,'确认名称')));return true; }
         if (operation === 'forget' && request.method === 'POST') { send(response, await service.forget(id)); return true; }
         if (operation === 'history' && request.method === 'GET') { send(response, await service.versions(id)); return true; }
         if (operation === 'revision' && request.method === 'GET') { send(response, await service.revision(id, required(url.searchParams.get('revision'), '版本'))); return true; }

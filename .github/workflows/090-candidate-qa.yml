@@ -1,7 +1,7 @@
 name: Verify 0.9 candidate
 on:
   push:
-    branches: ['codex/090-*']
+    branches: ['codex/090-*', 'codex/092-*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -55,8 +55,8 @@ jobs:
             sleep 1
           done
           timeout 120 node scripts/check-090-mcp.mjs 2>&1 | tee qa-output/mcp.log
-          timeout 300 python scripts/check-090-browser.py 2>&1 | tee qa-output/browser.log
-      - name: Verify read-only example hub on an empty fictional workspace
+          timeout 300 python scripts/check-092-browser.py desktop 2>&1 | tee qa-output/browser.log
+      - name: Verify memory examples and Save As on an empty fictional workspace
         shell: bash
         run: |
           set -euo pipefail
@@ -69,7 +69,7 @@ jobs:
             if curl --fail --silent "$CEWEN_URL" > /dev/null; then break; fi
             sleep 1
           done
-          timeout 120 python scripts/check-090-examples.py 2>&1 | tee qa-output/examples.log
+          timeout 120 python scripts/check-092-browser.py examples 2>&1 | tee qa-output/examples.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

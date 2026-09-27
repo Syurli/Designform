@@ -83,7 +83,7 @@ export function parseProjectInfo(file: MarkdownFile, path = ''): ProjectInfo {
   const icon = metadata.icon;
   const projectIcon = icon && typeof icon === 'object' && !Array.isArray(icon) && ['text', 'symbol', 'image'].includes(String((icon as Record<string, unknown>).kind)) && typeof (icon as Record<string, unknown>).value === 'string'
     ? { kind: (icon as Record<string, unknown>).kind as 'text' | 'symbol' | 'image', value: (icon as Record<string, string>).value } : undefined;
-  return { id, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: Number(metadata.format), path, isExample: metadata.example === true, ...(projectIcon ? { icon: projectIcon } : {}), notes: string(metadata.notes) };
+  return { id, createdAt: string(metadata.createdAt) || undefined, updatedAt: string(metadata.updatedAt) || undefined, name: string(metadata.name, titleOf(tree(body).children, '未命名项目')), description: string(metadata.description), format: Number(metadata.format), path, isExample: metadata.example === true, ...(projectIcon ? { icon: projectIcon } : {}), notes: string(metadata.notes) };
 }
 
 /**
@@ -122,7 +122,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
       const color = /^#[0-9a-f]{6}$/i.test(string(header.metadata.color)) ? string(header.metadata.color) : undefined;
       const document: ProjectDocument = { id: id || `unidentified:${file.path}`, path: file.path, title: titleOf(children, file.path.split('/').at(-1)!), type, status: statusOf(header.metadata.status, type === 'question'), system: identity(header.metadata.system), ...(identity(header.metadata.parent) ? { parent: identity(header.metadata.parent) } : {}), text: file.text, hash: file.hash, ...(color ? { color } : {}) };
       documents.push(document);
-      if (type === 'guide') continue;
+      if (type === 'guide' && (!id || ['docs/README.md','docs/INDEX.md'].includes(file.path) || file.path.startsWith('docs/media/'))) continue;
       if (!id) { issue(file.path, 'MISSING_ID', '文档缺少有效 ID；可阅读原文，补齐身份后才能建立稳定关系。'); continue; }
       if (docIds.has(id)) { issue(file.path, 'DUPLICATE_ID', `文档 ID ${id} 已被使用，未自动合并。`); continue; }
       docIds.add(id);
@@ -291,7 +291,7 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
         const raw = node.type === 'link' ? node.url : definitions.get(node.identifier.toLowerCase()) ?? '';
         if (raw && !/^[a-z][a-z0-9+.-]*:|^\/|\\/i.test(raw)) try {
           const url = new URL(raw, `https://project.invalid/${item.file.path}`), targetDoc = documents.find(doc => doc.path === decodeURIComponent(url.pathname.slice(1)));
-          if (targetDoc && targetDoc.type !== 'guide') {
+          if (targetDoc && docIds.has(targetDoc.id)) {
             const target = targetDoc.id + (url.hash ? `/${decodeURIComponent(url.hash.slice(1))}` : '');
             if (target !== owner && node.position) {
               // 同一端点对的正文引用合并显示，但保留每次出现的位置；手工关系独立存在。
@@ -319,6 +319,11 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   // 创作模块关系投影为文档之间的引用；只来源于显式字段，不由布局位置推断。
   const creative = buildCreativeIndex({documents});
   const objectsById = new Map(creative.objects.map(item=>[item.object.id,item]));
+  for(const source of creative.objects.filter(item=>item.object.type==='document-reference')){
+    const target=String(source.object.data.documentId??'');if(!target)continue;
+    if(!documents.some(d=>d.id===target)){issue(source.path,'MISSING_DOCUMENT_REFERENCE',`文档引用「${source.object.title}」的来源已缺失：${target}`);continue;}
+    if(source.documentId!==target&&nodeIds.has(source.documentId)&&nodeIds.has(target))appendEdge({id:`document-preview:${source.object.id}`,source:source.documentId,target,type:'references',note:`文档引用预览「${source.object.title}」`,origin:{kind:'creative',path:source.path}},source.path);
+  }
   for(const use of creative.references){const source=objectsById.get(use.ownerId),target=objectsById.get(use.targetId);if(!source||!target||source.documentId===target.documentId||!nodeIds.has(source.documentId)||!nodeIds.has(target.documentId))continue;
     const edgeId=`creative:${source.object.id}:${target.object.id}:${contentHash(use.role).slice(0,12)}`;
     if(edges.some(edge=>edge.id===edgeId))continue;

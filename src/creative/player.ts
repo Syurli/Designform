@@ -6,6 +6,7 @@ import { compileSequence, timeLabel, type PlaybackPlan, type AudioCue } from '..
 import { changeShotDuration, TapTimingSession, type TimingPreview } from '../../shared/creative/timing';
 import { creativeAction, acquireMediaUrl } from '../project-client';
 import { h } from './render';
+import { isTransientProject } from '../../shared/transient';
 
 export function downloadText(name: string, text: string, mime = 'application/json') {
   const url = URL.createObjectURL(new Blob([text], { type: mime })), a = document.createElement('a');
@@ -202,6 +203,7 @@ export class AnimaticPlayer {
   }
   private async export() {
     try {
+      if(isTransientProject(this.snapshot.project.id)){window.dispatchEvent(new CustomEvent('cewen:request-save-as'));this.message('请先另存为正式项目，成功后再导出排演。');return;}
       const data = await creativeAction<Record<string, unknown>>(this.snapshot.project.id, 'playback-bundle', { sequenceId: this.plan.sequence.id, revision: this.snapshot.revision });
       if (data.revision !== this.snapshot.revision) { this.message('项目已更新，请重新打开排演再导出。'); return; }
       downloadText('策问排演-' + this.plan.sequence.id + '.html', standalonePlayer(data), 'text/html');

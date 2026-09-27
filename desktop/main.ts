@@ -35,6 +35,11 @@ else {
     window = new BrowserWindow({ width: 1500, height: 960, minWidth: 850, minHeight: 650, title: '策问 Designform', icon: iconPath, backgroundColor: colors().color, show: true, titleBarStyle: 'hidden', titleBarOverlay: colors(), webPreferences: { preload: path.join(runtimeRoot, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true } });
     window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) void shell.openExternal(url); return { action: 'deny' }; });
     window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== host!.url) event.preventDefault(); });
+    // Electron 默认会静默阻止 beforeunload。明确让用户返回保存或放弃，避免关闭按钮无反应。
+    window.webContents.on('will-prevent-unload', event => {
+      const answer=dialog.showMessageBoxSync(window!,{type:'question',title:'还有未保存的修改',message:'返回编辑后可以保存当前文档、保存全部或另存为新项目。',detail:'放弃并关闭会丢弃临时示例的本次修改。正式项目已有版本不会被删除。',buttons:['继续编辑','放弃未保存并关闭'],defaultId:0,cancelId:0,noLink:true});
+      if(answer===1)event.preventDefault();
+    });
     // 原生菜单栏由主题一致的页面菜单替代，Alt 不会再弹出第二套栏位。
     Menu.setApplicationMenu(null); window.removeMenu();
     let changing = false;
@@ -86,6 +91,6 @@ else {
     await window.loadURL(host.url); window.show();
     app.on('window-all-closed', () => app.quit());
     // 退出前完成最后一次偏好写入；托盘与本地服务随程序一起关闭。
-    app.on('will-quit', event => { if (!changing) { event.preventDefault(); changing = true; void settingsWrite.finally(() => { tray?.destroy(); host?.close(); app.quit(); }); } });
+    app.on('will-quit', event => { if (!changing) { event.preventDefault(); changing = true; void settingsWrite.finally(() => { tray?.destroy(); host?.close(); setImmediate(() => app.quit()); }); } });
   }).catch(error => { console.error(error); dialog.showErrorBox('策问未能启动', error instanceof Error ? error.message : String(error)); app.quit(); });
 }

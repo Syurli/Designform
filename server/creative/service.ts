@@ -21,7 +21,7 @@ const requireString=(value:unknown,name:string,max=20000)=>{if(typeof value!=='s
 export function requireId(value:unknown,name='身份'){const id=requireString(value,name,120);if(!objectIdPattern.test(id))throw new ProjectError('INVALID_ID',`${name}格式无效`);return id;}
 export const splitIds=(value:unknown)=>asString(value).split(/[,，\s]+/).filter(Boolean);
 export function findObject(snapshot:ProjectSnapshot,id:string):LocatedObject {const entries=buildCreativeIndex(snapshot).objects.filter(x=>x.object.id===id);if(entries.length!==1)throw new ProjectError('MISSING_OBJECT',`对象 ${id} 缺失或身份不唯一`);return entries[0];}
-export function makeDocument(id:string,title:string,objects:CreativeObject[],body=''){return `---\nid: ${id}\ntype: ${objects.every(o=>['quest','media','production'].includes(o.type))?'guide':'dd'}\nstatus: draft\n---\n\n# ${title.replace(/[\r\n]/g,' ')}\n\n${body}\n\n${objects.map(objectBlock).join('\n\n')}\n`;}
+export function makeDocument(id:string,title:string,objects:CreativeObject[],body=''){return `---\nid: ${id}\ntype: ${objects.length>0&&objects.every(o=>o.type==='media')?'guide':'dd'}\nstatus: draft\n---\n\n# ${title.replace(/[\r\n]/g,' ')}\n\n${body}\n\n${objects.map(objectBlock).join('\n\n')}\n`;}
 function guard(snapshot:ProjectSnapshot){if(snapshot.project.format!==2)throw new ProjectError('FORMAT_UPGRADE_REQUIRED','本功能需要格式 2；请先在独立副本升级原项目');if(snapshot.historical)throw new ProjectError('HISTORICAL_READ_ONLY','历史只读');}
 /** Quest、对象与生产元数据最终都走 ProjectService.commit；源码不是另一个可漂移数据库。 */
 export class CreativeService {

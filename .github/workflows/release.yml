@@ -61,7 +61,7 @@ jobs:
           echo 'publish=false' >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" == *-* ]]; then
+          if [[ "$VERSION" == *-* ]] || node -e "const p=require('./.github/release-intent.json');if(p.version!==require('./package.json').version||p.channel!=='prerelease')process.exit(1)"; then
             echo 'prerelease=true' >> "$GITHUB_OUTPUT"
             # 用户批准的候选通过精确版本意图发布为 prerelease，不会变成稳定最新版。
             if [[ "$EVENT_NAME" == workflow_run ]]; then

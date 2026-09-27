@@ -24,6 +24,10 @@ export class PresetService {
    }
   }
   const content=buildPreset(preset.id,prefix,input.sample===true,media);
+  const customGroups:{id:string;title:string;color:string}[]=[];
+  // 向导只定制本次起步内容，既有项目及所有模块能力不受影响。
+  if(Array.isArray(input.structure)&&input.sample!==true){if(input.structure.length>50)throw new ProjectError('INVALID_STRUCTURE','起步文档最多 50 份。');const defaults=content.documents.slice(),categories=new Map<string,string>();content.documents=[];for(const row of input.structure as {key:string;title:string;category:string}[]){if(!row||!/^-[a-zA-Z0-9_-]+$/.test(row.key)||typeof row.title!=='string'||!row.title.trim()||row.title.length>200||typeof row.category!=='string'||row.category.length>80)throw new ProjectError('INVALID_STRUCTURE','请检查起步文档名称与分类。');const label=row.category.trim()||'创作资料';if(!categories.has(label)){const key='custom-'+categories.size;categories.set(label,key);customGroups.push({id:prefix+'-group-'+key,title:label,color:'#7CBFFF'});}const original=defaults.find(d=>d.id===prefix+row.key);content.documents.push({...original,id:prefix+row.key,title:row.title.trim(),purpose:original?.purpose??'document',group:categories.get(label) as typeof content.documents[number]['group'],body:original?.body??'在这里开始创作。',objects:original?.objects??[]});}}
+
   snapshot=await this.projects.runOperation(id,{...input,requestId},()=>{
    const changes:FileChange[]=[...descriptors,...content.documents.map(d=>({path:`docs/creative/${d.id}.md`,baseHash:null,text:`---\nid: ${d.id}\ntype: ${d.purpose==='quest'?'guide':(!snapshot.rootDocumentId&&['game','mixed'].includes(preset.id)&&d.id===prefix+'-doc-brief')?'gdd':'dd'}\nstatus: draft\npurpose: ${d.purpose}\nsystem: ${prefix}-group-${d.group}\nexample: ${input.sample===true}\n---\n\n# ${d.title}\n\n${d.body}\n\n${d.objects.map(objectBlock).join('\n\n')}\n`}))];
    const entry=snapshot.projectEntry!;const metadata=readHeader(entry.text).metadata,applied=Array.isArray(metadata.presets)?metadata.presets:[];
@@ -31,7 +35,7 @@ export class PresetService {
    const used=new Set<string>(content.documents.map(d=>d.group));if(descriptors.length)used.add('media');
    for(const group of [...presetGroups].reverse())if(used.has(group.key)&&'parent' in group)used.add(group.parent);
    const existing=Array.isArray(metadata.systems)?metadata.systems:snapshot.groups.filter(group=>group.id!=='system-unassigned').map(group=>({id:group.id,title:group.label,color:group.color,...(group.parent?{parent:group.parent}:{})})),added=presetGroups.filter(group=>used.has(group.key)).map(group=>({id:`${prefix}-group-${group.key}`,title:group.title,color:group.color,...('parent' in group?{parent:`${prefix}-group-${group.parent}`}:{})}));
-   changes.push({path:'PROJECT.md',baseHash:entry.hash,text:setMetadata(entry.text,{systems:[...existing,...added],presets:[...applied,{id:preset.id,instanceId:prefix,sample:input.sample===true}],minimumAppVersion:'0.9.0-rc.3'})});
+   changes.push({path:'PROJECT.md',baseHash:entry.hash,text:setMetadata(entry.text,{systems:[...existing,...added,...customGroups],presets:[...applied,{id:preset.id,instanceId:prefix,sample:input.sample===true}],minimumAppVersion:'0.9.2'})});
    return {projectId:id,requestId,baseRevision:snapshot.revision,actor:'user',reason:`追加${input.sample===true?'虚构示例':'起步框架'}：${content.title}（预设不限制模块）`,changes};
   });
   if(input.sample===true&&content.questIds.length)await this.seedDemonstration(id,prefix,content.questIds,content.standaloneTargets);

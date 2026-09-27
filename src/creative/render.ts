@@ -14,6 +14,8 @@ function mapView(o:CreativeObject,index:CreativeIndex){const base=o.type==='map-
 export function objectCard(o:CreativeObject,index:CreativeIndex,compact=false,depth=0):string {
  const d=o.data,lookup=(id:string)=>index.objects.find(x=>x.object.id===id)?.object;let body='';
  switch(o.type){
+  case 'document-reference':body=`<section data-document-reference="${h(d.documentId)}"><p>文档引用 · ${h(d.documentId||'待选择来源')}</p></section><p>${h(d.note)}</p>`;break;
+  case 'fields':body='<dl>'+asRows(d.entries).map(r=>'<dt>'+h(r.label)+'</dt><dd>'+h(r.value)+'</dd>').join('')+'</dl>';break;
   case 'map':case 'map-use':body=mapView(o,index);break;
   case 'character':body=`${mediaMarkup(asString(d.mediaId),'image',o.title)}<p>${h(d.identity)}</p><p>${h(d.motivation)}</p><p>${h(d.personality)}</p>${d.voiceId?objectLink(asString(d.voiceId),index):''}<div class="creative-chips">${asRows(d.variants).map(v=>`<span title="${h(v.description)}">${h(v.name)}</span>`).join('')}</div>`;break;
   case 'location':body=`<p>${h(d.space)}</p><p>${h(d.time)} · ${h(d.lighting)}</p>${d.mapId?objectLink(asString(d.mapId),index):''}${d.mediaId?mediaMarkup(asString(d.mediaId)):''}`;break;
