@@ -40,3 +40,6 @@
 
 /* 图谱详情的后台刷新不能覆盖文档属性区。 */
 .document-canvas-open #inspector{display:none!important}
+
+/* 顶栏已提供项目库命令，品牌栏不再重复同一入口。 */
+.desktop-host .application-bar>.application-projects,.desktop-host .application-bar>.application-divider{display:none}
