@@ -1,3 +1,4 @@
+import { registerWorkTools } from './work.ts';
 import { registerCreativeTools } from './creative.ts';
 import { APP_VERSION } from '../shared/version.ts';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -11,7 +12,7 @@ import { createPresence } from './presence.ts';
 const server = new McpServer({ name: 'baige-cewen', version: APP_VERSION }), local = new LocalClient();
 const presence = createPresence(server);
 /** 记录访问的项目和时间，不把工具参数或文档正文泄露到连接面板。 */
-const client = { request<T = unknown>(route: string, input?: unknown) { presence.activity(route); return local.request<T>(route, input); } };
+const client = { async request<T = unknown>(route: string, input?: unknown) { await presence.ensure(route); return local.request<T>(route, input); } };
 const project = z.string().regex(/^[A-Za-z0-9_-]+$/);
 const idList = z.array(z.string().min(1)).max(200).default([]);
 const result = async (action: () => Promise<unknown>) => { try { return { content: [{ type: 'text' as const, text: JSON.stringify(await action()) }] }; } catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; } };
@@ -39,13 +40,14 @@ server.registerTool('cewen_asset', { description: '读取项目 docs/assets 下�
   } catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
 });
 
-server.registerTool('cewen_publish_questions', { description: '发布独立问题与推荐方案，用户在策问作答。不得代填用户答案。', inputSchema: { projectId: project, requestId: z.string(), round: z.string(), questions: z.array(z.object({ id: z.string(), title: z.string(), background: z.string(), options: z.array(z.string()), targets: z.array(z.string()), mode: z.enum(['single','multiple']).optional(), follows: z.string().optional(), condition: z.string().optional(), when: z.object({ questionId: z.string(), option: z.string().optional() }).optional() })).min(1).max(30) } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/questions`, input)));
-server.registerTool('cewen_propose', { description: '暂存公开 Markdown 或受控伴随 JSON 的修改提案，由用户在软件核对并采纳。不会直接改正式文档，也不接受二进制附件。', inputSchema: { projectId: project, proposal: z.object({ id: z.string(), title: z.string(), reason: z.string(), baseRevision: z.string(), questionIds: z.array(z.string()), dependencies: z.record(z.string(), z.string()), changes: z.array(z.object({ path: z.string(), baseHash: z.string().nullable(), text: z.string().nullable() })) }) } }, ({ projectId, proposal }) => result(() => client.request(`/api/projects/${projectId}/proposals`, proposal)));
+server.registerTool('cewen_publish_questions', { description: '用户明确授权发起本轮后，发布独立问题与推荐方案。收到回答先分析整理，再询问用户是否开始下一轮并等待明确同意；不得代填答案，复制开场白不等于续轮授权。', inputSchema: { projectId: project, requestId: z.string(), round: z.string(), questions: z.array(z.object({ id: z.string(), title: z.string(), background: z.string(), options: z.array(z.string()), targets: z.array(z.string()), mode: z.enum(['single','multiple']).optional(), follows: z.string().optional(), condition: z.string().optional(), when: z.object({ questionId: z.string(), option: z.string().optional() }).optional() })).min(1).max(30) } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/questions`, input)));
+server.registerTool('cewen_propose', { description: '仅当用户明确要求审核时，暂存公开 Markdown 或受控伴随 JSON 的修改提案，由用户在软件核对并采纳。不会直接改正式文档，也不接受二进制附件。', inputSchema: { projectId: project, proposal: z.object({ id: z.string(), title: z.string(), reason: z.string(), baseRevision: z.string(), questionIds: z.array(z.string()), dependencies: z.record(z.string(), z.string()), changes: z.array(z.object({ path: z.string(), baseHash: z.string().nullable(), text: z.string().nullable() })) }) } }, ({ projectId, proposal }) => result(() => client.request(`/api/projects/${projectId}/proposals`, proposal)));
 server.registerTool('cewen_prepare_import', { description: '预检用户指定的 Markdown 目录，只生成暂存候选；用户在策问确认映射后应用。', inputSchema: { projectId: project, directory: z.string() } }, ({ projectId, directory }) => result(() => client.request(`/api/projects/${projectId}/import-plan`, { directory })));
 
 server.registerTool('cewen_checkpoint', { description: '用户已授权直接修改当前公开文件且本轮落盘完成后，显式保存公开版本。不会替模型修改正文或批准提案。', inputSchema: { projectId: project, requestId: z.string(), reason: z.string() } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/checkpoint`, input)));
 server.registerTool('cewen_begin_batch', { description: '用户授权外部工具直接写多个公开文件前开始一轮，自动同步暂不发布中途版本。必须在落盘完成后结束。', inputSchema: { projectId: project, requestId: z.string() } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/begin-batch`, input)));
 server.registerTool('cewen_end_batch', { description: '验证已完成的外部文件批次并创建一个版本。格式错误会保留批次供修正后重试。', inputSchema: { projectId: project, batch: z.string(), reason: z.string() } }, ({ projectId, ...input }) => result(() => client.request(`/api/projects/${projectId}/end-batch`, input)));
 
+registerWorkTools(server,local,presence);
 registerCreativeTools(server,client);
 await server.connect(new StdioServerTransport());

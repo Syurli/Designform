@@ -59,3 +59,11 @@ textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent-stron
 .desktop-about-content { padding: 1.25rem 1.5rem; line-height: 1.8; }
 .desktop-about-content strong { display: inline-block; min-width: 4rem; }
 .desktop-about-content a { overflow-wrap: anywhere; }
+/* 根截图缓慢揭示新配色；只改变透明度，不移动页面和光标。 */
+::view-transition-group(root){animation-duration:280ms}
+::view-transition-old(root){animation:theme-old-fade 280ms ease-out both;mix-blend-mode:normal}
+::view-transition-new(root){animation:theme-new-fade 280ms ease-out both;mix-blend-mode:normal}
+@keyframes theme-old-fade{from{opacity:1}to{opacity:0}}
+@keyframes theme-new-fade{from{opacity:0}to{opacity:1}}
+.theme-soft-transition,.theme-soft-transition :is(section,aside,main,header,footer,button,input,textarea,select,dialog){transition:background-color 280ms ease,color 280ms ease,border-color 280ms ease!important}
+@media(prefers-reduced-motion:reduce){::view-transition-group(root),::view-transition-old(root),::view-transition-new(root){animation:none!important}.theme-soft-transition *{transition:none!important}}

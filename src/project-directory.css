@@ -1,5 +1,5 @@
 /* 项目目录的样式全部限定在组件根下，颜色来自工作台主题变量。 */
-.project-directory{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--text-body,#a7b8d0);font-size:12px}
+.project-directory{display:flex;flex-direction:column;box-sizing:border-box;min-width:0;max-width:100%;min-height:0;height:100%;color:var(--text-body,#a7b8d0);font-size:12px;overflow-x:hidden}
 .project-directory button,.project-directory input,.project-directory select{font:inherit}
 .project-directory button{border:0;color:inherit;background:transparent;cursor:pointer}
 .project-directory button:disabled{cursor:default;opacity:.4}
@@ -15,7 +15,7 @@
 .project-directory-root-card .project-directory-title{font-weight:650}
 .project-directory-categories{display:flex;flex-direction:column;gap:2px;min-width:0;min-height:0;padding:10px 5px 7px 0;border-right:1px solid var(--line-soft,#8096c02a);overflow-y:auto;scrollbar-width:thin}
 .project-directory-document-pane{display:flex;flex-direction:column;min-width:0;min-height:0}
-.project-directory-breadcrumb{display:flex;flex-wrap:nowrap;align-items:center;gap:3px;min-width:0;padding:5px 3px 8px;border-bottom:1px solid var(--line-soft,#8096c02a);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.project-directory-breadcrumb{display:flex;flex-wrap:nowrap;align-items:center;gap:3px;min-width:0;padding:5px 3px 8px;border-bottom:1px solid var(--line-soft,#8096c02a);overflow:hidden}
 .project-directory-group-path{flex:none;width:100%;box-sizing:border-box;margin-bottom:2px}
 .project-directory-crumb{flex:none;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 5px!important;border-radius:5px;color:var(--text-muted,#8293ae)!important;font-size:10px!important}
 .project-directory-crumb[aria-current=location]{color:var(--text-strong,#dce6f7)!important;font-weight:600}
@@ -38,7 +38,7 @@
 .project-directory-pager button:hover:not(:disabled){background:var(--surface-tint,#90b3e51c)}
 .project-directory-items{min-width:0;min-height:0;padding:8px 0 12px 7px;overflow-y:auto;scrollbar-width:thin}
 .project-directory-entry{min-width:0}
-.project-directory-row{position:relative;display:flex;align-items:center;gap:1px;min-width:0;min-height:34px;padding:2px 3px;border-left:2px solid var(--directory-color,#94a5bc);border-radius:5px;margin:2px 0}
+.project-directory-row{position:relative;display:flex;align-items:center;gap:1px;box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:34px;padding:2px 3px;border-left:2px solid var(--directory-color,#94a5bc);border-radius:5px;margin:2px 0;overflow:hidden}
 .project-directory-row:hover,.project-directory-row.active,.project-directory-row.drop-target,.project-directory-category-row.drop-target{background:var(--surface-tint,#90b3e51c)}
 .project-directory-drag-handle{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;min-height:25px;color:var(--text-muted,#8293ae);cursor:grab;user-select:none;touch-action:none;opacity:.65}
 .project-directory-drag-handle:active,.project-directory-row.drag-ready,.project-directory-category-row.drag-ready{cursor:grabbing}
@@ -65,9 +65,117 @@
 .project-directory-editor strong{font-size:12px;color:var(--text-strong,#dce6f7);font-weight:600}
 .project-directory-editor input:not([type=checkbox]),.project-directory-editor select{box-sizing:border-box;width:100%;min-width:0;height:30px;padding:4px 7px;border:1px solid var(--line-soft,#8096c02a);border-radius:5px;background:var(--surface-input,#182333);color:var(--text-strong,#dce6f7)}
 .project-directory-editor input[type=color]{padding:2px!important}
+/* 收藏分类说明独立占行；成员清单只纵向滚动，长名称截断并用 title 保留全文。 */
+.project-directory .project-directory-editor[data-kind^=favorite]{box-sizing:border-box;max-height:min(60%,420px);min-height:0;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin}
+.project-directory .project-directory-editor[data-kind^=favorite] strong,.project-directory .project-directory-editor[data-kind^=favorite] small{min-width:0;overflow-wrap:anywhere}
+.project-directory .project-directory-editor textarea{box-sizing:border-box;width:100%;min-width:0;min-height:65px;resize:vertical;padding:6px 7px;border:1px solid var(--line-soft,#8096c02a);border-radius:5px;background:var(--surface-input,#182333);color:var(--text-strong,#dce6f7);font:inherit;font-size:11px;line-height:1.6}
+.project-directory .project-directory-description-field{display:grid;gap:5px}
+.project-directory .project-directory-member-choices{min-width:0;max-height:200px;overflow-x:hidden;overflow-y:auto;display:grid;gap:6px;scrollbar-width:thin}
+.project-directory .project-directory-member-choices label{min-width:0}
+.project-directory .project-directory-member-choices input{flex:none}
+.project-directory .project-directory-member-choices span{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.project-directory .project-directory-favorite-description{flex:none;min-width:0;margin:5px 5px 3px;color:var(--text-muted,#8293ae);font-size:10px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .project-directory-editor label{display:flex;align-items:center;gap:5px;color:var(--text-muted,#8293ae);font-size:11px}
 .project-directory-editor-actions{display:flex;justify-content:flex-end;gap:5px}
 .project-directory-editor-actions button{padding:5px 8px;border-radius:5px}
 .project-directory-editor-actions button[type=submit]{background:var(--accent-strong,#476a6a);color:#fff}
 .project-directory-readonly .project-directory-more{display:none}
 @media(max-width:700px){.project-directory-content{grid-template-columns:minmax(84px,30%) minmax(0,1fr)}.project-directory-category-row .project-directory-more{opacity:1}}
+
+/* 分类栏始终参与弹性布局；最左边的常驻首字入口也可触发展开，三种模式均挤压文档区。 */
+.project-directory .project-directory-content{position:relative;display:flex;min-width:0;max-width:100%;isolation:isolate;overflow:hidden}
+.project-directory .project-directory-document-pane{flex:1;min-width:0;margin-left:0;overflow:hidden}
+.project-directory .project-directory-categories{position:relative;inset:auto;z-index:auto;display:flex;flex:0 0 30px;box-sizing:border-box;width:auto;min-width:30px;padding:5px 3px 7px 0;gap:2px;border-right:1px solid var(--line-soft,#8096c02a);background:var(--surface-panel,#1b2533);overflow-x:hidden;overflow-y:auto;scrollbar-width:none;transition:flex-basis .2s ease,padding .2s ease}
+.project-directory .project-directory-content.categories-open .project-directory-categories,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-categories{flex-basis:clamp(106px,46%,172px);padding-right:6px;scrollbar-width:thin}
+.project-directory .project-directory-category-view{display:inline-flex;align-items:center;justify-content:center;flex:none;align-self:flex-start;width:26px;height:27px;padding:3px!important;border-radius:5px;color:var(--text-muted,#8293ae)}
+.project-directory .project-directory-category-view:hover{background:var(--surface-tint,#90b3e51c);color:var(--text-strong,#dce6f7)}
+.project-directory .project-directory-category-row{flex:none;min-height:32px;margin-left:0;padding-left:0;overflow:hidden;transition:transform .18s ease,min-height .18s ease,padding .18s ease}
+.project-directory .project-directory-category-row:hover{transform:translateX(2px)}
+.project-directory .project-directory-category-row[hidden]{display:none}
+.project-directory .project-directory-category-row .project-directory-category{height:32px;box-sizing:border-box;padding:4px 2px!important;border-left:3px solid var(--directory-color,#94a5bc)!important;text-align:center;font-size:11px!important;transition:height .18s ease,padding .18s ease}
+.project-directory .project-directory-category-initial{display:block;font-size:10px;line-height:22px}
+.project-directory .project-directory-category-name{display:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-directory .project-directory-content.categories-open .project-directory-category-row,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-category-row{padding-left:min(21px,calc(var(--category-depth,0)*7px))}
+.project-directory .project-directory-content.categories-open .project-directory-category,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-category{padding-left:5px!important;text-align:left}
+.project-directory .project-directory-content.categories-open .project-directory-category-initial,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-category-initial{display:none}
+.project-directory .project-directory-content.categories-open .project-directory-category-name,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-category-name{display:block}
+.project-directory .project-directory-category-arrow{display:none;align-items:center;justify-content:center;flex:none;width:23px;height:28px;padding:0!important;color:var(--text-strong,#dce6f7)!important;border-radius:4px}
+.project-directory .project-directory-content.categories-open .project-directory-category-arrow,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-category-arrow{display:inline-flex}
+.project-directory .project-directory-category-arrow:hover{background:var(--surface-tint,#90b3e51c)}
+.project-directory .project-directory-category-arrow svg,.project-directory .project-directory-expand svg{transition:transform .18s ease}
+.project-directory .project-directory-category-arrow[aria-expanded=false] svg,.project-directory .project-directory-expand[aria-expanded=false] svg{transform:rotate(-90deg)}
+.project-directory .project-directory-category-arrow:hover[aria-expanded=true] svg{transform:translateY(1px)}
+.project-directory .project-directory-category-pin{display:inline-block;vertical-align:-2px;margin-right:3px;color:var(--accent-strong,#99baba)}
+/* 深层路径保留全部数据，只压缩祖先行与缩进，避免分类名称无限向右逃出。 */
+.project-directory .project-directory-category-row.is-compressed-ancestor{min-height:23px;opacity:.75}
+.project-directory .project-directory-category-row.is-compressed-ancestor .project-directory-category{height:23px;padding-top:1px!important;padding-bottom:1px!important;font-size:10px!important}
+.project-directory .project-directory-category-row.is-compressed-ancestor .project-directory-category-arrow{height:22px}
+/* 抽屉仅展开当前顶层分类的名称与子树，其余顶层入口保留彩条和首字。 */
+.project-directory .project-directory-content[data-category-view=drawer].categories-open .project-directory-category-row:not(.is-drawer-active){align-self:flex-start;width:27px;padding-left:0}
+.project-directory .project-directory-content[data-category-view=drawer].categories-open .project-directory-category-row:not(.is-drawer-active) .project-directory-category{padding-left:2px!important;text-align:center}
+.project-directory .project-directory-content[data-category-view=drawer].categories-open .project-directory-category-row:not(.is-drawer-active) .project-directory-category-initial{display:block}
+.project-directory .project-directory-content[data-category-view=drawer].categories-open .project-directory-category-row:not(.is-drawer-active) .project-directory-category-name,.project-directory .project-directory-content[data-category-view=drawer].categories-open .project-directory-category-row:not(.is-drawer-active) .project-directory-category-arrow{display:none}
+.project-directory .project-directory-add-category{flex:none;overflow:hidden;white-space:nowrap;font-size:0!important;padding:7px 2px!important;text-align:center}
+.project-directory .project-directory-add-category::before{content:'＋';font-size:14px}
+.project-directory .project-directory-content.categories-open .project-directory-add-category,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-add-category{font-size:11px!important;padding-left:8px!important;text-align:left}
+.project-directory .project-directory-content.categories-open .project-directory-add-category::before,.project-directory .project-directory-content:has(.project-directory-categories button:focus-visible) .project-directory-add-category::before{content:none}
+/* 长按后的拖动把手才占据空间；普通悬停保留完整标题宽度。 */
+.project-directory .project-directory-drag-handle{display:none;opacity:0;min-width:12px;width:12px}
+.project-directory .drag-ready>.project-directory-drag-handle{display:inline-flex;opacity:1;animation:directory-handle-in .14s ease}
+.project-directory .project-directory-row{transition:background .16s ease,transform .18s ease}
+.project-directory .project-directory-row:hover{transform:translateX(1.5px)}
+@keyframes directory-handle-in{from{opacity:0;transform:translateX(-3px)}to{opacity:1;transform:translateX(0)}}
+
+/* 总置顶支持多个快捷入口，限制高度并内部滚动，保留主体文档列表的空间。 */
+.project-directory-global-pins{flex:none;min-width:0;max-width:100%;min-height:35px;max-height:170px;margin:0 0 7px;padding:5px 6px;border:1px solid var(--line-active,#7894b55c);border-radius:8px;background:var(--surface-raised,#243043);box-sizing:border-box;display:flex;flex-direction:column;overflow-x:hidden}
+.project-directory-pin-heading{display:flex;align-items:center;gap:4px;flex:none;height:2px;padding:0 2px;border-top:1px dashed var(--line-active,#7894b55c);overflow:hidden;font-size:10px;line-height:14px;color:transparent;transition:height .18s ease,color .18s ease,padding .18s ease,border-color .18s ease}
+.project-directory-pin-heading svg{flex:none;opacity:0;transition:opacity .18s ease}
+.project-directory-global-pins:is(:hover,:focus-within,.drop-before,.drop-after) .project-directory-pin-heading{height:15px;padding-bottom:2px;border-color:transparent;color:var(--text-muted,#8293ae)}
+.project-directory-global-pins:is(:hover,:focus-within,.drop-before,.drop-after) .project-directory-pin-heading svg{opacity:1}
+.project-directory-global-pins.is-empty{min-height:14px;padding-top:4px;padding-bottom:4px;transition:min-height .18s ease,padding .18s ease}
+.project-directory-global-pins.is-empty .project-directory-pin-items{max-height:0;opacity:0;transition:max-height .18s ease,opacity .18s ease}
+.project-directory-global-pins.is-empty:is(:hover,:focus-within,.drop-before,.drop-after){min-height:42px;padding-top:5px;padding-bottom:5px}
+.project-directory-global-pins.is-empty:is(:hover,:focus-within,.drop-before,.drop-after) .project-directory-pin-items{max-height:25px;opacity:1}
+/* 长按预备和文档拖动期间，空接收区向下浮出增加的 28px，用负边距抵消占位。
+   后方文档源行保持原坐标，避免浏览器在按下后因源节点位移而丢失原生拖动候选。 */
+.project-directory.is-dragging-document .project-directory-global-pins.is-empty{position:relative;z-index:4;height:42px;min-height:42px;max-height:42px;margin-bottom:-21px;padding-top:5px;padding-bottom:5px;transition:none}
+.project-directory.is-dragging-document .project-directory-global-pins.is-empty .project-directory-pin-heading{height:15px;padding-bottom:2px;border-color:transparent;color:var(--text-muted,#8293ae);transition:none}
+.project-directory.is-dragging-document .project-directory-global-pins.is-empty .project-directory-pin-heading svg{opacity:1}
+.project-directory.is-dragging-document .project-directory-global-pins.is-empty .project-directory-pin-items{max-height:25px;opacity:1;transition:none}
+/* 纵向滚动会让未指定的 overflow-x 自动变成 auto，必须显式隐藏横向并留出悬停位移余量。 */
+.project-directory-pin-items{box-sizing:border-box;min-width:0;max-width:100%;min-height:0;padding-right:3px;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin}
+.project-directory-pin-items>small{display:block;padding:3px 2px;font-size:10px;color:var(--text-muted,#8293ae)}
+.project-directory .project-directory-global-pins .project-directory-row{margin:2px 0;padding:2px 1px}
+.project-directory-global-pins .project-directory-title{font-weight:600}
+.project-directory .project-directory-list-toolbar{flex:none;display:flex;align-items:center;justify-content:space-between;gap:4px;min-height:28px;padding:2px 1px 3px 5px;border-bottom:1px solid var(--line-soft,#8096c02a)}
+.project-directory-current-category{display:flex;align-items:center;gap:5px;min-width:0;color:var(--text-strong,#dce6f7);font-size:11px}
+.project-directory-current-category>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-directory-current-color{flex:none;width:7px;height:12px;border-radius:2px;transition:background .22s ease}
+.project-directory-current-category.is-changing{animation:directory-category-in .22s ease}
+@keyframes directory-category-in{from{opacity:.3;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
+.project-directory .project-directory-sort{display:inline-flex;align-items:center;justify-content:center;flex:none;width:25px;height:24px;padding:0;border:1px solid var(--line-soft,#8096c02a);border-radius:5px;font-size:16px;background:var(--surface-raised,#243043)}
+.project-directory .project-directory-sort:hover{background:var(--surface-tint,#90b3e51c)}
+.project-directory .project-directory-items{flex:1;box-sizing:border-box;min-width:0;max-width:100%;padding:2px 3px 10px 5px;overflow-x:hidden;overflow-y:auto}
+.project-directory .project-directory-entry,.project-directory .project-directory-sections,.project-directory .project-directory-section{box-sizing:border-box;min-width:0;max-width:100%;overflow-x:hidden}
+.project-directory .project-directory-row .project-directory-title{flex:1 1 0;min-width:0}
+.project-directory .project-directory-row>.project-directory-expand,.project-directory .project-directory-row>.project-directory-favorite,.project-directory .project-directory-row>.project-directory-pin,.project-directory .project-directory-row>.project-directory-drag-handle{box-sizing:border-box;flex-shrink:0}
+.project-directory .project-directory-pin{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:26px;padding:0!important;border:0;background:transparent;color:var(--text-muted,#8293ae);opacity:.7}
+.project-directory .project-directory-pin:hover,.project-directory .project-directory-pin.is-pinned{color:var(--accent-strong,#99baba);opacity:1}
+.project-directory .project-directory-pin.is-pinned svg{fill:var(--surface-tint,#90b3e51c)}
+.project-directory .project-directory-favorite{display:inline-flex;align-items:center;justify-content:center;width:20px;height:26px}
+.project-directory .project-directory-row button.project-directory-favorite{opacity:.8}
+.project-directory .project-directory-row button.project-directory-favorite:hover,.project-directory .project-directory-row button.project-directory-favorite.is-favorite{opacity:1}
+.project-directory .project-directory-favorite.is-favorite{color:#CFB378!important}
+.project-directory .project-directory-favorite.is-favorite svg{fill:color-mix(in srgb,#CFB378 18%,transparent)}
+/* 细线功能图标用轻微位移和转动反馈，保持文字稳定。 */
+.project-directory .project-directory-pin svg,.project-directory .project-directory-favorite svg,.project-directory .project-directory-sort svg,.project-directory .project-directory-category-view svg{transition:transform .18s ease}
+.project-directory .project-directory-pin:hover svg{transform:rotate(-10deg) scale(1.06)}
+.project-directory .project-directory-favorite:hover svg{transform:scale(1.1)}
+.project-directory .project-directory-sort:hover svg{transform:translateY(-1px)}
+.project-directory .project-directory-category-view:hover svg{transform:translateX(1px)}
+
+/* 层级路径只作为底部数据展示，不承担导航或拖放，分类区与文档区不再重复标题。 */
+.project-directory .project-directory-footer{display:flex;flex-direction:column;gap:5px;padding-top:6px}
+.project-directory-path{font-size:10px;line-height:1.5;color:var(--text-muted,#8293ae);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(hover:none){.project-directory .project-directory-content:has(.project-directory-categories:focus-within) .project-directory-categories{flex-basis:clamp(106px,46%,172px)}}
+@media(prefers-reduced-motion:reduce){.project-directory .project-directory-categories,.project-directory .project-directory-row,.project-directory .project-directory-category-row,.project-directory .project-directory-category,.project-directory .project-directory-pin-heading,.project-directory .project-directory-pin-heading svg,.project-directory .project-directory-pin svg,.project-directory .project-directory-favorite svg,.project-directory .project-directory-sort svg,.project-directory .project-directory-category-view svg,.project-directory .project-directory-category-arrow svg,.project-directory .project-directory-expand svg{transition:none}.project-directory .project-directory-current-category.is-changing,.project-directory .drag-ready>.project-directory-drag-handle{animation:none}}

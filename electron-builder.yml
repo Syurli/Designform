@@ -9,6 +9,8 @@ files:
   - "!node_modules/**"
   - runtime/preload.cjs
 extraFiles:
+  - from: LICENSE
+    to: LICENSE
   - from: desktop/策问MCP.cmd
     to: 策问MCP.cmd
   - from: desktop/策问CLI.cmd

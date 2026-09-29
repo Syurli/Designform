@@ -1,0 +1,18 @@
+/* 识别区采用控件本身，只有进入或聚焦才播放一次；结束姿态与静止图标完全一致。 */
+.icon-motion-active svg{transform-origin:center;transform-box:fill-box;animation:cewen-icon-nudge 400ms cubic-bezier(.2,.7,.3,1)}
+.icon-motion-active[data-icon-motion="tilt"] svg{animation-name:cewen-icon-tilt}
+.icon-motion-active[data-icon-motion="sort"] svg{animation-name:cewen-icon-sort}
+.icon-motion-active[data-icon-motion="orbit"] svg{animation:none}
+.icon-motion-active[data-icon-motion="orbit"] svg circle:not(:first-of-type){transform-box:view-box;transform-origin:12px 12px;animation:cewen-icon-orbit 650ms cubic-bezier(.2,.7,.3,1)}
+.icon-motion-active[data-icon-motion="grid"] svg{animation:none}
+.icon-motion-active[data-icon-motion="grid"] svg rect{transform-box:fill-box;transform-origin:center;animation:cewen-icon-grid 430ms cubic-bezier(.2,.7,.3,1)}
+.icon-motion-active[data-icon-motion="grid"] svg rect:nth-child(1){--icon-x:-1.5px;--icon-y:-1.5px}
+.icon-motion-active[data-icon-motion="grid"] svg rect:nth-child(2){--icon-x:1.5px;--icon-y:-1.5px}
+.icon-motion-active[data-icon-motion="grid"] svg rect:nth-child(3){--icon-x:1.5px;--icon-y:1.5px}
+.icon-motion-active[data-icon-motion="grid"] svg rect:nth-child(4){--icon-x:-1.5px;--icon-y:1.5px}
+@keyframes cewen-icon-nudge{0%,100%{transform:translateY(0)}40%{transform:translateY(-2px)}70%{transform:translateY(.5px)}}
+@keyframes cewen-icon-tilt{0%,100%{transform:rotate(0)}30%{transform:rotate(-9deg)}60%{transform:rotate(7deg)}80%{transform:rotate(-3deg)}}
+@keyframes cewen-icon-sort{0%,100%{transform:translateY(0)}30%{transform:translateY(-2px)}65%{transform:translateY(2px)}}
+@keyframes cewen-icon-orbit{to{transform:rotate(360deg)}}
+@keyframes cewen-icon-grid{0%,100%{transform:translate(0,0)}45%{transform:translate(var(--icon-x),var(--icon-y))}}
+@media(prefers-reduced-motion:reduce){.icon-motion-active svg,.icon-motion-active svg *{animation:none!important}}

@@ -9,3 +9,41 @@
 .rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle{z-index:4;bottom:-7px;height:14px;max-width:180px;background:transparent;opacity:1;touch-action:none}
 .rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle::after{content:'';position:absolute;left:0;right:0;top:5px;height:4px;border-radius:4px;background:var(--crepe-color-outline);opacity:.55;transition:opacity .2s}
 .rich-writing.milkdown .milkdown-image-block .image-wrapper .image-resize-handle:hover::after,.rich-writing.milkdown .milkdown-image-block.selected .image-wrapper .image-resize-handle::after{opacity:1}
+/* 中文字体多数没有独立斜体字面；正文允许浏览器合成斜体，避免点击后看起来没有作用。 */
+.rich-writing em,.document-presentation-body em,.markdown-body em,.desktop-document-preview em,.document-canvas em{font-style:italic;font-synthesis:style}
+/* 字体/配色面板使用全局主题变量，在两种正文视图中保持相同外观。 */
+.rich-text-style-panel{position:fixed;inset:auto;margin:0;padding:14px;box-sizing:border-box;overflow:auto;z-index:120;border:1px solid var(--line-active);border-radius:12px;background:var(--surface-raised);color:var(--text-strong);box-shadow:0 16px 42px #0005;font:inherit;font-size:13px}
+.rich-text-style-panel header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.rich-text-style-panel button{padding:5px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--surface-panel);color:var(--text-body);cursor:pointer;font:inherit;transition:background .18s,color .18s}
+.rich-text-style-panel button:hover{background:var(--surface-tint);color:var(--text-strong)}
+.rich-text-style-panel button:disabled{opacity:.5;cursor:wait}
+.rich-text-style-panel>label{display:grid;gap:7px}
+.rich-text-style-panel input[type=search],.rich-text-style-panel select{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--surface-panel);color:var(--text-strong);font:inherit}
+.rich-text-style-panel select{height:116px;padding:3px}
+.rich-text-style-panel option{padding:3px 7px}
+.rich-font-footer{display:flex;align-items:center;gap:10px;margin:7px 0 12px}
+.rich-font-footer p{flex:1;min-width:0;margin:0;color:var(--text-muted);font-size:11px;line-height:1.5}
+.rich-font-footer button{flex:none;font-size:11px}
+.rich-text-colors{display:grid;gap:8px}
+.rich-text-colors label{display:flex;align-items:center;gap:8px;min-height:27px}
+.rich-text-colors input[type=color]{margin-left:auto;width:44px;height:27px;padding:2px;border:1px solid var(--line-soft);border-radius:5px;background:var(--surface-panel);cursor:pointer}
+.rich-text-colors input[data-active=false]{opacity:.5}
+.rich-text-colors button{font-size:11px}
+.rich-text-style-preview{padding:9px;min-height:26px;border:1px dashed var(--line-soft);border-radius:6px;overflow-wrap:anywhere;line-height:1.65}
+.rich-text-style-clear{width:100%}
+/* 正文光标使用视口顶层坐标和固定 2px 宽度，画布缩放不会再次放大偏移或把细线缩没。 */
+.rich-writing .ProseMirror{caret-color:var(--text-strong,var(--accent-strong,currentColor))}
+.rich-writing .ProseMirror.rich-caret-active{caret-color:transparent}
+.rich-writing .rich-text-caret{position:fixed;inset:auto;margin:0;padding:0;border:0;min-width:0;max-width:none;min-height:0;max-height:none;box-sizing:border-box;pointer-events:none;border-radius:1px;background:var(--text-strong,var(--accent-strong,currentColor));box-shadow:0 0 1px var(--surface-page);animation:rich-text-caret-blink 1.1s step-end infinite}
+@keyframes rich-text-caret-blink{0%,65%,100%{opacity:1}66%,99%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.rich-writing .rich-text-caret{animation:none}}
+/* 列表 NodeView 的 li 被旧文档样式 display:list-item 覆盖时，序号会单独占行。
+   固定标记/正文为两列；段落首行与标记使用相同行高，适用于线性与画布编辑。 */
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item{display:flex!important;align-items:flex-start!important;gap:10px!important;padding:0!important;margin:0!important;list-style:none!important}
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item>.label-wrapper{flex:0 0 28px!important;width:28px!important;height:auto!important;min-height:1lh!important;align-items:flex-start!important;line-height:inherit!important;margin:0!important;padding:0!important}
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item>.label-wrapper>.label{font:inherit!important;color:var(--text-body)!important;height:auto!important;width:100%!important;line-height:inherit!important;padding:0!important;margin:0!important}
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item>.children{flex:1!important;min-width:0!important}
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item>.children>p:first-child{padding-top:0!important;margin-top:0!important;line-height:inherit!important}
+.rich-writing.milkdown .milkdown-list-item-block>li.list-item>.children>.content-dom>p{padding:0!important;margin:0!important;line-height:inherit!important}
+.desktop-document-preview li>p,.document-canvas-content li>p{margin:0!important;padding:0!important}
+.rich-writing.milkdown .ProseMirror a{display:inline!important;cursor:pointer;overflow-wrap:anywhere;box-decoration-break:clone}

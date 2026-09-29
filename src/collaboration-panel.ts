@@ -1,3 +1,5 @@
+import { answerHandoff } from '../shared/answer-handoff';
+import { isTransientProject } from '../shared/transient';
 import { openCollaboration } from './prompt-panel';
 import type { DocumentDraft, ProjectSnapshot, Proposal, WorkspaceItem } from '../shared/model.ts';
 import { prepareDirectoryFields, isWebEdition } from './edition';
@@ -118,8 +120,8 @@ export class CollaborationPanel {
             const question = inquiry(document), choices = data.getAll(`option-${document.id}`).map(index => question.options[Number(index)]).filter(Boolean), text = String(data.get(`custom-${document.id}`) ?? ''), action = String(data.get(`action-${document.id}`) || (choices.length || text.trim() ? '回答' : ''));
             return action ? [{ documentId: document.id, baseHash: document.hash, choices, text, action, supersedes: [...question.previous.matchAll(/### 回答 ([A-Za-z0-9_-]+)/g)].at(-1)?.[1] }] : [];
           });
-          const updated = await projectAction<ProjectSnapshot>(snapshot.project.id, 'answers', { requestId: this.requestId, answers });
-          this.apply(updated); if (this.draft) await deleteDraft(snapshot.project.id, this.draft.id); this.draft = undefined; await this.open('inquiry'); this.dialog.querySelector('.collaboration-feedback')!.textContent = '原始回答已追加到问题 Markdown，并形成版本。'; break;
+          const submittedRequestId=this.requestId;const updated = await projectAction<ProjectSnapshot>(snapshot.project.id, 'answers', { requestId: submittedRequestId, answers });
+          this.apply(updated); if (this.draft) await deleteDraft(snapshot.project.id, this.draft.id); this.draft = undefined; await this.open('inquiry'); this.dialog.querySelector('.collaboration-feedback')!.textContent = '原始回答已追加到问题 Markdown，并形成版本。'; if(!isTransientProject(updated.project.id))await openCollaboration('answers',updated,answers.map(a=>a.documentId),{fixed:true,title:'分析本轮回答，再确认是否继续',answers:answerHandoff(updated,answers.map(a=>a.documentId),submittedRequestId)});break;
         }
         case 'context': { const context = await projectAction(snapshot.project.id, 'context', { documents: data.getAll('documents'), nodeIds: data.getAll('nodes'), collectionIds: data.getAll('collections'), annotationIds: data.getAll('annotations') }); const text = JSON.stringify(context, null, 2); this.dialog.querySelector('#context-output')!.innerHTML = `<p class="quiet">${text.length.toLocaleString()} 个字符 · 只含公开文件</p><textarea id="context-text" readonly rows="9" aria-label="LLM 上下文交换包">${html(text)}</textarea><button class="secondary-button" data-collab="copy-context">复制交换包</button>`; break; }
         case 'import': case 'paste-import': { this.plan = await projectAction<ImportPlan>(snapshot.project.id, form.dataset.collabForm === 'import' ? 'import-plan' : 'paste-import', form.dataset.collabForm === 'import' ? { directory: data.get('directory') } : { kind: data.get('kind'), text: data.get('text') }); this.renderImport(); break; }

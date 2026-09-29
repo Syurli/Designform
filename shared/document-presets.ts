@@ -9,13 +9,25 @@ import type { ModuleField,Data } from './creative/model';
 
 /** 文档预设保存一份基础文档的组合，项目预设仍负责多份文档的起步目录。 */
 export interface DocumentPreset {
-  format: 1; id: string; name: string; description: string; purpose: string; tags: string[];
+  format: 1; id: string; name: string; description: string; tags: string[];
+  /** 已存个人预设的旧分类只在实例化时并入标签；新预设不再写入这个字段。 */
+  purpose?: string;
   markdown: string; layout?: LayoutCompanion; assets?: Record<string,string>;
   source: 'builtin' | 'user'; pinned?: boolean; updatedAt?: string;
 }
-function builtin(id: string, name: string, purpose: string, body: string, modules: string[] = []): DocumentPreset {
+/** 合并已有标签与旧用途分类，保留原值的顺序，去掉重复与空白，不推断额外标签。 */
+function mergePresetTags(...values: unknown[]): string[] {
+  return [...new Set(values.flatMap(value => Array.isArray(value) ? value : [value]).filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))];
+}
+/** 预设检索和创建共用标签投影，读取旧分类不会擅自改写已保存的个人预设。 */
+export function documentPresetTags(preset: Pick<DocumentPreset, 'tags' | 'purpose' | 'markdown'>): string[] {
+  const metadata = readHeader(preset.markdown).metadata;
+  return mergePresetTags(preset.tags, metadata.tags, metadata.purpose, preset.purpose);
+}
+function builtin(id: string, name: string, tag: string, body: string, modules: string[] = []): DocumentPreset {
   const objects = modules.map((type,index) => moduleRegistry.get(type)!.create(`preset-${id}-${index}`));
-  return { format:1,id:'builtin-'+id,name,purpose,tags:[purpose],source:'builtin',description:`${name}的起步组合；全部内容均可自由修改。`,markdown:`---\nid: preset-${id}\ntype: dd\nstatus: draft\npurpose: ${purpose}\n---\n\n# ${name}\n\n${body}\n\n${objects.map(objectBlock).join('\n\n')}` };
+  // 正式 type=dd 保持协议身份，角色/地图等分类只通过既有标签表达。
+  return { format:1,id:'builtin-'+id,name,tags:[tag],source:'builtin',description:`${name}的起步组合；全部内容均可自由修改。`,markdown:`---\nid: preset-${id}\ntype: dd\nstatus: draft\ntags: ${JSON.stringify([tag])}\n---\n\n# ${name}\n\n${body}\n\n${objects.map(objectBlock).join('\n\n')}` };
 }
 export const builtinDocumentPresets: DocumentPreset[] = [
   builtin('character','角色卡','角色','## 人物简介\n\n在这里描述人物。\n\n## 外观与参考\n\n插入图片或声音。',['character']),
@@ -27,21 +39,24 @@ export const builtinDocumentPresets: DocumentPreset[] = [
 ];
 export function validateDocumentPreset(value: unknown): asserts value is DocumentPreset {
   const p=value as DocumentPreset;
-  if(!p||p.format!==1||!/^user-[A-Za-z0-9_-]+$/.test(p.id)||typeof p.name!=='string'||!p.name.trim()||p.name.length>100||typeof p.markdown!=='string'||p.markdown.length>2000000||p.source!=='user'||!Array.isArray(p.tags)||p.tags.some(t=>typeof t!=='string')||typeof p.description!=='string'||typeof p.purpose!=='string')throw new Error('文档预设格式或名称无效。');
+  if(!p||p.format!==1||!/^user-[A-Za-z0-9_-]+$/.test(p.id)||typeof p.name!=='string'||!p.name.trim()||p.name.length>100||typeof p.markdown!=='string'||p.markdown.length>2000000||p.source!=='user'||!Array.isArray(p.tags)||p.tags.some(t=>typeof t!=='string')||typeof p.description!=='string'||p.purpose!==undefined&&typeof p.purpose!=='string')throw new Error('文档预设格式或名称无效。');
   if(p.assets && Object.entries(p.assets).some(([name,bytes])=>!/^docs\/assets\/[A-Za-z0-9_./-]+$/.test(name)||name.includes('..')||typeof bytes!=='string'||bytes.length>24000000))throw new Error('预设素材格式无效。');
   if(p.layout&&!validateLayoutCompanion(p.layout))throw new Error('预设布局无效。');
 }
 /** 每次实例化重新分配文档、模块、块与行身份；内部引用随身份映射，原预设不被修改。 */
 export function instantiateDocumentPreset(preset: DocumentPreset, title = preset.name) {
   const text=ensureBlockIds(preset.markdown), ids=new Map<string,string>();
-  const oldDoc=String(readHeader(text).metadata.id??'preset-document'); ids.set(oldDoc,'doc-'+crypto.randomUUID());
+  const metadata=readHeader(text).metadata;
+  const tags=documentPresetTags(preset);
+  const oldDoc=String(metadata.id??'preset-document'); ids.set(oldDoc,'doc-'+crypto.randomUUID());
   const collect=(value:unknown):void=>{if(!value||typeof value!=='object')return;if(Array.isArray(value)){value.forEach(collect);return;}for(const [key,item] of Object.entries(value)){if(key==='id'&&typeof item==='string'&&!ids.has(item))ids.set(item,'item-'+crypto.randomUUID());else collect(item);}};
   for(const block of parseDocumentBlocks(text)){if(block.id&&!ids.has(block.id))ids.set(block.id,'block-'+crypto.randomUUID());}
   for(const group of Object.keys(preset.layout?.groups??{}))ids.set(group,'group-'+crypto.randomUUID());
   const index=buildCreativeIndex({documents:[{id:oldDoc,path:'docs/preset.md',title:preset.name,type:'dd',status:'draft',system:'',text,hash:''}]});
   index.objects.forEach(item=>collect(item.object));
   const rewrite=(source:string)=>{for(const [from,to] of [...ids].sort((a,b)=>b[0].length-a[0].length))source=source.replace(new RegExp('(?<![A-Za-z0-9_-])'+from.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?![A-Za-z0-9_-])','g'),to);return source;};
-  let markdown=setTitle(setMetadata(rewrite(text),{id:ids.get(oldDoc),type:'dd',status:'draft',purpose:preset.purpose,presetSource:preset.id,system:undefined,parent:undefined,example:undefined}),title);
+  // 只规范化本次创建的新正文；原预设及真实项目、历史版本均保持不变。
+  let markdown=setTitle(setMetadata(rewrite(text),{id:ids.get(oldDoc),type:'dd',status:'draft',tags:tags.length?tags:undefined,purpose:undefined,presetSource:preset.id,system:undefined,parent:undefined,example:undefined}),title);
   const layout=preset.layout?JSON.parse(rewrite(JSON.stringify(preset.layout))) as LayoutCompanion:undefined;
   if(layout)layout.documentId=ids.get(oldDoc)!;
   const assets:Record<string,string>={},assetRoot='preset-'+crypto.randomUUID();
@@ -73,6 +88,8 @@ export function captureDocumentPreset(markdown: string, name: string, keepConten
   if(!keepContent){text=ensureBlockIds(text);const blocks=parseDocumentBlocks(text);for(const block of [...blocks].reverse())if(!['heading','code','thematicBreak'].includes(block.type))text=text.slice(0,block.sourceStart)+(keepAssets&&block.type==='paragraph'?(block.source.match(/!\[[^\]]*\]\([^)]+\)/g)?.join('\n')||'在这里填写内容。'):'在这里填写内容。')+'\n'+text.slice(block.end);}
   // 文档级外部链接不作为隐式依赖复制；同文档锚点继续保留。
   text=text.replace(/!?\[([^\]]*)\]\((?!#)([^)]+)\)/g,(match,label,url)=>keepAssets&&match.startsWith('!')&&/^(?:\.\.\/)?assets\//.test(url)?match:`待选择引用：${label||'素材'}`);
-  text=setTitle(setMetadata(text,{system:undefined,parent:undefined,example:undefined}),name);
-  return {format:1,id:'user-'+crypto.randomUUID(),name,description:'',purpose:String(readHeader(text).metadata.purpose??''),tags:[],source:'user',markdown:text,...(layout?{layout:structuredClone(layout)}:{}),updatedAt:new Date().toISOString()};
+  const metadata=readHeader(text).metadata, tags=mergePresetTags(metadata.tags,metadata.purpose);
+  // 捕获副本时保留已有标签及旧用途值，文档正式类型不因标签迁移而改变。
+  text=setTitle(setMetadata(text,{tags:tags.length?tags:undefined,purpose:undefined,system:undefined,parent:undefined,example:undefined}),name);
+  return {format:1,id:'user-'+crypto.randomUUID(),name,description:'',tags,source:'user',markdown:text,...(layout?{layout:structuredClone(layout)}:{}),updatedAt:new Date().toISOString()};
 }

@@ -87,6 +87,8 @@ async function rawWrite(filename: string, value: Uint8Array) {
   const target = await file(filename, true), writer = await target.createWritable();
   try { await writer.write(new Uint8Array(value)); await writer.close(); } catch (error) { await writer.abort().catch(() => {}); translate(error); }
 }
+/** 接入包与项目配置统一使用已授权文件系统写入。 */
+export async function writeFile(filename: string, value: string | Uint8Array) { await initializeFilesystem(); await rawWrite(filename, typeof value === 'string' ? Buffer.from(value) : value); }
 /** 只在原始点击栈调用选择器，不在异步操作之后请求浏览器弹窗。 */
 export function chooseDirectory(): Promise<string> {
   const picker = (window as PickerWindow).showDirectoryPicker;

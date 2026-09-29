@@ -35,13 +35,15 @@ function documentGroup(key:string):PresetGroupKey {
  if(/^quest/.test(key))return 'quests';
  return 'start';
 }
-export interface PresetDocument {id:string;title:string;purpose:string;group:PresetGroupKey;body:string;objects:CreativeObject[]}
+/** 文档正式协议类型与标签独立；原预设用途值只作为标签，不限制创作对象。 */
+export interface PresetDocument {id:string;title:string;type:'dd'|'guide';tags:string[];group:PresetGroupKey;body:string;objects:CreativeObject[]}
 export interface PresetContent {title:string;documents:PresetDocument[];questIds:string[];standaloneTargets:string[];prefix:string}
 export function buildPreset(presetId:string,prefix:string,sample:boolean,media:Record<string,string>={}):PresetContent {
  const preset=presets.find(p=>p.id===presetId);if(!preset)throw new Error('未知预设');
  const id=(s:string)=>`${prefix}-${s}`,documents:PresetDocument[]=[],questIds:string[]=[];
  const object=(type:string,key:string,title:string,data:Data={})=>{const o=moduleRegistry.get(type)!.create(id(key),title);o.data={...o.data,...data};o.description=sample?'完全虚构的演示内容，非用户真实决定。':'';return o;};
- const doc=(key:string,title:string,objects:CreativeObject[],body='',purpose='creative')=>documents.push({id:id('doc-'+key),title,purpose,group:documentGroup(key),objects,body});
+ // 既有用途值原样进入标签；正式类型显式传入，修改标签不会隐式改变文档协议身份。
+ const doc=(key:string,title:string,objects:CreativeObject[],body='',tag='creative',type:'dd'|'guide'='dd')=>documents.push({id:id('doc-'+key),title,type,tags:tag?[tag]:[],group:documentGroup(key),objects,body});
  if(presetId==='blank')return {title:preset.sample,documents,questIds,standaloneTargets:[],prefix};
  if(!sample){
   doc('brief','创作目标',[],'## 目标体验\n\n## 约束与范围\n\n## 尚未决定\n\n此预设仅提供起步结构。全部模块可在任意文档使用。');
@@ -77,6 +79,6 @@ export function buildPreset(presetId:string,prefix:string,sample:boolean,media:R
  }
  doc('sequence','有声分镜排演',[object('sequence','sequence',preset.sample+' · 初稿排演',{path:'选择桥下出口的线性路径；其他分支不自动拼接',items:Array.from({length:shotCount},(_,i)=>({id:`take-${i}`,shotId:id('shot'+i),durationMs:presetId==='film'?6000:6500})),audio:Array.from({length:sceneCount*4},(_,i)=>({id:`cue-${i}`,speechId:id('speech'+i),startMs:Math.round(i*(presetId==='film'?48000:78000)/(sceneCount*4)),offsetMs:0}))})]);
  const goals=['是否提前展示桥下出口？','阿灯留下的动机是否足够？','交接段的停顿与镜头长度','告别段需要多少信息？'];
- for(let i=0;i<4;i++){const q=object('quest',`quest${i}`,goals[i],{goal:goals[i],scope:'明确区分游戏体验、剧情信息和镜头表达。',targetIds:i===0?[id('map-station'),id('use-combat'),id('storyline'),id('shot0')]:[id('shot'+i),id('speech'+i)],documentIds:id('doc-dd0')});questIds.push(q.id);doc('quest'+i,goals[i],[q], '所有初始轮次和回答均为演示数据，可在副本中练习。','quest');}
+ for(let i=0;i<4;i++){const q=object('quest',`quest${i}`,goals[i],{goal:goals[i],scope:'明确区分游戏体验、剧情信息和镜头表达。',targetIds:i===0?[id('map-station'),id('use-combat'),id('storyline'),id('shot0')]:[id('shot'+i),id('speech'+i)],documentIds:id('doc-dd0')});questIds.push(q.id);doc('quest'+i,goals[i],[q], '所有初始轮次和回答均为演示数据，可在副本中练习。','quest','guide');}
  return {title:preset.sample,documents,questIds,standaloneTargets:[id('doc-dd0'),id('doc-scene0')],prefix};
 }

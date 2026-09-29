@@ -9,7 +9,10 @@ export function mountCreativeBlocks(root:HTMLElement,snapshot:ProjectSnapshot){c
   // 引用卡默认只读，摘要来自相同快照；不递归展开引用，避免环造成无限渲染。
   for(const el of root.querySelectorAll<HTMLElement>('[data-document-reference]')){
     const doc=snapshot.documents.find(d=>d.id===el.dataset.documentReference);
-    el.innerHTML=doc?`<small>源文档 · ${h(readHeader(doc.text).metadata.purpose||'基础文档')}</small><h4>${h(doc.title)}</h4><p>${h(readHeader(doc.text).body.replace(/\x60{3}[\s\S]*?\x60{3}/g,'').replace(/<!--[\s\S]*?-->/g,'').replace(/^#+\s.*/gm,'').trim().slice(0,350))}</p><button type="button" data-source-document="${h(doc.id)}">打开源文档</button>`:`<p class="creative-warning">${el.dataset.documentReference?'来源文档已缺失，引用身份仍保留。':'待选择源文档。'}</p>`;
+    const header=doc?readHeader(doc.text):undefined,metadata=header?.metadata;
+    // 标签摘要只做只读投影：旧用途值作为标签展示，不自动改写源文档或历史版本。
+    const tags=[...new Set([...(Array.isArray(metadata?.tags)?metadata.tags:typeof metadata?.tags==='string'?[metadata.tags]:[]),metadata?.purpose].filter((tag):tag is string=>typeof tag==='string').map(tag=>tag.trim()).filter(Boolean))];
+    el.innerHTML=doc?`<small>源文档 · ${h(tags.join(' · ')||'基础文档')}</small><h4>${h(doc.title)}</h4><p>${h(header!.body.replace(/\x60{3}[\s\S]*?\x60{3}/g,'').replace(/<!--[\s\S]*?-->/g,'').replace(/^#+\s.*/gm,'').trim().slice(0,350))}</p><button type="button" data-source-document="${h(doc.id)}">打开源文档</button>`:`<p class="creative-warning">${el.dataset.documentReference?'来源文档已缺失，引用身份仍保留。':'待选择源文档。'}</p>`;
   }
   return hydrateMedia(root,snapshot,index);
 }

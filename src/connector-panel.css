@@ -1,0 +1,10 @@
+/* 环境入口不改变现有项目与连接面板排版；弹窗复用应用原有控件。 */
+.connector-environment-trigger { position: fixed; right: 16px; bottom: 16px; z-index: 35; font-size: 12px; }
+.connector-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+.connector-dialog p { line-height: 1.65; }
+.connector-dialog progress { width: 100%; height: 12px; }
+.connector-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.connector-state { padding: 12px; border-radius: 10px; background: var(--surface-soft, #eef2f5); }
+.connector-dialog section { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border, #dce1e7); }
+.connector-dialog label { display: grid; gap: 6px; margin: 12px 0; }
+.connector-dialog input { min-width: 0; width: 100%; }

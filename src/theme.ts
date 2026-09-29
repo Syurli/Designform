@@ -1,6 +1,7 @@
 import { showAppMenu } from './app-menu';
 /** 主题是应用偏好，不进入任何游戏的 Markdown 或版本历史。 */
 import { APP_VERSION } from '../shared/version';
+import { inputPreferences } from './input-settings';
 export type Theme = 'dark' | 'light';
 export type DesktopCommand = 'browser' | 'hide' | 'quit' | 'reload' | 'save' | 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll' | 'zoomIn' | 'zoomOut' | 'resetZoom';
 declare global {
@@ -9,13 +10,15 @@ declare global {
       theme(): Promise<Theme>;
       setTheme(theme: Theme): Promise<Theme>;
       command(command: DesktopCommand): Promise<void>;
+      revealDocument(projectId: string, documentId: string): Promise<void>;
       onTheme(callback: (theme: Theme) => void): () => void;
+      onNavigation?(callback:(direction:'back'|'forward')=>void):()=>void;
     };
   }
 }
 export function currentTheme(): Theme { return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; }
 /** 图谱订阅同一事件，只换材质配色，镜头和正在进行的过渡保持不变。 */
-export function applyTheme(theme: Theme, notifyDesktop = true) {
+function commitTheme(theme:Theme,notifyDesktop:boolean){
   document.documentElement.dataset.theme = theme;
   document.documentElement.style.colorScheme = theme;
   try { localStorage.setItem('cewen-theme', theme); } catch { /* 禁止本地存储时主题仍立即生效。 */ }
@@ -31,14 +34,22 @@ export function applyTheme(theme: Theme, notifyDesktop = true) {
   window.dispatchEvent(new CustomEvent<Theme>('cewen-theme-change', { detail: theme }));
   if (notifyDesktop) void window.cewenDesktop?.setTheme(theme).catch(() => { document.querySelector('[data-theme-toggle]')?.setAttribute('title', '页面主题已切换，桌面外框同步失败，请重试。'); });
 }
+let themeTransition:ViewTransition|undefined;
+/** 主题先捕获旧画面再柔和淡出，避免整个窗口在单帧内黑白突变；减少动画偏好立即生效。 */
+export function applyTheme(theme:Theme,notifyDesktop=true,animate=true){
+  if(theme===currentTheme()||!animate||inputPreferences().themeMotion==='none'||matchMedia('(prefers-reduced-motion: reduce)').matches){commitTheme(theme,notifyDesktop);return;}
+  themeTransition?.skipTransition();
+  if(document.startViewTransition){themeTransition=document.startViewTransition(()=>commitTheme(theme,notifyDesktop));const active=themeTransition;void active.finished.catch(()=>{}).finally(()=>{if(themeTransition===active)themeTransition=undefined;});}
+  else{document.documentElement.classList.add('theme-soft-transition');commitTheme(theme,notifyDesktop);setTimeout(()=>document.documentElement.classList.remove('theme-soft-transition'),320);}
+}
 /** 浏览器保留本地偏好；桌面由主进程统一菜单、标题栏和托盘的主题。 */
 export async function initializeTheme() {
-  applyTheme(currentTheme(), false);
+  applyTheme(currentTheme(), false,false);
   document.addEventListener('click', event => { if ((event.target as HTMLElement).closest('[data-theme-toggle]')) applyTheme(currentTheme() === 'dark' ? 'light' : 'dark'); });
   window.addEventListener('storage', event => { if (event.key === 'cewen-theme' && (event.newValue === 'dark' || event.newValue === 'light')) applyTheme(event.newValue); });
   if (!window.cewenDesktop) return;
   document.documentElement.classList.add('desktop-host');
-  applyTheme(await window.cewenDesktop.theme(), false);
+  applyTheme(await window.cewenDesktop.theme(), false,false);
   window.cewenDesktop.onTheme(theme => applyTheme(theme, false));
 }
 

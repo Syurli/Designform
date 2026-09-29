@@ -1,8 +1,10 @@
+import type { AnswerHandoff } from '../shared/answer-handoff';
 import { composePrompt, emptyIdea, ideaBrief, promptScenes, type GameIdea, type IntegrationInfo, type PromptScene } from '../shared/prompts.ts';
 import { categoryPresets } from '../shared/authoring.ts';
 import type { KnowledgeGroup, LlmConnectionState, ProjectSnapshot } from '../shared/model.ts';
 import { escapeHtml as html } from './markdown-view';
 import { readConnections, request } from './project-client';
+import { connectionSessionLabel } from '../shared/llm-connections.ts';
 
 /** 复制失败保留可选中的全文，绝不显示虚假的复制或连接成功。 */
 async function copy(text: HTMLTextAreaElement, status: HTMLElement) {
@@ -17,12 +19,11 @@ function connectionKey(state?: LlmConnectionState) {
 function connectionLabel(integration: IntegrationInfo, state?: LlmConnectionState) {
   if(integration.mode==='web')return '网页版文件协作';
   if(integration.mode==='unknown'||!state)return '连接状态暂不可用';
-  const count=state.connections.filter(item=>item.status==='connected').length;
-  return count?`已检测客户端 ${count} 个`:'未连接 MCP';
+  return connectionSessionLabel(state);
 }
 
 /** 所有场景复用同一开场白入口，快照和焦点来自调用处。 */
-export async function openCollaboration(scene: PromptScene, snapshot?: ProjectSnapshot, documentIds: string[] = [],context:{extra?:string;title?:string;fixed?:boolean}={}) {
+export async function openCollaboration(scene: PromptScene, snapshot?: ProjectSnapshot, documentIds: string[] = [],context:{extra?:string;title?:string;fixed?:boolean;answers?:AnswerHandoff}={}) {
   const dialog = document.createElement('dialog'); dialog.className = 'project-dialog collaboration-dialog';
   // 通用文档协作可选任务；已知目的的写作、版本交接和接入入口保持直接路径。
   const chooseScene = !context.fixed && (scene === 'start' || scene === 'inquiry' && documentIds.length > 0);
@@ -38,7 +39,7 @@ export async function openCollaboration(scene: PromptScene, snapshot?: ProjectSn
   if (!dialog.open) {dialog.remove();return;}
   const label=dialog.querySelector<HTMLElement>('[data-prompt-connection]')!;
   let edited=false, key=connectionKey(connections);
-  const generate = () => { area.value = composePrompt({ scene: (dialog.querySelector('#prompt-scene') as HTMLSelectElement).value as PromptScene, snapshot, documentIds, integration, connections, extra: extra.value }); edited=false; key=connectionKey(connections); label.textContent=connectionLabel(integration,connections); };
+  const generate = () => { area.value = composePrompt({ scene: (dialog.querySelector('#prompt-scene') as HTMLSelectElement).value as PromptScene, snapshot, documentIds, integration, connections, extra: extra.value, answers:context.answers }); edited=false; key=connectionKey(connections); label.textContent=connectionLabel(integration,connections); };
   generate(); area.readOnly = false; dialog.querySelector<HTMLButtonElement>('[data-copy]')!.disabled = false;
   area.addEventListener('input',()=>{edited=true;});
   dialog.querySelector<HTMLSelectElement>('#prompt-scene')!.addEventListener('change',()=>{if(edited)status.textContent='任务已切换；手改开场白保留，点击重新生成以应用。';else generate();});
@@ -141,4 +142,11 @@ export function mountCreationComposer(container: HTMLElement, create: (setup: { 
     if(button.hasAttribute('data-idea-copy'))void copy(area,status);
     if(button.hasAttribute('data-idea-create')){save();const selected=[...container.querySelectorAll<HTMLInputElement>('.category-check input:checked')].map(input=>input.value);create({brief:ideaBrief(idea),categories:categoryPresets.filter(group=>selected.includes(group.id))});}
   });if(savedEdited){area.value=savedPrompt;label.textContent='正在读取连接状态…';}else generate();
+}
+
+/** 完成卡片的主按钮直接复制固定任务；失败时由调用处展开可编辑全文。 */
+export async function copyAnswerOpening(snapshot:ProjectSnapshot,answers:AnswerHandoff):Promise<boolean>{
+  const [info,state]=await Promise.allSettled([request<IntegrationInfo>('/api/integration'),readConnections()]);
+  const prompt=composePrompt({scene:'answers',snapshot,documentIds:[...new Set([...answers.documentIds,...answers.questions.map(q=>q.id)])],answers,integration:info.status==='fulfilled'?info.value:{mode:'unknown'},connections:state.status==='fulfilled'?state.value:undefined});
+  try{await navigator.clipboard.writeText(prompt);return true;}catch{return false;}
 }

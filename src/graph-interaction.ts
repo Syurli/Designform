@@ -1,6 +1,9 @@
 import * as THREE from 'three';
+import { inputPreferences } from './input-settings';
 import type { KnowledgeEdge, KnowledgeNode } from '../shared/model';
 import type { GraphEdit } from '../shared/graph-editing';
+import { graphContainment } from './graph-structure';
+import type { KnowledgeData } from '../shared/model';
 
 /** 交互只依赖场景的窄接口；三维摆放与二维文档命令在此明确分流。 */
 export interface GraphSurface {
@@ -14,6 +17,8 @@ export interface GraphSurface {
   nodes:()=>{data:KnowledgeNode;point:THREE.Vector3;label:HTMLElement;visible:boolean;pinned?:boolean}[];
   edges:()=>{data:KnowledgeEdge;points:THREE.Vector3[]}[];
   core:()=>string|undefined;
+  /** 完整公开结构不受当前筛选影响；隐藏的后代坐标也随分类摆放一起保存。 */
+  structure:()=>KnowledgeData;
   begin:()=>void;
   end:()=>void;
   move:(id:string,point:THREE.Vector3)=>void;
@@ -24,7 +29,8 @@ export interface GraphSurface {
   clear:()=>void;
   commit:(edit:GraphEdit|undefined,before:unknown,after:unknown)=>void;
 }
-type Follower={position:THREE.Vector3;velocity:THREE.Vector3;goal:THREE.Vector3};
+/** owner 存在时为向下传播的包含后代；没有 owner 时为有限幅的局部避让邻居。 */
+type Follower={position:THREE.Vector3;velocity:THREE.Vector3;goal:THREE.Vector3;owner?:string};
 type Drag={id:string;pointer:number;x:number;y:number;mode:string;plane:THREE.Plane;anchor:THREE.Vector3;positions:Map<string,THREE.Vector3>;moving:Set<string>;followers:Map<string,Follower>;delta:THREE.Vector3;before:unknown;port?:string;edge?:KnowledgeEdge;end?:'source'|'target';moved:boolean;target?:string;wire?:string;reversals:number;direction:number;lastX:number;lastTurn:number;targetPort?:string};
 type Settling={drag:Drag;edit:GraphEdit|undefined;started:number};
 type BoxDrag={pointer:number;startX:number;startY:number;width:number;height:number;append:boolean;previous:Set<string>;base:Set<string>;moved:boolean};
@@ -57,6 +63,7 @@ export class GraphInteraction {
     surface.container.addEventListener('click',this.click,true);
     window.addEventListener('pointermove',this.move,true);window.addEventListener('pointerup',this.up,true);window.addEventListener('pointercancel',this.cancel);window.addEventListener('blur',this.blur);
     window.addEventListener('keydown',this.keydown,true);
+    this.reduceMotion.addEventListener('change',this.motionPreferenceChanged);
   }
   setEditable(value:boolean){this.enabled=value;if(!value)this.cancel();this.signature='';this.update();}
   /** 导航前完成待收敛手势，防止随后把旧模式坐标写进新模式布局。 */
@@ -106,9 +113,9 @@ export class GraphInteraction {
     if(!anchor){this.surface.end();return;}
     const moving=new Set([...(this.multi.has(id!)?this.multi:[id!])].filter(value=>this.surface.nodes().some(n=>n.data.id===value&&n.visible&&!n.pinned)));
     moving.delete(this.surface.core()??'');
-    if(this.surface.mode()==='galaxy'&&node.data.kind==='system')this.surface.nodes().filter(n=>n.data.group===node.data.group&&n.data.id!==this.surface.core()&&!n.pinned).forEach(n=>moving.add(n.data.id));
-    if(this.surface.mode()==='galaxy')moving.delete(this.surface.core()??'');
     this.drag={id:id!,pointer:event.pointerId,x:event.clientX,y:event.clientY,mode:this.surface.mode(),plane,anchor,positions,moving,followers:new Map(),delta:new THREE.Vector3(),before:this.surface.capture(),port:port?.dataset.port,edge:port?.dataset.end?edge:undefined,end:port?.dataset.end as 'source'|'target'|undefined,moved:false,reversals:0,direction:0,lastX:event.clientX,lastTurn:performance.now()};
+    // 只有星图摆放传播整棵包含子树；二维归类和接线仍保持原有语义操作范围。
+    if(this.drag.mode==='galaxy'&&!port)this.collectDescendants(this.drag);
   };
   private move=(event:PointerEvent)=>{
     if(this.shiftNode&&this.shiftNode.pointer===event.pointerId){if(Math.hypot(event.clientX-this.shiftNode.x,event.clientY-this.shiftNode.y)>6)this.shiftNode.moved=true;return;}
@@ -141,7 +148,7 @@ export class GraphInteraction {
     drag.delta.copy(delta);
     for(const id of drag.moving){const start=drag.positions.get(id);if(start)this.surface.move(id,start.clone().add(delta));}
     this.updateFollowerGoals(drag);
-    if(this.reduceMotion.matches)drag.followers.forEach((follower,id)=>{follower.position.copy(follower.goal);this.surface.move(id,follower.position);});
+    if(this.reduceMotion.matches)this.snapFollowers(drag);
     else this.scheduleMotion();
     if(drag.mode==='galaxy'){this.notice('调整摆放 · 不修改分类和关系');return;}
     if(drag.targetPort==='connect'){this.notice('松开：将节点接入此关联端口');return;}
@@ -189,17 +196,53 @@ export class GraphInteraction {
     if(drag.port&&!edit)return;
     if(drag.followers.size&&!this.reduceMotion.matches){
       this.settling={drag,edit,started:performance.now()};
-      // 松手后邻居短暂回到受限目标，再将整次手势写成一条撤销记录。
-      drag.followers.forEach((follower,id)=>{const start=drag.positions.get(id);if(start)follower.goal.copy(start).add(follower.position.clone().sub(start).multiplyScalar(.65));});
+      // 包含后代最终跟上整次位移；避让邻居轻轻回弹。全部收敛后只保存一条布局撤销记录。
+      drag.followers.forEach((follower,id)=>{const start=drag.positions.get(id);if(start)follower.goal.copy(start).add(follower.owner?drag.delta:follower.position.clone().sub(start).multiplyScalar(.65));});
       this.scheduleMotion();
     }else this.commitDrag(drag,edit);
+  };
+  /** 广度优先只向下牵引，任意层级都可到达；固定节点留在原位并阻止该支继续传递。 */
+  private collectDescendants(drag:Drag){
+    const children=graphContainment(this.surface.structure(),this.surface.core());
+    const nodes=new Map(this.surface.nodes().map(node=>[node.data.id,node]));
+    const visited=new Set(drag.moving),queue=[...drag.moving];
+    for(let index=0;index<queue.length;index++)for(const id of children.get(queue[index])??[]){
+      if(visited.has(id)||id===this.surface.core())continue;
+      visited.add(id);
+      const node=nodes.get(id);if(!node||node.pinned)continue;
+      drag.followers.set(id,{position:node.point.clone(),velocity:new THREE.Vector3(),goal:node.point.clone(),owner:queue[index]});
+      queue.push(id);
+    }
+  }
+  /** 拖动时子项追随父项当前位移形成弹性延迟；松手或减少动画时追随完整最终位移。 */
+  private updateDescendantGoal(drag:Drag,id:string,follower:Follower){
+    const start=drag.positions.get(id),ownerStart=drag.positions.get(follower.owner!);
+    if(!start||!ownerStart)return;
+    const owner=drag.followers.get(follower.owner!)?.position;
+    const offset=this.settling||this.reduceMotion.matches?drag.delta:owner?owner.clone().sub(ownerStart):drag.delta;
+    follower.goal.copy(start).add(offset);
+  }
+  /** 无动画偏好直接同步到目标，固定节点和分类/文档身份均保持原值。 */
+  private snapFollowers(drag:Drag){
+    for(const [id,follower] of drag.followers){if(follower.owner)this.updateDescendantGoal(drag,id,follower);follower.position.copy(follower.goal);follower.velocity.set(0,0,0);this.surface.move(id,follower.position);}
+  }
+  private motionPreferenceChanged=()=>{
+    const drag=this.drag??this.settling?.drag;if(!drag)return;
+    if(this.reduceMotion.matches){
+      if(this.motionFrame)cancelAnimationFrame(this.motionFrame);this.motionFrame=0;this.lastMotion=0;
+      this.snapFollowers(drag);if(this.settling)this.finishSettling();
+    }else if(drag.followers.size)this.scheduleMotion();
   };
   /** 只让当前布局中的局部邻居响应；分类/包含边较强，普通关联不传播位移。 */
   private updateFollowerGoals(drag:Drag){
     const nodes=this.surface.nodes(),moving=nodes.filter(node=>drag.moving.has(node.data.id));
+    drag.followers.forEach((follower,id)=>{if(follower.owner)this.updateDescendantGoal(drag,id,follower);});
+    // 拖分类时只牵引它的公开后代，固定分支及其他分类不会被近距离避让偷偷带走。
+    if(drag.mode==='galaxy'&&moving.some(node=>node.data.kind==='system'))return;
     const related=new Set(this.surface.edges().filter(edge=>edge.data.origin?.kind==='classification'||edge.data.type==='contains').flatMap(edge=>drag.moving.has(edge.data.source)?[edge.data.target]:drag.moving.has(edge.data.target)?[edge.data.source]:[]));
     for(const node of nodes){
       const id=node.data.id,start=drag.positions.get(id);
+      if(drag.followers.get(id)?.owner)continue;
       if(!start||!node.visible||node.pinned||drag.moving.has(id)||id===this.surface.core()||node.data.kind==='system')continue;
       const nearest=Math.min(...moving.map(other=>start.distanceTo(other.point)));
       if(!related.has(id)&&nearest>230&&!drag.followers.has(id))continue;
@@ -213,7 +256,7 @@ export class GraphInteraction {
       if(drag.mode==='layers'){if(this.surface.direction()==='vertical')follower.goal.y=Math.min(follower.goal.y,-210);else follower.goal.x=Math.max(follower.goal.x,210);}
     }
   }
-  /** 固定时间上限防止回到窗口时积累巨大步长，速度和位移都有限幅。 */
+  /** 固定时间上限防止回到窗口时积累巨大步长；后代限速度，避让邻居额外限制位移。 */
   private tickMotion=(now:number)=>{
     this.motionFrame=0;
     const drag=this.drag??this.settling?.drag;
@@ -221,23 +264,29 @@ export class GraphInteraction {
     const dt=this.lastMotion?Math.min((now-this.lastMotion)/1000,.033):1/60;this.lastMotion=now;
     let energy=0;
     for(const [id,follower] of drag.followers){
-      const acceleration=follower.goal.clone().sub(follower.position).multiplyScalar(125);
-      follower.velocity.addScaledVector(acceleration,dt).multiplyScalar(Math.exp(-15*dt)).clampLength(0,380);
+      if(follower.owner)this.updateDescendantGoal(drag,id,follower);
+      const acceleration=follower.goal.clone().sub(follower.position).multiplyScalar(follower.owner?110:125);
+      // 包含后代取消旧的 100 单位总位移上限；仅速度限幅以允许长距离拖动后完整跟上。
+      follower.velocity.addScaledVector(acceleration,dt).multiplyScalar(Math.exp(-(follower.owner?10:15)*dt)).clampLength(0,follower.owner?Math.max(680,drag.delta.length()*6):380);
       follower.position.addScaledVector(follower.velocity,dt);
       const start=drag.positions.get(id)!;
-      follower.position.sub(start).clampLength(0,100).add(start);
+      if(!follower.owner)follower.position.sub(start).clampLength(0,100).add(start);
       if(drag.mode==='layers'){if(this.surface.direction()==='vertical')follower.position.y=Math.min(follower.position.y,-210);else follower.position.x=Math.max(follower.position.x,210);}
       energy=Math.max(energy,follower.position.distanceTo(follower.goal),follower.velocity.length()*.02);
       this.surface.move(id,follower.position);
     }
-    if(this.settling&&(energy<.4||now-this.settling.started>420)){this.finishSettling();return;}
-    this.scheduleMotion();
+    if(this.settling&&(energy<.4||now-this.settling.started>900)){this.finishSettling();return;}
+    // 父链稳定后停止额外 RAF；新的 pointermove 会重新唤醒，避免空闲时持续积分。
+    if(energy>.1||this.settling)this.scheduleMotion();else this.lastMotion=0;
   };
   private scheduleMotion(){if(!this.motionFrame)this.motionFrame=requestAnimationFrame(this.tickMotion);}
   private commitDrag(drag:Drag,edit:GraphEdit|undefined){const after=this.surface.record();this.surface.commit(edit,drag.before,after);}
   private finishSettling(){
     const settling=this.settling;if(!settling)return;
+    // 收敛超时或下一手势到来时精确落到目标，防止深层节点永久停在半路。
+    this.snapFollowers(settling.drag);
     this.settling=undefined;this.lastMotion=0;
+    if(this.motionFrame)cancelAnimationFrame(this.motionFrame);this.motionFrame=0;
     this.commitDrag(settling.drag,settling.edit);
   }
   /** 框选统一使用画布局部坐标，标签和星点取并集，过滤不可见及转场节点。 */
@@ -256,7 +305,7 @@ export class GraphInteraction {
     if(this.surface.container.classList.contains('graph-transitioning')){this.cancel();return;}
     const bounds=this.surface.container.getBoundingClientRect();
     if(bounds.width!==box.width||bounds.height!==box.height){this.cancel();return;}
-    if(Math.hypot(event.clientX-bounds.left-box.startX,event.clientY-bounds.top-box.startY)<6&&!box.moved)return;
+    if(Math.hypot(event.clientX-bounds.left-box.startX,event.clientY-bounds.top-box.startY)<inputPreferences().dragThreshold&&!box.moved)return;
     box.moved=true;event.preventDefault();event.stopImmediatePropagation();
     const x=Math.max(0,Math.min(bounds.width,event.clientX-bounds.left)),y=Math.max(0,Math.min(bounds.height,event.clientY-bounds.top));
     const left=Math.min(box.startX,x),top=Math.min(box.startY,y),right=Math.max(box.startX,x),bottom=Math.max(box.startY,y);
@@ -294,5 +343,5 @@ export class GraphInteraction {
     this.overlay.querySelectorAll<HTMLElement>('[data-port]').forEach(port=>{const n=this.surface.nodes().find(n=>n.data.id===port.dataset.node);if(!n){port.hidden=true;return;}const r=n.label.getBoundingClientRect(),p=this.screen(n.point);port.hidden=transition||!n.visible;port.style.left=`${!n.label.hidden?r.right-box.left+14:p.x+20}px`;port.style.top=`${!n.label.hidden?(r.top+r.bottom)/2-box.top:p.y}px`;if(port.dataset.port==='classify'){port.style.left=`${!n.label.hidden?(r.left+r.right)/2-box.left:p.x}px`;port.style.top=`${!n.label.hidden?r.top-box.top-14:p.y-20}px`;}});
     this.surface.nodes().forEach(n=>n.label.classList.toggle('graph-multi-selected',this.multi.has(n.data.id)));
   }
-  dispose(){this.cancel();this.surface.container.removeEventListener('pointerdown',this.down,true);this.surface.container.removeEventListener('click',this.click,true);window.removeEventListener('pointermove',this.move,true);window.removeEventListener('pointerup',this.up,true);window.removeEventListener('pointercancel',this.cancel);window.removeEventListener('blur',this.blur);window.removeEventListener('keydown',this.keydown,true);this.overlay.remove();this.preview.remove();this.boxElement.remove();this.feedback.remove();}
+  dispose(){this.cancel();this.surface.container.removeEventListener('pointerdown',this.down,true);this.surface.container.removeEventListener('click',this.click,true);window.removeEventListener('pointermove',this.move,true);window.removeEventListener('pointerup',this.up,true);window.removeEventListener('pointercancel',this.cancel);window.removeEventListener('blur',this.blur);window.removeEventListener('keydown',this.keydown,true);this.reduceMotion.removeEventListener('change',this.motionPreferenceChanged);this.overlay.remove();this.preview.remove();this.boxElement.remove();this.feedback.remove();}
 }

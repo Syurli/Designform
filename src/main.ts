@@ -1,3 +1,7 @@
+import { showAppMenu } from './app-menu';
+import { initializeBrowseHistory, historyScope, recordVisit } from './browse-history';
+import { initializeContextGestures } from './context-gesture';
+import { shortcutAction,openInputSettings,initializeInputBindings } from './input-settings';
 import { DocumentDesktop } from './document-desktop';
 import { isTransientProject } from '../shared/transient';
 let documentDesktop:DocumentDesktop|undefined;
@@ -14,28 +18,39 @@ import './authoring.css';
 import './creation-editing.css';
 import './workspace-060.css';
 import './workspace-070.css';
+import './card-library.css';
+import './task-dialogs.css';
+import { installIconInteractions } from './icon-interaction';
 import { groupAncestors } from '../shared/project-hierarchy';
+import { documentNameOrder, documentSortLabels, sortDocuments, type DocumentSort } from '../shared/document-order';
+import { documentPinScope, readDocumentListState, saveDocumentListState } from './document-list-state';
 import { setNotebookTexture } from './notebook-style';
 import { openProjectDetails, projectIdentity } from './project-details';
 import { openContentOverview } from './content-overview';
 import { ProjectDirectory } from './project-directory';
 import { mountDocumentPresentation } from './document-presentation';
 import { EditingSession } from './editing-session';
+import { graphChanges } from '../shared/graph-editing';
+import { projectWorkView } from '../shared/collaboration';
+import { parseKnowledge } from '../shared/markdown';
 import type { GraphEdit } from '../shared/graph-editing';
 import { chooseAction, chooseRelationType, classifyDocuments, connectDocuments, editEdge } from './relation-editing';
 import { categoryColor } from './category-color';
 import { openCollaboration } from './prompt-panel';
 import { initializeTheme, mountDesktopChrome } from './theme';
-import { createIcons, Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft } from 'lucide';
+import { createIcons, Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ChevronLeft, ArrowUpDown, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft } from 'lucide';
 import { KnowledgeGraph, type GraphMode, type GraphDirection } from './graph';
 import { nodes, edges, groups, types, setKnowledgeData, type KnowledgeNode, type ProjectSnapshot } from './data';
 import { edgeSentence } from './analysis';
-import { projectAction, connectProjects, readProject } from './project-client';
+import { projectAction, connectProjects, readProject, subscribeProjectEvents } from './project-client';
+import { beginProjectLoading, currentProjectLoading, type ProjectLoadingTask } from './project-loading';
 import { ProjectWorkbench } from './workbench';
 import { HistoryPanel } from './history-panel';
 import { WorkspacePanel } from './workspace-panel';
 import { CollaborationPanel } from './collaboration-panel';
 import { projectMarkdown, installReadingPreviews } from './document-reading';
+import { initializeConnectorPanel, onConnectorProject, setConnectorTakeoverGuard } from './connector-panel';
+import type { ConnectorSession } from '../browser/connector';
 import { ConnectionPanel } from './connection-panel';
 import { isWebEdition } from './edition';
 import { TutorialManager } from './tutorial/tutorial-manager';
@@ -43,14 +58,35 @@ import { designformTutorials,setTutorialProject,setPracticeProject,isPracticePro
 
 /** 启动时读取独立项目目录；没有最近项目则进入项目中心，不自动接入真实资料。 */
 let projectSnapshot: ProjectSnapshot | undefined;
+initializeBrowseHistory();initializeContextGestures();initializeInputBindings();
+document.addEventListener('keydown',event=>{if(!event.defaultPrevented&&!document.querySelector('dialog:modal')&&shortcutAction(event)==='settings'){event.preventDefault();void openInputSettings();}},{capture:true});
+
+/** 项目订阅随项目切换释放；事件与轮询共享正式快照刷新。 */
+let liveProject='',disposeLive:(()=>void)|undefined,liveRefreshing=false;
+async function refreshLive(){if(liveRefreshing||!projectSnapshot||projectSnapshot.historical)return;const id=projectSnapshot.project.id;liveRefreshing=true;try{const next=await readProject(id);if(projectSnapshot?.project.id===id)applyProject(next);}catch(error){reportProjectError(error);}finally{liveRefreshing=false;}}
+function syncLive(snapshot:ProjectSnapshot){const id=snapshot.historical||isTransientProject(snapshot.project.id)?'':snapshot.project.id;if(id===liveProject)return;disposeLive?.();disposeLive=undefined;liveProject=id;if(id)disposeLive=subscribeProjectEvents(id,()=>void refreshLive());}
+setInterval(()=>{if(!document.hidden&&liveProject)void refreshLive();},6000);
 let connectionError = '';
+/** URL 项目读取到工作台显示沿用同一任务，初始化失败或取消时立即释放。 */
+let startupLoading: ProjectLoadingTask | undefined;
 try {
-  const library = await connectProjects();
   const linkedProject = new URL(location.href).searchParams.get('project');
-  if (linkedProject && library.projects.some(project => project.id === linkedProject)) projectSnapshot = await readProject(linkedProject);
+  if(linkedProject){startupLoading=currentProjectLoading()??beginProjectLoading('链接中的项目');await startupLoading?.paint();startupLoading?.throwIfCancelled();}
+  const library = startupLoading ? await startupLoading.wait(connectProjects()) : await connectProjects();
+  const linked = library.projects.find(project => project.id === linkedProject);
+  if(linked){
+    startupLoading?.setTitle(linked.name);
+    projectSnapshot=startupLoading?await startupLoading.wait(readProject(linked.id)):await readProject(linked.id);
+    startupLoading?.throwIfCancelled();startupLoading?.setCancellable(false);
+    startupLoading?.stage('categories',`${projectSnapshot.groups.length} 个分类 · ${projectSnapshot.documents.length} 份文档`);await startupLoading?.paint();
+  }
   // 默认进入项目库，不自动读取上次项目。
   if (projectSnapshot) setKnowledgeData(projectSnapshot);
-} catch (error) { connectionError = error instanceof Error ? error.message : '本地项目服务暂不可用。'; }
+  else{startupLoading?.finish();startupLoading=undefined;}
+} catch (error) {
+  if(!startupLoading?.signal.aborted)connectionError=error instanceof Error?error.message:'本地项目服务暂不可用。';
+  projectSnapshot=undefined;startupLoading?.finish();startupLoading=undefined;
+}
 
 /** 阅读状态与文档编辑数据分开，不把镜头与筛选写入策划正文。 */
 type View = 'graph' | 'document' | 'cards' | 'creative' | 'quest' | 'animatic';
@@ -75,7 +111,7 @@ window.addEventListener('cewen:locate-anchor',event=>{
  });
 });
 window.addEventListener('cewen:read-document', event => {
-  const id = (event as CustomEvent<string>).detail; if(documentDesktop&&!projectSnapshot?.historical){documentDesktop.openDocument(id.split('/')[0],true);return;} if (!nodeById.has(id)) return;
+  const id = (event as CustomEvent<string>).detail; if(documentDesktop&&!projectSnapshot?.historical){documentDesktop.openDocument(id,true);return;} if (!nodeById.has(id)) return;
   state.scopeIds = null; selectNode(id); setView('document');
   const node = nodeById.get(id)!;
   const anchor = node.anchor && get('reading-view').querySelector(`#doc-${CSS.escape(node.documentId)} [id="${CSS.escape(node.anchor)}"]`);
@@ -86,7 +122,7 @@ const readingTrail: { selected: string | null; scroll: number; group: string | n
 const names = { galaxy: '星图总览', network: '脑图聚焦', layers: '系统分层', mindmap: '设计脑图' };
 const kindNames = { system: '系统', document: '专项文档', rule: '设计规则' };
 const statusNames = { confirmed: '已确认', draft: '草稿', question: '待确认', archived: '已归档' };
-const icons = { Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft };
+const icons = { Orbit, Network, Layers, FileText, LayoutGrid, Search, ChevronRight, ChevronLeft, ArrowUpDown, ArrowUpRight, X, Focus, Plus, Minus, Sparkles, ArrowLeft, CircleDot, PanelLeft };
 
 /** 所有来自资料的数据进入 HTML 前转义，后续接入导入功能时也不执行文档中的标签。 */
 function escape(text: string) { return text.replace(/[&<>"']/g, value => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[value]!)); }
@@ -99,7 +135,7 @@ function status(node: KnowledgeNode) { return `<span class="status ${node.status
 /** 固定的工作台框架只创建一次，切换模式保留同一个 WebGL 画布。 */
 app.innerHTML = `
   <header class="application-bar" aria-label="策问应用功能">
-    <a class="brand" href="./" aria-label="策问 Designform 首页"><span class="brand-name"><span class="brand-mark"><img data-brand-icon src="${import.meta.env.BASE_URL}icons/cewen-dark.svg" alt="策"/></span><b>问</b></span><small class="brand-wordmark">Designform</small></a>
+    <button class="brand" type="button" aria-label="策问：进入项目问题模式"><span class="brand-name">策问</span><small class="brand-wordmark">Designform</small></button>
     <span class="application-divider"></span><button class="application-projects" id="project-center">${icon('layout-grid')}项目库</button>
     <span class="application-tagline">把想法写成游戏</span>
     <div class="application-actions"><button class="tutorial-help icon-button" id="tutorial-help" data-tutorial="tutorial-help" aria-label="新手教程" title="新手教程">?</button><button class="llm-connection" id="llm-connection" data-tutorial="llm-connection" aria-label="LLM 连接状态"><span class="connection-dot"></span><span><strong>正在检查连接</strong><small>LLM 协作</small></span></button><button class="theme-toggle icon-button" data-theme-toggle aria-label="切换浅色主题"></button></div>
@@ -117,7 +153,7 @@ app.innerHTML = `
     </div>
     </details>
     <div class="project-directory-host" id="project-directory-host" data-tutorial="project-directory"></div>
-    <details class="reading-options"><summary>筛选与阅读记录</summary><button id="toggle-archived">显示已归档内容</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>大型图谱展开全部规则</label><button id="recent-reading">最近浏览</button><button id="save-reading-view">保存当前阅读视图</button><button id="reset-reading-filters">清除所有筛选</button></details>
+    <div class="reading-options" aria-label="显示选项"><button id="toggle-archived" aria-pressed="false">显示已归档</button><label class="mini-check"><input id="detailed-graph" type="checkbox"/>展开全部规则</label></div>
     <div class="sidebar-section entry-heading"><span id="entry-heading">策划条目</span><span id="entry-count"></span></div>
     <div id="node-directory" class="node-directory" aria-label="可选择的策划条目"></div>
     <footer class="sidebar-footer"><span>文档目录</span><span>A BAIGE PROJECT</span></footer>
@@ -157,6 +193,7 @@ app.innerHTML = `
 mountDesktopChrome();
 await initializeTheme();
 setNotebookTexture();
+installIconInteractions();
 
 let graph: KnowledgeGraph | undefined;
 let creativeWorkspace:CreativeWorkspace|undefined;
@@ -183,7 +220,7 @@ function setSidebarExpanded(expanded: boolean) {
   try { localStorage.setItem('cewen-sidebar-expanded', String(expanded)); } catch { /* 偏好不影响文档保存。 */ }
 }
 setSidebarExpanded(sidebarExpanded);
-const connectionPanel = new ConnectionPanel(get('llm-connection') as HTMLButtonElement, () => projectSnapshot);
+const connectionPanel = new ConnectionPanel(get('llm-connection') as HTMLButtonElement, () => projectSnapshot,refreshLive);
 /** 目录展开状态按项目保留在本次阅读中，不修改任何策划文档。 */
 const directoryExpansion = new Map<string, Set<string>>();
 
@@ -307,29 +344,109 @@ function renderReading() {
   const ids = new Set((selected ? [selected] : visible).map(node => node.documentId));
   const documents = projectSnapshot?.documents.filter(document => ids.has(document.id)).sort((a, b) => Number(b.type === 'gdd') - Number(a.type === 'gdd')) ?? [];
   get('reading-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN DOCUMENTS</span><h1>${selected ? escape(selected.title) : escape(projectSnapshot?.project.name ?? '未命名项目') + ' · 策划案'}</h1><p>${projectSnapshot?.historical ? `${projectSnapshot.revisionLabel} · 历史策划` : '从设计正文开始阅读，悬停带下划线的词语可预览相关设计。'}</p><div class="reading-navigation">${readingTrail.length ? `<button class="text-button" id="reading-back">${icon('arrow-left')}返回上一处</button>` : ''}${selected ? `<button class="text-button" id="read-all">返回策划案总览</button>` : ''}</div></header><div class="document-content">${documents.map(document => `<article class="document-section" id="doc-${document.id}"><div class="document-presentation-host"></div><footer class="document-reading-footer"><div class="document-source">${escape(document.path)}</div><button class="text-button" data-locate="${document.id}">${icon('network')}在关系网中定位${icon('arrow-up-right')}</button></footer></article>`).join('') || '<div class="reading-empty">没有找到匹配文档。可以新建一份 GDD 或 DD。</div>'}</div>`;
-  for(const doc of documents){const host=get('reading-view').querySelector<HTMLElement>(`#doc-${CSS.escape(doc.id)} .document-presentation-host`)!;readingDisposers.push(mountDocumentPresentation(host,doc,projectSnapshot!,{onEdit:()=>{void workbench.edit(doc.id).catch(reportProjectError);}}));}
+  // 正文编辑入口统一进入策划案，沿用文档身份对应的锁定状态与同一份草稿。
+  for(const doc of documents){const host=get('reading-view').querySelector<HTMLElement>(`#doc-${CSS.escape(doc.id)} .document-presentation-host`)!;readingDisposers.push(mountDocumentPresentation(host,doc,projectSnapshot!,{onEdit:()=>{documentDesktop?.openDocument(doc.id,true);}}));}
   refreshIcons();
 }
 
+/** 页容量由当前可用面积决定，窗口变化后保持所在卡片附近而不启用纵向滚动。 */
+const cardPaging = { page: 0, capacity: 1, columns: 1, rows: 1, key: '' };
+let cardInspectTimer: ReturnType<typeof setTimeout> | undefined;
+function cardPageLayout() {
+  const host = get('cards-view'), style = getComputedStyle(host);
+  const width = Math.max(180, (host.clientWidth || 900) - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+  const height = Math.max(190, (host.clientHeight || innerHeight - 150) - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - 102);
+  const gap = innerWidth <= 700 ? 10 : 14;
+  const columns = Math.max(1, Math.floor((width + gap) / (230 + gap))), rows = Math.max(1, Math.floor((height + gap) / (240 + gap)));
+  return { columns, rows, capacity: columns * rows };
+}
+const cardDate = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+function cardTime(value?: string) { return value && Number.isFinite(Date.parse(value)) ? cardDate.format(new Date(value)) : '暂无记录'; }
 function renderCards() {
-  const visible = filteredNodes();
-  get('cards-view').innerHTML = `<header class="reading-header"><span class="eyebrow">DESIGN LIBRARY</span><h1>策划卡片<span class="title-count">${visible.length}</span></h1><p>每一张卡片，都与同一份知识空间相连。</p></header><div class="card-grid">${visible.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" style="--group-color:${categoryColor(node.color??groupOf(node).color)}"><span class="card-top"><span class="detail-group"><i></i>${escape(groupOf(node).label)}</span>${icon(node.kind === 'document' ? 'file-text' : 'circle-dot')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>${kindNames[node.kind]}</span></span></button>`).join('') || '<div class="reading-empty">没有匹配的卡片，可清除搜索或系统筛选。</div>'}</div>`;
+  // 搜索可以命中正文规则，但卡片身份始终是所属文档，分类节点不生成卡片。
+  const matchedDocuments = new Set(filteredNodes().filter(node => node.kind !== 'system').map(node => node.documentId));
+  const visible = nodes.filter(node => node.kind === 'document' && (state.includeArchived || node.status!=='archived') && matchedDocuments.has(node.documentId));
+  const preferences=projectSnapshot?readDocumentListState(projectSnapshot):undefined;
+  const listSnapshot=projectSnapshot&&!projectSnapshot.historical?documentDesktop?.documentListSnapshot(projectSnapshot.project.id)??projectSnapshot:projectSnapshot;
+  if(listSnapshot&&preferences){
+    const docs=sortDocuments(listSnapshot,listSnapshot.documents,preferences.sort,preferences.categoryPins[documentPinScope('documents',state.group??'')]??[]);
+    const rank=new Map(docs.map((doc,index)=>[doc.id,index]));
+    // 卡片与文档目录共用排序和当前分类图钉，搜索命中不改变原来的排序偏好。
+    visible.sort((a,b)=>(rank.get(a.documentId)??docs.length)-(rank.get(b.documentId)??docs.length)||documentNameOrder.compare(a.title,b.title));
+  }
+  const key = JSON.stringify([projectSnapshot?.project.id, state.group, state.query, state.scopeIds, state.includeArchived, state.directOnly, preferences?.sort]);
+  const layout = cardPageLayout(), start = cardPaging.page * cardPaging.capacity;
+  if (key !== cardPaging.key) cardPaging.page = 0;
+  else if (layout.capacity !== cardPaging.capacity) cardPaging.page = Math.floor(start / layout.capacity);
+  Object.assign(cardPaging, layout, { key });
+  const pages = Math.max(1, Math.ceil(visible.length / cardPaging.capacity)); cardPaging.page = Math.min(cardPaging.page, pages - 1);
+  const current = visible.slice(cardPaging.page * cardPaging.capacity, (cardPaging.page + 1) * cardPaging.capacity);
+  const metadata = (node: KnowledgeNode) => {
+    // 创建时间、编辑时间和版本只取这份文档，不再汇总分类或章节。
+    const docs = listSnapshot?.documents.filter(doc => doc.id === node.documentId) ?? [];
+    const newest = [...docs].sort((a, b) => (Date.parse(b.updatedAt ?? '') || 0) - (Date.parse(a.updatedAt ?? '') || 0))[0];
+    const created = docs.map(doc => doc.createdAt).filter((time): time is string => !!time).sort()[0];
+    const draft = docs.some(doc => projectSnapshot?.documents.find(original => original.id === doc.id)?.text !== doc.text);
+    return `<span class="card-metadata"><span>创建<time datetime="${escape(created ?? '')}">${escape(cardTime(created))}</time></span><span>最后编辑<time datetime="${escape(newest?.updatedAt ?? '')}">${escape(cardTime(newest?.updatedAt))}</time></span><span>版本<b>${escape(newest?.revisionLabel ?? '未入版本')}${draft ? ' · 草稿' : ''}</b></span></span>`;
+  };
+  get('cards-view').innerHTML = `<header class="card-library-header"><h1>策划卡片<span class="title-count">${visible.length}</span></h1></header><div class="card-grid" style="--card-columns:${layout.columns};--card-rows:${layout.rows}">${current.map(node => `<button class="design-card ${node.id === state.selected ? 'selected' : ''}" data-node="${node.id}" title="${escape(node.title)}" aria-label="${escape(node.title)}，双击打开文档" style="--group-color:${categoryColor(node.color??groupOf(node).color)}"><span class="card-top"><i class="card-color" aria-hidden="true"></i>${icon('file-text')}</span><h2>${escape(node.title)}</h2><p>${escape(node.summary)}</p><span class="card-bottom">${status(node)}<span>文档</span></span>${metadata(node)}</button>`).join('') || '<div class="reading-empty">没有匹配的文档，可调整搜索或分类。</div>'}</div><footer class="card-library-pagination" aria-label="卡片分页"><button data-card-page="-1" aria-label="上一页卡片" ${cardPaging.page === 0 ? 'disabled' : ''}>${icon('chevron-left')}上一页</button><span aria-live="polite">${cardPaging.page + 1} / ${pages} 页 · 共 ${visible.length} 张</span><button data-card-page="1" aria-label="下一页卡片" ${cardPaging.page === pages - 1 ? 'disabled' : ''}>下一页${icon('chevron-right')}</button></footer>`;
+  if(projectSnapshot&&preferences){
+    const snapshot=projectSnapshot,sort=document.createElement('button');sort.className='card-library-sort';sort.innerHTML=`${icon('arrow-up-down')}<span>${documentSortLabels[preferences.sort]}</span>`;sort.setAttribute('aria-label','卡片库排序');sort.setAttribute('aria-haspopup','menu');
+    sort.onclick=()=>showAppMenu((Object.entries(documentSortLabels) as [DocumentSort,string][]).map(([value,label])=>({label:`${preferences.sort===value?'✓ ':''}${label}`,run:()=>{preferences.sort=value;saveDocumentListState(snapshot,preferences);}})),sort);
+    get('cards-view').querySelector('header')!.append(sort);
+  }
   refreshIcons();
 }
+let cardResizeFrame = 0;
+const cardResize = new ResizeObserver(() => {
+  if (state.view !== 'cards' || cardResizeFrame) return;
+  cardResizeFrame = requestAnimationFrame(() => { cardResizeFrame = 0; const next = cardPageLayout(); if (next.capacity !== cardPaging.capacity || next.columns !== cardPaging.columns) renderCards(); });
+});
+cardResize.observe(get('cards-view'));
+/** 触控板一段连续滑动只翻一页；边界也消化滚轮，避免滚动穿透到外层。 */
+let cardWheelAmount = 0, cardWheelDirection = 0, cardWheelLatched = false;
+let cardWheelReset: ReturnType<typeof setTimeout> | undefined;
+get('cards-view').addEventListener('wheel', event => {
+  if (state.view !== 'cards' || event.ctrlKey) return;
+  event.preventDefault(); event.stopPropagation();
+  const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+  const direction = Math.sign(delta); if (!direction) return;
+  clearTimeout(cardWheelReset);
+  cardWheelReset = setTimeout(() => { cardWheelAmount = 0; cardWheelDirection = 0; cardWheelLatched = false; }, 170);
+  if (cardWheelLatched) return;
+  if (direction !== cardWheelDirection) cardWheelAmount = 0;
+  cardWheelDirection = direction;
+  cardWheelAmount += Math.abs(delta) * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? get('cards-view').clientHeight : 1);
+  if (cardWheelAmount < 36) return;
+  cardWheelLatched = true;
+  const pageButton = get('cards-view').querySelector<HTMLButtonElement>(`[data-card-page="${direction}"]`);
+  if (!pageButton || pageButton.disabled) return;
+  clearTimeout(cardInspectTimer); cardPaging.page += direction; renderCards();
+}, { passive: false });
+get('cards-view').addEventListener('dblclick', event => {
+  const id = (event.target as HTMLElement).closest<HTMLElement>('.design-card[data-node]')?.dataset.node;
+  const node = id ? nodeById.get(id) : undefined; if (!node) return;
+  clearTimeout(cardInspectTimer); event.preventDefault(); window.dispatchEvent(new CustomEvent('cewen:read-document', { detail: node.documentId }));
+});
+/** 文档页修改排序或图钉后，已打开的卡片库同步采用相同偏好。 */
+window.addEventListener('cewen:document-list-change',event=>{
+  if((event as CustomEvent<{projectId:string}>).detail.projectId===projectSnapshot?.project.id&&state.view==='cards')renderCards();
+});
 
 /** 更新阅读内容而不重建场景；这个边界也是未来接入模型操作接口的位置。 */
-function sync(updateGraph = true) {
+function sync(updateGraph = true, updateCards = true, updateInspector = true) {
   if (readingReady && projectSnapshot && !projectSnapshot.historical) { clearTimeout(readingTimer); const id = projectSnapshot.project.id; readingTimer = setTimeout(() => { void projectAction(id, 'reading-view', { state: { ...state }, layout: graph?.exportLayout(), recent: recentNodes }).catch(reportProjectError); }, 900); }
+  get('toggle-archived').textContent=state.includeArchived?'隐藏已归档':'显示已归档';get('toggle-archived').setAttribute('aria-pressed',String(state.includeArchived));
   renderAnalysisControls();
   renderEditingState();
   renderDirectory();
-  renderInspector();
+  if (updateInspector) renderInspector();
   if (updateGraph) graph?.setState(state);
   if (state.view === 'document') renderReading();
-  if (state.view === 'cards') renderCards();
+  if (state.view === 'cards' && updateCards) renderCards();
 }
 
-function selectNode(id: string) {
+function selectNode(id: string, preserveCardGrid = false) {
   historyPanel.stop();
   if (!nodeById.has(id)) return;
   const refocusing = state.mode === 'network' && state.selected !== id;
@@ -339,17 +456,23 @@ function selectNode(id: string) {
   recentNodes = [id, ...recentNodes.filter(nodeId => nodeId !== id)].slice(0,20);
   state.relationIndex = null;
   // 从详情跳到跨系统条目时解除原系统过滤，确保选中对象实际可见。
-  if (state.group && nodeById.get(id)!.group !== state.group) state.group = null;
+  if (state.group && nodeById.get(id)!.group !== state.group && !groupAncestors({groups},nodeById.get(id)!.group).some(group=>group.id===state.group)) state.group = null;
   state.query = '';
   (get('search') as HTMLInputElement).value = '';
-  sync(!refocusing);
+  // 卡片单击不能替换点击中的 DOM，否则紧接的双击会丢失落点。
+  sync(!refocusing, !preserveCardGrid, !preserveCardGrid);
+  if (preserveCardGrid) {
+    get('cards-view').querySelectorAll<HTMLElement>('.design-card').forEach(card => card.classList.toggle('selected', card.dataset.node === id));
+    // 给双击保留稳定命中区域，双击时间窗结束后才展开可能挤压卡片的详情面板。
+    clearTimeout(cardInspectTimer); cardInspectTimer = setTimeout(() => { if (state.view === 'cards' && state.selected === id) renderInspector(); }, 650);
+  }
   if (refocusing) {
     get('graph-view').scrollTo({ top: 0, behavior: 'instant' });
     if (state.view === 'graph') revealGraphOnMobile();
     graph?.setState(state, { deferLayout: true });
     graph?.setMode('network');
   }
-  get('announcement').textContent = `已选择${nodeById.get(id)!.title}`;
+  get('announcement').textContent = `已选择${nodeById.get(id)!.title}`;rememberWorkspaceVisit();
 }
 
 /** 空白点击只解除焦点，不重置用户旋转后的星图镜头或当前系统筛选。 */
@@ -362,7 +485,9 @@ function clearOverviewSelection() {
 
 /** 导航批量更新时先恢复页面尺寸，延后场景同步，由后续 setMode 一次完成过渡。 */
 function setView(view: View, deferGraph = false) {
+  clearTimeout(cardInspectTimer);
   if(view==='document'&&documentDesktop&&!projectSnapshot?.historical){documentDesktop.show();const id=state.selected?nodeById.get(state.selected)?.documentId:projectSnapshot?.documents[0]?.id;if(id)documentDesktop.openDocument(id,true);return;}
+  documentDesktop?.leaveQuestionMode();
   if(documentDesktop)documentDesktop.root.hidden=true;app.classList.remove('document-canvas-open');get('inspector').hidden=false;
   state.view = view;
   get('graph-view').hidden = view !== 'graph';
@@ -374,7 +499,14 @@ function setView(view: View, deferGraph = false) {
   document.querySelectorAll<HTMLElement>('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   if(view==='graph'&&!graph)graph=mountGraph();
   graph?.setActive(view === 'graph', { deferLayout: deferGraph });
-  sync(!deferGraph);
+  sync(!deferGraph);rememberWorkspaceVisit();
+}
+
+/** 记录不同页面与图谱模式；切换只恢复阅读状态，不提交版本或替换文档草稿。 */
+function rememberWorkspaceVisit(){
+  if(!projectSnapshot||documentDesktop?.visible)return;const project=projectSnapshot.project.id;historyScope(project);const saved={view:state.view,mode:state.mode,selected:state.selected,group:state.group,query:state.query,scopeIds:state.scopeIds?[...state.scopeIds]:null};
+  let scroll=get(saved.view==='cards'?'cards-view':saved.view==='document'?'reading-view':saved.view==='graph'?'graph-view':'creative-view').scrollTop;
+  recordVisit('workspace:'+JSON.stringify(saved),()=>{if(projectSnapshot?.project.id!==project)throw new Error('浏览历史属于其他项目。');Object.assign(state,saved);setView(saved.view);if(saved.view==='graph'){graph?.setState(state,{deferLayout:true});graph?.setMode(saved.mode);}requestAnimationFrame(()=>get(saved.view==='cards'?'cards-view':saved.view==='document'?'reading-view':saved.view==='graph'?'graph-view':'creative-view').scrollTop=scroll);},()=>{scroll=get(saved.view==='cards'?'cards-view':saved.view==='document'?'reading-view':saved.view==='graph'?'graph-view':'creative-view').scrollTop;});
 }
 
 /** 三种总览共享场景；脑图的聚焦模式复用原有关系分析动画。 */
@@ -390,7 +522,7 @@ function setGraphMode(mode: OverviewMode) {
   graph?.setState(state, { deferLayout: true });
   graph?.setMode(mode);
   get('graph-view').scrollTo({ top: 0, behavior: 'instant' });
-  get('announcement').textContent = `已切换到${names[mode]}`;
+  get('announcement').textContent = `已切换到${names[mode]}`;rememberWorkspaceVisit();
 }
 
 /** 脑图聚焦仍保留三种布局入口，并用返回按钮恢复进入前的总览。 */
@@ -474,10 +606,11 @@ app.addEventListener('click', event => {
   }
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
   if (!button) return;
+  if (button.dataset.cardPage) { cardPaging.page += Number(button.dataset.cardPage); renderCards(); return; }
   if (button.dataset.direction) { state.direction=button.dataset.direction as GraphDirection;graph?.setDirection(state.direction);sync(false);return; }
   if (button.dataset.edge !== undefined) { selectRelation(Number(button.dataset.edge)); return; }
   if (button.dataset.analyze) { enterAnalysis(button.dataset.analyze); return; }
-  if (button.dataset.node) { selectNode(button.dataset.node); return; }
+  if (button.dataset.node) { selectNode(button.dataset.node, button.classList.contains('design-card')); return; }
   if (button.dataset.locate) { selectNode(button.dataset.locate); setView('graph'); graph?.reset(); return; }
   if (button.dataset.view) { setView(button.dataset.view as View); return; }
   if (button.dataset.mode) {
@@ -500,7 +633,7 @@ app.addEventListener('click', event => {
     case 'organize-project': void workspacePanel.open(state.selected ?? '').catch(reportProjectError); break;
     case 'project-inquiry': void collaborationPanel.open('inquiry').catch(reportProjectError); break;
     case 'project-exchange': void collaborationPanel.open('exchange').catch(reportProjectError); break;
-    case 'toggle-archived': state.includeArchived = !state.includeArchived; button.textContent = state.includeArchived ? '隐藏已归档内容' : '显示已归档内容'; sync(); break;
+    case 'toggle-archived': state.includeArchived = !state.includeArchived; window.dispatchEvent(new CustomEvent('cewen:archive-filter',{detail:state.includeArchived})); projectDirectory?.render(); button.textContent = state.includeArchived ? '隐藏已归档' : '显示已归档'; button.setAttribute('aria-pressed', String(state.includeArchived)); sync(); break;
     case 'save-reading-view': void workspacePanel.saveCurrentView().catch(reportProjectError); break;
     case 'reset-reading-filters': state.scopeIds = null; state.group = null; state.query = ''; state.directOnly = false; (get('search') as HTMLInputElement).value = ''; sync(); break;
     case 'refresh-project': void refreshProject(true).catch(reportProjectError); break;
@@ -537,8 +670,8 @@ document.addEventListener('keydown', event => {
   if(event.defaultPrevented||event.isComposing||document.querySelector('dialog[open]'))return;
   const typing = !!(event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]');
   if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); setSidebarExpanded(!sidebarExpanded); return; }
-  if(!typing&&(event.ctrlKey||event.metaKey)){const key=event.key.toLowerCase();if(['s','z','y','c','x','v','a','f'].includes(key)&&!(key==='c'&&window.getSelection()?.toString())){event.preventDefault();void graphCommand(key==='s'?'save':key==='z'?(event.shiftKey?'redo':'undo'):key==='y'?'redo':key==='c'?'copy':key==='x'?'cut':key==='a'?'selectAll':key==='f'?'search':'paste').catch(reportProjectError);return;}}
-  if(!typing&&event.key==='Delete'&&state.view==='graph'&&state.relationIndex!==null){event.preventDefault();void graphCommand('edge').catch(reportProjectError);}
+  const action=shortcutAction(event);if(!typing&&action&&['save','saveAll','undo','redo','copy','cut','paste','selectAll','find'].includes(action)&&!(action==='copy'&&window.getSelection()?.toString())){event.preventDefault();void graphCommand(action==='find'?'search':action==='saveAll'?'save':action).catch(reportProjectError);return;}
+  if(!typing&&action==='delete'&&state.view==='graph'){event.preventDefault();if(state.relationIndex!==null)void graphCommand('edge').catch(reportProjectError);else void documentDesktop?.deleteFromGraph(graph?.selectedIds()??(state.selected?[state.selected]:[])).catch(reportProjectError);}
   if (event.key === '/' && !typing) { event.preventDefault(); setSidebarExpanded(true); document.querySelector<HTMLInputElement>('.project-directory-top input')?.focus(); }
   if (event.key === 'Escape') {
     const menuOpen = sidebarExpanded && matchMedia('(max-width:1050px)').matches;
@@ -573,12 +706,19 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   const sameProject = projectSnapshot?.project.id === snapshot.project.id;
   if (!sameProject || projectSnapshot?.revision !== snapshot.revision) readingTrail.length = 0;
   const relationId = state.relationIndex === null ? null : edges[state.relationIndex]?.id;
-  projectSnapshot = snapshot;setTutorialProject(snapshot.project.id);
+  projectSnapshot = snapshot;
+  // 环境部署异步进行，下载或配对失败不阻断项目阅读与人工编辑。
+  if(!projected)void Promise.resolve().then(()=>onConnectorProject(snapshot)).catch(reportProjectError);
+  syncLive(snapshot);setTutorialProject(snapshot.project.id);
+  window.dispatchEvent(new CustomEvent('cewen:collaboration-change'));
+  const workView=projectWorkView(snapshot);
+  // 图谱正文从工作投影重新解析，正式快照与人工保存基准始终独立。
+  const readingSnapshot=workView===snapshot?snapshot:{...workView,...parseKnowledge([{path:'PROJECT.md',text:snapshot.projectEntry?.text??'',hash:snapshot.projectEntry?.hash??''},...workView.documents])};
   creativeWorkspace?.receive(snapshot);
-  setKnowledgeData(snapshot);
+  setKnowledgeData(readingSnapshot);
   get('footer-count').textContent=nodes.length+' 个条目 · '+edges.length+' 条关系';
   nodeById.clear(); nodes.forEach(node => nodeById.set(node.id, node));
-  if (!sameProject) { readingReady = false; clearTimeout(readingTimer); Object.assign(state, { selected: null, relationIndex: null, group: null, query: '', directOnly: false, mode: overviewMode, scopeIds: null, includeArchived: false }); analysisOrigin = null; }
+  if (!sameProject) { historyScope(snapshot.project.id);window.dispatchEvent(new CustomEvent('cewen:archive-filter',{detail:false}));get('toggle-archived').textContent='显示已归档';get('toggle-archived').setAttribute('aria-pressed','false');readingReady = false; clearTimeout(readingTimer); Object.assign(state, { selected: null, relationIndex: null, group: null, query: '', directOnly: false, mode: overviewMode, scopeIds: null, includeArchived: false }); analysisOrigin = null; }
   else {
     if (state.selected && !nodeById.has(state.selected)) state.selected = null;
     if (state.group && !groups.some(group => group.id === state.group)) state.group = null;
@@ -598,7 +738,8 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
   get('analysis-focus').innerHTML = `<option value="">请选择条目</option><optgroup label="游戏总纲">${nodes.filter(node=>!node.group).map(node=>`<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>${groups.map(group => `<optgroup label="${escape(group.label)}">${nodes.filter(node => node.group === group.id).map(node => `<option value="${node.id}">${escape(node.title)}</option>`).join('')}</optgroup>`).join('')}`;
   (get('search') as HTMLInputElement).value = state.query;
   if (!sameProject || !graph) { graph?.dispose(); graph = undefined; get('graph-canvas').replaceChildren(); graph = mountGraph(); graph?.setState(state, { deferLayout: true }); graph?.setMode(state.mode); }
-  else if (snapshot.historical || !graph.updateText(snapshot)) graph.updateData(snapshot);
+  else if (snapshot.historical || !graph.updateText(readingSnapshot)) graph.updateData(readingSnapshot);
+  if(readingSnapshot!==snapshot)graph?.updateData(readingSnapshot);
   graph?.setActive(state.view === 'graph' && !documentDesktop?.visible);graph?.setEditable(!snapshot.historical);
   if (nodes.length > 500) get('announcement').textContent = '大项目总览先展示系统和文档。选择系统、搜索或点击条目展开规则，也可在筛选中展开全部。';
   get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
@@ -627,7 +768,7 @@ function reportProjectError(error: unknown) { connectionError = error instanceof
 editingSession=new EditingSession(snapshot=>applyProject(snapshot,true),message=>{get('project-save-state').textContent=message;get('announcement').textContent=message;renderEditingState();});
 if(projectSnapshot)editingSession.receive(projectSnapshot);
 const workbench = new ProjectWorkbench(() => projectSnapshot, applyProject);
-projectDirectory=new ProjectDirectory(get('project-directory-host'),{getSnapshot:()=>projectSnapshot!,getSelected:()=>state.selected,getQuery:()=>state.query,getGroup:()=>state.group,onSelect:id=>selectNode(id),onGroup:group=>{state.group=group||null;state.scopeIds=null;sync();},onQuery:query=>{state.query=query;state.scopeIds=null;sync();},onCommit:applyProject,onError:message=>reportProjectError(new Error(message))});
+projectDirectory=new ProjectDirectory(get('project-directory-host'),{getSnapshot:()=>projectSnapshot!,includeArchived:()=>state.includeArchived,getSelected:()=>state.selected,getQuery:()=>state.query,getGroup:()=>state.group,onSelect:id=>selectNode(id),onGroup:group=>{state.group=group||null;state.scopeIds=null;sync();},onQuery:query=>{state.query=query;state.scopeIds=null;sync();},onCommit:applyProject,onError:message=>reportProjectError(new Error(message))});
 if(projectSnapshot){document.querySelector('.project-art')!.innerHTML=projectIdentity(projectSnapshot);get('project-description').textContent=projectSnapshot.project.description||'项目设置';}
 /** 结构草稿和正文保存共享同一个事务入口；布局始终只进入项目的私有工作区。 */
 const editBar=document.createElement('div');editBar.className='graph-draft-actions';editBar.id='graph-draft-actions';editBar.innerHTML='<button data-graph-command="undo" title="Ctrl+Z">撤销</button><button data-graph-command="redo" title="Ctrl+Y">重做</button><button data-graph-command="save" title="Ctrl+S">保存结构版本</button><button data-graph-command="reset-layout">自动排布</button><label><input id="shake-links" type="checkbox"/>晃动断开普通关联</label><span id="structure-state"></span>';document.querySelector('.space-intro')!.after(editBar);
@@ -640,6 +781,7 @@ async function finishGraphGesture(edit:GraphEdit|undefined,before:unknown,after:
     if(edit?.kind==='connect'){const type=await chooseRelationType();if(!type){restore(before);return;}edit={...edit,type};}
     if(edit?.kind==='insert'){const answer=await chooseAction('在普通关联中插入此条目',[{id:'insert',label:'替换为经过此条目的两条关联'},{id:'layout',label:'只调整摆放，保留原关联'}]);if(!answer){restore(before);return;}if(answer==='layout')edit=undefined;}
     if(graph!==current||projectSnapshot?.project.id!==projectId)return;
+    if(edit&&projectSnapshot){const result=graphChanges(projectSnapshot,edit);const locked=result.changes.find(change=>projectSnapshot?.documents.some(doc=>doc.path===change.path&&projectSnapshot?.collaboration?.locks[doc.id]));if(locked)throw new Error('LLM 正在编写关联文档，请停止任务后修改。');}
     if(edit)editingSession.apply(edit,()=>restore(before),()=>restore(after));else editingSession.layout(()=>restore(before),()=>restore(after));sync();
   }catch(error){restore(before);throw error;}
 }
@@ -654,11 +796,11 @@ async function graphCommand(command:string,id=state.selected){
   if(command==='edge'&&state.relationIndex!==null)edit=await editEdge(projectSnapshot,edges[state.relationIndex].id);
   if(command==='copy'||command==='cut'){const documents=[...new Set(ids.map(value=>nodeById.get(value)).filter(n=>n?.kind!=='system'&&n?.documentType!=='gdd').map(n=>n!.documentId))];if(!documents.length)return;canvasClipboard={project:projectSnapshot.project.id,ids:documents,cut:command==='cut'};await navigator.clipboard.writeText(documents.map(value=>nodeById.get(value)?.title??'').join('\n')).catch(()=>{});get('announcement').textContent=command==='cut'?'已剪切条目；选中目标分类后粘贴即可移动归属。':'已复制条目；在当前项目粘贴可创建独立副本。';return;}
   if(command==='paste'&&canvasClipboard){if(canvasClipboard.project!==projectSnapshot.project.id)throw new Error('文档复制暂限当前项目，跨项目请使用导出与导入。');const group=nodeById.get(state.selected??'')?.group??state.group??'system-unassigned';edit=canvasClipboard.cut?{kind:'classify',ids:canvasClipboard.ids,group}:{kind:'clone',ids:canvasClipboard.ids,group};}
-  if(edit)editingSession?.apply(edit);
+  if(edit){const result=graphChanges(projectSnapshot,edit);if(result.changes.some(change=>projectSnapshot?.documents.some(doc=>doc.path===change.path&&projectSnapshot?.collaboration?.locks[doc.id])))throw new Error('LLM 正在编写关联文档，请停止任务后修改。');editingSession?.apply(edit);}
 }
 document.addEventListener('click',event=>{const b=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-command]');if(b)void graphCommand(b.dataset.graphCommand!).catch(reportProjectError);});
 get('shake-links').addEventListener('change',event=>graph?.setShake((event.target as HTMLInputElement).checked));
-window.addEventListener('cewen:editing-command',event=>{if(event.defaultPrevented||document.querySelector('dialog[open]')||document.activeElement?.matches('input,textarea,select,[contenteditable=true]'))return;const command=(event as CustomEvent<string>).detail;if(['save','undo','redo','cut','copy','paste','selectAll'].includes(command)){event.preventDefault();void graphCommand(command).catch(reportProjectError);}});
+window.addEventListener('cewen:editing-command',event=>{if(event.defaultPrevented||documentDesktop?.visible||document.querySelector('dialog[open]')||document.activeElement?.matches('input,textarea,select,[contenteditable=true]'))return;const command=(event as CustomEvent<string>).detail;if(['save','undo','redo','cut','copy','paste','selectAll'].includes(command)){event.preventDefault();void graphCommand(command).catch(reportProjectError);}});
 /** 上下文菜单在当前画布旁出现；所有操作回到同一编辑与保存流程。 */
 const graphMenu=document.createElement('div');graphMenu.className='star-context-menu';graphMenu.hidden=true;graphMenu.setAttribute('aria-label','星图快捷操作');document.body.append(graphMenu);
 const closeGraphMenu=()=>{graphMenu.hidden=true;graph?.setContextMenuOpen(false);};
@@ -667,7 +809,7 @@ function openGraphMenu(detail:{id?:string;x:number;y:number}){
   const actions=projectSnapshot.historical?[['latest','回到最新版本']]:node?.kind==='system'?[['dd','在此分类新建 DD'],['category','修改分类'],['question','记录设计问题']]:node?[['edit','打开写作'],['dd','新建专项设计'],['connect','添加手工关联'],['pin','固定 / 解除固定位置'],['category-document','更改文档分类'],['annotation','批注与标记'],['prompt','让 LLM 深挖']]:[['dd','新建专项设计 DD'],['gdd','编写游戏总纲'],['question','记录设计问题'],['category','新建设计分类'],['prompt','与 LLM 一起构思']];
   graphMenu.innerHTML=`<small>${escape(node?.title??'在星图中开始')}</small>${actions.map(([action,label])=>`<button data-star-action="${action}">${label}</button>`).join('')}`;graphMenu.hidden=false;
   graphMenu.style.left=`${Math.max(8,Math.min(detail.x,innerWidth-graphMenu.offsetWidth-8))}px`;graphMenu.style.top=`${Math.max(8,Math.min(detail.y,innerHeight-graphMenu.offsetHeight-8))}px`;graph?.setContextMenuOpen(true);
-  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'','dd',node?.kind==='document'&&node.documentType==='dd'?node.id:undefined);break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':await workbench.edit(node?.documentId);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
+  graphMenu.onclick=event=>{const action=(event.target as HTMLElement).closest<HTMLButtonElement>('[data-star-action]')?.dataset.starAction;if(!action)return;closeGraphMenu();void(async()=>{switch(action){case 'dd':await workbench.newDocument(node?.group??state.group??'','dd',node?.kind==='document'&&node.documentType==='dd'?node.id:undefined);break;case 'gdd':await workbench.newDocument('','gdd');break;case 'question':await workbench.newDocument(node?.group??'','question');break;case 'category':await workbench.categories(node?.kind==='system'?node.id:'');break;case 'pin':{const before=graph?.exportLayout();graph?.togglePin(node!.id);await finishGraphGesture(undefined,before,graph?.exportLayout());break;}case 'category-document':await graphCommand('classify',node?.id);break;case 'connect':await graphCommand('connect',node?.id);break;case 'edit':if(node?.documentId)documentDesktop?.openDocument(node.documentId,true);break;case 'annotation':await workspacePanel.open(node?.id??'');break;case 'prompt':await openCollaboration(node?'inquiry':'start',projectSnapshot,node?.documentId?[node.documentId]:[]);break;case 'latest':applyProject(await readProject(projectSnapshot!.project.id));break;}})().catch(reportProjectError);};
   graphMenu.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
 }
 window.addEventListener('cewen:graph-context',event=>openGraphMenu((event as CustomEvent).detail));
@@ -678,7 +820,9 @@ const graphCreate=document.createElement('button');graphCreate.className='second
 const collaborationButton=document.createElement('button');collaborationButton.className='secondary-button';collaborationButton.dataset.tutorial='llm-collaboration';collaborationButton.textContent='与 LLM 协作';document.querySelector('.project-toolbar')!.append(collaborationButton);collaborationButton.addEventListener('click',()=>void openCollaboration(state.selected?'inquiry':'start',projectSnapshot,state.selected?[nodeById.get(state.selected)!.documentId].filter(Boolean):[]));
 window.addEventListener('cewen-theme-change',()=>{renderDirectory();renderInspector();renderCards();document.querySelectorAll<HTMLElement>('.system-list [data-group]').forEach(button=>{const group=groups.find(group=>group.id===button.dataset.group),dot=button.querySelector<HTMLElement>('.group-dot');if(group&&dot)dot.style.setProperty('--group-color',categoryColor(group.color));});document.querySelector('.legend')!.innerHTML=groups.map(group=>`<span><i style="background:${categoryColor(group.color)}"></i>${escape(group.label)}</span>`).join('');});
 const historyPanel = new HistoryPanel(() => projectSnapshot, applyProject);
-const workspacePanel = new WorkspacePanel(() => projectSnapshot, selectNode, item => workbench.publishAnnotation(item), (ids, title) => { state.scopeIds = ids; state.selected = null; state.relationIndex = null; sync(); get('announcement').textContent = `正在查看工作分组：${title}。清除筛选可返回全部。`; }, () => ({ ...state }), restoreReadingState, applyProject);
+const workspacePanel = new WorkspacePanel(() => projectSnapshot, selectNode, item => workbench.publishAnnotation(item), (ids, title) => { state.scopeIds = ids; state.selected = null; state.relationIndex = null; sync(); get('announcement').textContent = `正在查看关联条目：${title}。全部分类可返回全部。`; }, () => ({ ...state }), restoreReadingState, applyProject);
+/** 顶边框的视图菜单与原阅读视图保存流程共用同一入口。 */
+window.addEventListener('cewen:save-reading-view', () => { void workspacePanel.saveCurrentView().catch(reportProjectError); });
 /** 阅读状态与稳定坐标从工作区恢复，不介入公开文档历史。 */
 function restoreReadingState(value: unknown) {
   if (!value || typeof value !== 'object') return;
@@ -722,19 +866,40 @@ if(projectSnapshot)creativeWorkspace.receive(projectSnapshot);
 window.addEventListener('cewen:creative-apply',event=>applyProject((event as CustomEvent<ProjectSnapshot>).detail));
 window.addEventListener('cewen:tutorial-navigation',event=>{const d=(event as CustomEvent).detail;if(!['objects','quests','sequences','production','presets'].includes(d?.tab))return;setView('creative');creativeWorkspace?.tutorialNavigate(d.tab,d.type);});
 window.addEventListener('cewen:creative-request',event=>{const detail=(event as CustomEvent).detail;if(documentDesktop&&!projectSnapshot?.historical){void documentDesktop.handleCreative(detail).catch(reportProjectError);return;}if(detail.action==='new-project'){void openPresetDialog(undefined,applyProject).catch(reportProjectError);return;}if(!['creative','quest','animatic'].includes(state.view))setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);});
+// 启动链接项目的分类模型已就绪，图谱与阅读内容初始化属于真实内容阶段。
+if(startupLoading){startupLoading.stage('content','准备项目内容与关系视图');await startupLoading.paint();}
 graph = mountGraph();
 sync();
 void restoreReading().then(()=>editingSession?.recover()).catch(reportProjectError);
 refreshIcons();
 if (projectSnapshot && tutorialManager.shouldAutoStart('first-launch')) window.setTimeout(() => { void tutorialManager.start('first-launch'); }, 700);
-documentDesktop=new DocumentDesktop({apply:applyProject,document:()=>{app.classList.add('document-canvas-open');state.view='document';for(const id of ['graph-view','cards-view','reading-view','creative-view','inspector'])get(id).hidden=true;graph?.setActive(false);get('view-title').textContent='策划案';document.querySelectorAll('.main-nav [data-view]').forEach(b=>b.classList.toggle('active',(b as HTMLElement).dataset.view==='document'));},graph:(mode,id)=>{app.hidden=false;setView('graph');if(mode)setGraphMode(mode);if(id)enterAnalysis(id);},history:()=>void historyPanel.open().catch(reportProjectError),connections:()=>get('llm-connection').click(),proposals:()=>void collaborationPanel.open('proposals'),legacyAction:detail=>{documentDesktop!.root.hidden=true;app.hidden=false;setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);}});
+document.querySelector('.brand')!.addEventListener('click',()=>documentDesktop?.askQuestions());
+documentDesktop=new DocumentDesktop({includeArchived:()=>state.includeArchived,apply:applyProject,document:()=>{app.classList.add('document-canvas-open');state.view='document';for(const id of ['graph-view','cards-view','reading-view','creative-view','inspector'])get(id).hidden=true;graph?.setActive(false);get('view-title').textContent='策划案';document.querySelectorAll('.main-nav [data-view]').forEach(b=>b.classList.toggle('active',(b as HTMLElement).dataset.view==='document'));},graph:(mode,id)=>{app.hidden=false;setView('graph');if(mode)setGraphMode(mode);if(id)enterAnalysis(id);},history:()=>void historyPanel.open().catch(reportProjectError),connections:()=>get('llm-connection').click(),proposals:()=>void collaborationPanel.open('proposals'),legacyAction:detail=>{documentDesktop!.root.hidden=true;app.hidden=false;setView('creative');void creativeWorkspace?.handle(detail).catch(reportProjectError);}});
+// 从星图或卡片库进入策问时仅临时改变主视图；退出恢复原视图与仍挂载的滚动位置。
+setConnectorTakeoverGuard(()=>!documentDesktop?.hasUnsavedChanges&&!editingSession?.count&&!editingSession?.busy&&!editingSession?.canUndo);
+initializeConnectorPanel();
+if(projectSnapshot)onConnectorProject(projectSnapshot);
+/** 配对后重新取得真实项目路径与正式快照，再释放旧订阅以连接本机事件服务。 */
+window.addEventListener('cewen:connector-paired',event=>{const session=(event as CustomEvent<ConnectorSession>).detail;if(projectSnapshot?.project.id!==session.projectId)return;disposeLive?.();disposeLive=undefined;liveProject='';void readProject(session.projectId).then(snapshot=>{if(projectSnapshot?.project.id===session.projectId)applyProject(snapshot);}).catch(reportProjectError);});
+documentDesktop.setReadingReturnFactory(()=>{const view=state.view;return ()=>{app.hidden=false;setView(view);};});
+/** 保留原面板骨架，把重复品牌行和项目工具行合入紧凑应用栏。 */
+const titleContent=document.querySelector('.desktop-titlebar-content');
+if(titleContent){
+  titleContent.prepend(document.querySelector('.application-bar .brand')!);
+  titleContent.append(document.querySelector('.application-actions')!);
+}
+const projectMore=document.createElement('button');projectMore.className='secondary-button project-more';projectMore.textContent='项目 ⋯';
+const compactActions=[['edit-document','编辑当前文档'],['project-statistics','项目统计'],['project-history','版本历史'],['organize-project','整理项目'],['project-inquiry','问询项目'],['project-exchange','导入与导出'],['refresh-project','重新扫描文件']];
+projectMore.onclick=()=>showAppMenu(compactActions.map(([id,label])=>({label,run:()=>get(id).click()})),projectMore);
+document.querySelector('.project-toolbar')!.append(projectMore);
+for(const [id] of compactActions)get(id).classList.add('compact-project-action');
 app.hidden=true;
 window.addEventListener('cewen:relation-preview',e=>{if(documentDesktop)documentDesktop.root.hidden=true;setView('graph');enterAnalysis((e as CustomEvent<string>).detail);});
 window.addEventListener('cewen:open-project',e=>void documentDesktop!.open((e as CustomEvent<ProjectSnapshot>).detail).catch(reportProjectError));
 window.addEventListener('cewen:request-save-as',()=>void documentDesktop!.saveAs().catch(reportProjectError));
 document.querySelectorAll<HTMLElement>('[data-view="creative"],[data-view="quest"],[data-view="animatic"]').forEach(el=>el.remove());
 
-if(projectSnapshot)void documentDesktop.open(projectSnapshot).catch(reportProjectError);
+if(projectSnapshot)void documentDesktop.open(projectSnapshot,false,startupLoading).catch(reportProjectError).finally(()=>{startupLoading?.finish();startupLoading=undefined;});
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
 let refreshing = false;
 const scan = () => { if (refreshing || !projectSnapshot || document.hidden || documentDesktop?.isHome || isTransientProject(projectSnapshot.project.id)) return; refreshing = true; void refreshProject().catch(reportProjectError).finally(() => { refreshing = false; }); };

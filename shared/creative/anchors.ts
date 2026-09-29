@@ -65,7 +65,7 @@ export function resolveAnchor(snapshot: ProjectSnapshot, input: unknown): Resolv
   if (anchor.blockId) {
     const nodes = fromMarkdown(doc.text).children;
     const marker = `<!-- cewen:block ${anchor.blockId} -->`;
-    const matches = nodes.map((n, i) => ({ n, i })).filter(({ n }) => n.type === 'html' && n.value.trim() === marker);
+    const matches = nodes.map((n, i) => ({ n, i })).filter(({ n }) => n.type === 'html' && (n.value.trim() === marker || n.value.trim().startsWith(`<!-- cewen:block ${anchor.blockId} parent=`)));
     if (matches.length > 1) return { ...base, state: 'ambiguous', reason: '块身份重复，请人工重定位。' };
     if (matches.length === 1) {
       const next = nodes[matches[0].i + 1];

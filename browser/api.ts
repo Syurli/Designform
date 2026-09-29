@@ -8,10 +8,15 @@ import { ProjectService } from '../server/projects.ts';
 import { ProjectError } from '../server/files.ts';
 import { initializeFilesystem,ensureExampleTemplate } from './platform.ts';
 import type { CommitRequest, DocumentDraft, ProjectSnapshot } from '../shared/model.ts';
+import { connectorRoute, connectorFetch, prepareConnectorSnapshot, latestConnectorSession, connectorSession, connectorAssetUrl } from './connector';
 
 let service: ProjectService | undefined;
 /** 所有正文操作均在本机执行；不向托管网站发送策划内容。 */
 export async function browserApi(route: string, value?: unknown, temporary?: ProjectService): Promise<unknown> {
+  const connected = !temporary && connectorRoute(route, value !== undefined);
+  if (connected) { const response = await connectorFetch(connected, route, { method: value === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) }); const result = await response.json(); if (!response.ok || result.error) throw Object.assign(new Error(result.error?.message ?? '本项目服务已断开。'), result.error); return prepareConnectorSnapshot(result); }
+  // 接管后的页面不能再通过浏览器项目服务创建第二个文件写入者；示例临时服务不受影响。
+  if (!temporary && latestConnectorSession()) throw new ProjectError('CONNECTOR_PROJECT_ONLY', '本机服务已接管此页面。请在另一个网页创建或打开其他项目；本项目协作继续运行。');
   if (!temporary) { await initializeFilesystem(); service ??= new ProjectService('/app/projects'); }
   const activeService = temporary ?? service!;
   const url = new URL(route, location.origin), input = (value ?? {}) as Record<string, unknown>;
@@ -22,7 +27,7 @@ export async function browserApi(route: string, value?: unknown, temporary?: Pro
   if (url.pathname === '/api/creative-project') return prepareSnapshot(await createPresetProject(activeService,input), activeService);
   if (url.pathname === '/api/creative-capabilities') return new CreativeService(activeService).capabilities();
   if (url.pathname === '/api/connections') return { connections: [], heartbeatTimeoutMs: 35000 };
-  if (url.pathname === '/api/integration') return { mode: 'web' };
+  if (url.pathname === '/api/integration') return { mode: 'web', launcher: '当前项目/.cewen/connector/runtime/策问MCP.cmd', guide: '当前项目/.cewen/connector/使用说明.md', deployment: '环境包就绪后，将当前项目 .cewen/connector/connector.zip 解压到同级 runtime 子目录，再运行 runtime/启动接入.cmd；MCP 入口为 runtime/策问MCP.cmd，无需手填 JSON。' };
   if (url.pathname === '/api/projects') {
     if (!['blank','basic','example'].includes(str('kind'))) throw new ProjectError('INVALID_TEMPLATE','请选择有效模板。');
     const directory = str('directory');
@@ -77,9 +82,10 @@ export async function browserApi(route: string, value?: unknown, temporary?: Pro
   return result;
 }
 const assetUrls = new Map<string, { hash: string; url: string }>();
-export function browserAssetUrl(snapshot: ProjectSnapshot, filename: string) { return assetUrls.get(`${snapshot.project.id}:${snapshot.historical ? snapshot.revision : 'current'}:${filename}`)?.url ?? ''; }
+export function browserAssetUrl(snapshot: ProjectSnapshot, filename: string) { if (connectorSession(snapshot.project.id)) return connectorAssetUrl(snapshot.project.id, filename, snapshot.historical ? snapshot.revision! : 'current'); return assetUrls.get(`${snapshot.project.id}:${snapshot.historical ? snapshot.revision : 'current'}:${filename}`)?.url ?? ''; }
 /** 附件创建本机 Blob URL；哈希未变时复用，不通过 HTTP 上传或读取。 */
 export async function prepareSnapshot(snapshot: ProjectSnapshot, activeService = service!) {
+  if (connectorSession(snapshot.project.id)) return prepareConnectorSnapshot(snapshot);
   for (const [filename, hash] of Object.entries(snapshot.files ?? {})) {
     if (!filename.startsWith('docs/assets/')) continue;
     const key = `${snapshot.project.id}:${snapshot.historical ? snapshot.revision : 'current'}:${filename}`, cached = assetUrls.get(key);
@@ -95,6 +101,8 @@ export async function prepareSnapshot(snapshot: ProjectSnapshot, activeService =
 
 /** 新媒体延迟创建 Blob；同一不可变哈希在页面中只缓存一份。 */
 export async function loadBrowserMedia(snapshot: ProjectSnapshot, filename: string) {
+  const bridge = connectorSession(snapshot.project.id);
+  if (bridge) { const response = await connectorFetch(bridge, `/api/projects/${snapshot.project.id}/asset?path=${encodeURIComponent(filename)}${snapshot.historical ? `&revision=${encodeURIComponent(snapshot.revision!)}` : ''}`); if (!response.ok) throw new ProjectError('ASSET_FAILED', '本项目附件读取失败。'); return URL.createObjectURL(await response.blob()); }
   await initializeFilesystem(); service ??= new ProjectService('/app/projects');
   const hash = snapshot.media?.[filename] ?? snapshot.files?.[filename];
   if (!hash) throw new ProjectError('MISSING_ASSET','附件不在当前快照的媒体清单中');
@@ -105,6 +113,8 @@ export async function loadBrowserMedia(snapshot: ProjectSnapshot, filename: stri
   const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:media.mime})); assetUrls.set(key,{hash,url}); return url;
 }
 export async function uploadBrowserMedia(id: string, file: File, input: Record<string,unknown>) {
+  const bridge = connectorSession(id);
+  if (bridge) { const query = new URLSearchParams({requestId:String(input.requestId ?? ''),name:file.name,permission:String(input.permission ?? ''),durationMs:String(input.durationMs ?? 0)}); const response = await connectorFetch(bridge, `/api/projects/${id}/media-upload?${query}`, {method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}); const result = await response.json(); if(!response.ok||result.error)throw Object.assign(new Error(result.error?.message ?? '媒体上传失败。'),result.error); await prepareConnectorSnapshot(result.snapshot); return result; }
   await initializeFilesystem(); service ??= new ProjectService('/app/projects');
   const result = await new CreativeService(service).registerMedia(id,{...input,name:file.name},Buffer.from(await file.arrayBuffer()));
   await prepareSnapshot(result.snapshot); return result;
@@ -116,6 +126,7 @@ const MEDIA_CACHE_LIMIT = 64*1024*1024;
 function trimMediaCache(){let size=[...mediaLeases.values()].reduce((n,v)=>n+v.bytes,0);for(const [key,v] of [...mediaLeases].sort((a,b)=>a[1].used-b[1].used)){if(size<=MEDIA_CACHE_LIMIT)break;if(v.refs)continue;URL.revokeObjectURL(v.url);mediaLeases.delete(key);size-=v.bytes;}}
 /** 同一不可变媒体在当前稿与历史间复用；有界缓存不撤销仍在播放的资源。 */
 export async function acquireBrowserMedia(snapshot:ProjectSnapshot,filename:string){
+ if(connectorSession(snapshot.project.id)){const url=await loadBrowserMedia(snapshot,filename);return {url,release:()=>URL.revokeObjectURL(url)};}
  await initializeFilesystem();service??=new ProjectService('/app/projects');
  const hash=snapshot.media?.[filename]??snapshot.files?.[filename];if(!hash)throw new ProjectError('MISSING_ASSET','媒体不在此修订的清单中');
  const key=`${snapshot.project.id}:${hash}`;let entry=mediaLeases.get(key);

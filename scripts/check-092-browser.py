@@ -47,8 +47,9 @@ with sync_playwright() as playwright:
         stored_before = page.evaluate('Object.keys(localStorage).sort()')
         example('film')
         expect(page.locator('[data-project-title]')).to_contain_text('最后一盏灯')
-        assert page.locator('.document-tree-row').count() == 4
-        page.locator('.document-tree-row', has_text='分镜与排演').click()
+        expect(page.locator('.document-tree .project-directory-category-row')).to_have_count(3)
+        page.locator('[aria-label=搜索项目文档]').fill('分镜与排演')
+        page.locator('.document-tree .project-directory-row', has_text='分镜与排演').click()
         page.locator('.document-tab-content:not([hidden]) [data-sequence-play]').click()
         expect(page.locator('[data-tutorial=animatic-player]')).to_be_visible()
         start = page.locator('[data-clock]').inner_text()
@@ -103,7 +104,7 @@ with sync_playwright() as playwright:
             doc = next(d for d in snapshot['documents'] if 'id: '+identity+'\n' in d['text'].replace('\r\n','\n'))
             # 搜索实际目录并通过可见条目打开，避免专用面板的旧导航事件。
             page.locator('[aria-label=搜索项目文档]').fill(doc['title'])
-            page.locator('.document-tree-row[data-doc="'+doc['id']+'"]').click()
+            page.locator('.document-tree .project-directory-row[data-id="'+doc['id']+'"]').click()
             return page.locator('.document-tab-content:not([hidden])')
         active = open_object('check-use-combat')
         active.locator('[data-object-edit="check-use-combat"]').click()
@@ -135,7 +136,7 @@ with sync_playwright() as playwright:
         expect(page.locator('#analysis-toolbar')).to_be_visible()
         page.screenshot(path=str(out/'092-retained-relations.png'))
         page.locator('.main-nav [data-view=document]').click()
-        expect(page.locator('.document-tree .document-color').first).to_be_visible()
+        expect(page.locator('.document-tree .project-directory-category').first).to_be_visible()
         active=open_object('check-quest0')
         active.locator('[data-quest-open="check-quest0"]').click()
         expect(page.locator('[data-tutorial=quest-workspace]')).to_be_visible()
@@ -162,7 +163,7 @@ with sync_playwright() as playwright:
         page.keyboard.press('Control+s')
         expect(page.locator('.document-status')).to_contain_text('已保存', timeout=60000)
         page.locator('[aria-label=搜索项目文档]').fill('0.9.2 中文角色验收')
-        row=page.locator('.document-tree-row',has_text='0.9.2 中文角色验收').last
+        row=page.locator('.document-tree .project-directory-row',has_text='0.9.2 中文角色验收').last
         row.click(button='right')
         bounds=page.locator('[role=menu]').bounding_box()
         assert bounds['y']+bounds['height']<=960
@@ -197,7 +198,7 @@ with sync_playwright() as playwright:
         disk=api('/api/projects/'+project['id'])
         assert '尚未保存的个人预设草稿' not in next(d['text'] for d in disk['documents'] if d['id']==role['id'])
         page.locator('[aria-label=搜索项目文档]').fill(role['title'])
-        page.locator('.document-tree-row[data-doc="'+role['id']+'"]').click()
+        page.locator('.document-tree .project-directory-row[data-id="'+role['id']+'"]').click()
         expect(page.locator('.document-properties [name=purpose]')).to_have_value('尚未保存的个人预设草稿')
         page.keyboard.press('Control+s')
         expect(page.locator('.document-status')).to_contain_text('已保存',timeout=60000)

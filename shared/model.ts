@@ -3,8 +3,6 @@ export const DOCUMENT_FORMAT = 2;
 export const SUPPORTED_DOCUMENT_FORMATS = [1, 2] as const;
 /** 文件交换与本地接口共用的协议号。 */
 export const PROTOCOL_VERSION = 1;
-/** 总纲以下的公开分类与文档层级上限，阅读时旧资料不会被自动改写。 */
-export const HIERARCHY_MAX_DEPTH = 5;
 
 /** 运行期连接信息不进入项目正文、版本或私人工作区。模型名称由客户端明确提供。 */
 export interface LlmConnection {
@@ -124,6 +122,11 @@ export interface ProjectDocument {
   hash: string;
   /** 文档自定义颜色；未设置时继承分类色。 */
   color?: string;
+  /** 首次可确认版本和最近内容修改版本的时间；不在读取时改写文档头部。 */
+  createdAt?: string;
+  updatedAt?: string;
+  /** 最近一次内容变更的可确认版本标签；不将项目版本冒充文档变更版本。 */
+  revisionLabel?: string;
 }
 
 /** 所有知识空间组件接收同一个显式数据对象。 */
@@ -139,6 +142,8 @@ export interface KnowledgeData {
 
 /** 当前磁盘投影；有诊断时仍保留可读原文，不伪称同步无误。 */
 export interface ProjectSnapshot extends KnowledgeData {
+  /** 实时工作稿与正式快照分离；写入只能通过所属协作任务完成。 */
+  collaboration?: import('./collaboration.ts').CollaborationState;
   project: ProjectInfo;
   documents: ProjectDocument[];
   diagnostics: Diagnostic[];

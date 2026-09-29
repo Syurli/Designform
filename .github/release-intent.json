@@ -1,5 +1,5 @@
 {
-  "version": "0.9.2",
-  "channel": "prerelease",
-  "reason": "用户明确要求本轮合并、部署 Pages 并发布 Windows 包，随后手动验收。"
+  "version": "0.9.3",
+  "channel": "stable",
+  "reason": "用户明确要求当前优化提交 main，部署 Pages 并发布 0.9.3 正式 Windows 版本。"
 }

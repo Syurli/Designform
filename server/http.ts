@@ -12,13 +12,17 @@ import { CreativeService } from './creative/service.ts';
 import { detectMedia, MEDIA_LIMIT } from '../shared/creative/media.ts';
 import { ConnectionRegistry } from './connections.ts';
 import { chooseNativeDirectory } from './native-dialog.ts';
+import { installedFonts } from './system-fonts.ts';
+import { CollaborationService } from './collaboration.ts';
+import type { ProjectSnapshot } from '../shared/model.ts';
 
 /** API 生命周期由本地宿主管理；开发、浏览器和桌面复用同一服务实现。 */
-export function createProjectApi(options: { home?: string; templateRoot?: string; root?: string; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string } = {}) {
+export function createProjectApi(options: { home?: string; templateRoot?: string; root?: string; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string; sessionToken?: string; projectId?: string } = {}) {
   const service = new ProjectService(options.home ?? process.env.CEWEN_HOME ?? path.join(os.homedir(), 'Documents', '策问工作区', '开发沙盒'), options.templateRoot);
   const creative = new CreativeService(service);
-  const token = randomBytes(32).toString('hex');
+  const token = options.sessionToken ?? randomBytes(32).toString('hex');
   const connections = new ConnectionRegistry();
+  const collaboration = new CollaborationService(service, id => connections.read().connections.some(connection => connection.id === id && connection.status === 'connected'));
 
   /** 有界请求体避免错误客户端把整个资料库塞入一个正文提交。 */
   async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -35,9 +39,16 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       return value as Record<string, unknown>;
     } catch { throw new ProjectError('INVALID_JSON', '请求内容不是有效 JSON 对象。'); }
   }
-  function send(response: ServerResponse, value: unknown, status = 200) {
+  function sendRaw(response: ServerResponse, value: unknown, status = 200) {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     response.end(JSON.stringify(value));
+  }
+  /** 所有当前快照携带同一份服务端任务锁，避免个别保存入口返回可编辑的旧状态。 */
+  function send(response: ServerResponse, value: unknown, status = 200) {
+    const candidate = value as { project?: unknown; documents?: unknown; snapshot?: ProjectSnapshot } | null;
+    const snapshot = candidate?.project && Array.isArray(candidate.documents) ? value as ProjectSnapshot : candidate?.snapshot;
+    if (!snapshot) { sendRaw(response, value, status); return; }
+    void collaboration.decorate(snapshot).then(() => sendRaw(response, value, status)).catch(error => sendRaw(response, { error: { code: 'WORK_STATE_ERROR', message: error instanceof Error ? error.message : String(error) } }, 409));
   }
   const required = (value: unknown, name: string) => {
     if (typeof value !== 'string' || !value.trim()) throw new ProjectError('INVALID_REQUEST', `${name}不能为空。`);
@@ -53,12 +64,22 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       const origin = request.headers.origin;
       if ((origin && origin !== `http://${authority}`) || request.headers['sec-fetch-site'] === 'cross-site') throw new ProjectError('ORIGIN_DENIED', '请求来源与本地工作台不一致。');
       const url = new URL(request.url, `http://${authority}`);
+      // 独立连接器仅服务启动器核实过的一个项目；原生 MCP 端口也不能越过此边界。
+      if (options.projectId) {
+        const scoped = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(.*))?$/.exec(url.pathname);
+        const globalRead = request.method === 'GET' && ['/api/session','/api/projects','/api/integration','/api/connections','/api/creative-capabilities','/api/fonts','/api/document-presets'].includes(url.pathname);
+        const heartbeat = url.pathname === '/api/connections' && request.method === 'POST';
+        if (!globalRead && !heartbeat && (!scoped || scoped[1] !== options.projectId || ['copy','delete','forget','export','import-plan','upgrade-copy'].includes(scoped[2]))) throw new ProjectError('PROJECT_SCOPE_DENIED', '此连接器仅允许访问已配对项目。');
+      }
       if (url.pathname === '/api/session' && request.method === 'GET') {
         response.setHeader('Set-Cookie', `cewen=${token}; HttpOnly; SameSite=Strict; Path=/api/`);
-        send(response, { protocolVersion: PROTOCOL_VERSION, token, ...await service.list() }); return true;
+        const listed = await service.list();
+        send(response, { protocolVersion: PROTOCOL_VERSION, token, ...listed, ...(options.projectId ? { projects: listed.projects.filter(project => project.id === options.projectId) } : {}) }); return true;
       }
       const imageRead = request.method === 'GET' && /\/asset$/.test(url.pathname) && request.headers.cookie?.split(';').some(cookie => cookie.trim() === `cewen=${token}`);
       if (request.headers['x-cewen-session'] !== token && !imageRead) throw new ProjectError('SESSION_REQUIRED', '连接已更新，请重新连接本地工作台。');
+      // 字体目录属于本机只读能力，与项目正文和字体文件内容隔离。
+      if (url.pathname === '/api/fonts' && request.method === 'GET') { send(response, await installedFonts(url.searchParams.get('refresh') === '1')); return true; }
       if (url.pathname === '/api/choose-directory' && request.method === 'POST') {
         const input = await body(request); send(response, { path: await (options.chooseDirectory ?? chooseNativeDirectory)(typeof input.initial === 'string' ? input.initial : '') }); return true;
       }
@@ -72,13 +93,35 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       if (url.pathname === '/api/connections' && request.method === 'POST') { send(response, connections.update(await body(request))); return true; }
       if (url.pathname === '/api/document-presets') { await service.list(); send(response, await documentPresets(service.home, request.method === 'POST' ? await body(request) : undefined)); return true; }
       if (url.pathname === '/api/projects/save-as' && request.method === 'POST') { send(response,await service.saveAs(await body(request) as never));return true; }
-      if (url.pathname === '/api/projects' && request.method === 'GET') { send(response, await service.list()); return true; }
+      if (url.pathname === '/api/projects' && request.method === 'GET') { const listed = await service.list(); send(response, { ...listed, ...(options.projectId ? { projects: listed.projects.filter(project => project.id === options.projectId) } : {}) }); return true; }
       if (url.pathname === '/api/projects' && request.method === 'POST') {
         const input = await body(request);
         if (!['blank', 'basic', 'example'].includes(String(input.kind))) throw new ProjectError('INVALID_TEMPLATE', '请选择空白、基础总纲或虚构示例。');
         send(response, await service.create(required(input.name, '项目名称'), input.kind as 'blank' | 'basic' | 'example', typeof input.directory === 'string' && input.directory ? input.directory : undefined, input.setup as Parameters<ProjectService['create']>[3])); return true;
       }
       if (url.pathname === '/api/projects/open' && request.method === 'POST') { const input = await body(request); const project = await service.open(required(input.path, '项目目录')); send(response, await service.read(project.id)); return true; }
+      const workMatch = /^\/api\/projects\/([A-Za-z0-9_-]+)\/work-(begin|documents|write|finish|status|control|events)$/.exec(url.pathname);
+      if (workMatch) {
+        const [, id, operation] = workMatch;
+        if (operation === 'status' && request.method === 'GET') { send(response, await collaboration.status(id, url.searchParams.get('taskId') ?? undefined, url.searchParams.get('includeDrafts') === '1')); return true; }
+        if (operation === 'events' && request.method === 'GET') {
+          await service.collaborationRoot(id);
+          response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+          response.flushHeaders();
+          const unsubscribe = collaboration.subscribe(id, Number(url.searchParams.get('cursor') ?? 0), event => response.write(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`));
+          const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15000); heartbeat.unref();
+          response.once('close', () => { clearInterval(heartbeat); unsubscribe(); }); return true;
+        }
+        if (request.method === 'POST' && !['status','events'].includes(operation)) {
+          const input = await body(request), connectionId = operation === 'control' && input.connectionId === undefined ? undefined : required(input.connectionId, '协作连接身份');
+          if (operation === 'begin') send(response, await collaboration.begin(id, connectionId!, input as never));
+          if (operation === 'documents') send(response, await collaboration.documents(id, connectionId!, input as never));
+          if (operation === 'write') send(response, await collaboration.write(id, connectionId!, input as never));
+          if (operation === 'finish') send(response, await collaboration.finish(id, connectionId!, input as never));
+          if (operation === 'control') send(response, await collaboration.control(id, connectionId, input as never));
+          return true;
+        }
+      }
       const creativeMatch = /^\/api\/projects\/([A-Za-z0-9_-]+)\/(creative|media-upload|upgrade-copy|comfy)$/.exec(url.pathname);
       if (creativeMatch && request.method === 'POST') {
         const [, id, operation] = creativeMatch;
@@ -160,5 +203,5 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
     }
     return true;
   }
-  return { service, creative, handle };
+  return { service, creative, collaboration, handle };
 }

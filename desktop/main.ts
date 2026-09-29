@@ -3,7 +3,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startHost } from '../server/host.ts';
-import { writeBytes } from '../server/files.ts';
+import { writeBytes, resolveInside } from '../server/files.ts';
 
 /** 原生边界仅提供固定菜单动作，文档操作仍经过统一的本机项目服务。 */
 let host: Awaited<ReturnType<typeof startHost>> | undefined;
@@ -34,6 +34,8 @@ else {
     // 自绘标题栏负责拖动与菜单，原生最小化、最大化和关闭按钮使用主题覆盖色。
     window = new BrowserWindow({ width: 1500, height: 960, minWidth: 850, minHeight: 650, title: '策问 Designform', icon: iconPath, backgroundColor: colors().color, show: true, titleBarStyle: 'hidden', titleBarOverlay: colors(), webPreferences: { preload: path.join(runtimeRoot, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true } });
     window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) void shell.openExternal(url); return { action: 'deny' }; });
+    // Windows 侧键可能只产生 app-command；导航仍由页面历史恢复，不卸载未保存的文档。
+    window.on('app-command',(_event,command)=>{if(command==='browser-backward'||command==='browser-forward')window?.webContents.send('cewen:navigate-history',command==='browser-backward'?'back':'forward');});
     window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== host!.url) event.preventDefault(); });
     // Electron 默认会静默阻止 beforeunload。明确让用户返回保存或放弃，避免关闭按钮无反应。
     window.webContents.on('will-prevent-unload', event => {
@@ -64,6 +66,14 @@ else {
     };
     /** 仅本窗口主框架的同源页面能访问桥接，嵌入页和外部链接都不能调用。 */
     const authorized = (event: Electron.IpcMainInvokeEvent) => event.sender === window?.webContents && event.senderFrame === window.webContents.mainFrame && new URL(event.senderFrame.url).origin === host!.url;
+    /** 文件位置由已登记项目的文档身份解析，并继续核对目录与符号链接边界。 */
+    ipcMain.handle('cewen:reveal-document', async (event, projectId: unknown, documentId: unknown) => {
+      if (!authorized(event) || typeof projectId !== 'string' || typeof documentId !== 'string') throw new Error('无效的文件位置请求。');
+      const snapshot = await host!.service.read(projectId, false), document = snapshot.documents.find(item => item.id === documentId);
+      if (!document) throw new Error('请先保存文档，再打开文件所在位置。');
+      const filename = await resolveInside(snapshot.project.path, document.path);
+      shell.showItemInFolder(filename);
+    });
     ipcMain.handle('cewen:theme', event => { if (!authorized(event)) throw new Error('无效的页面来源。'); return theme; });
     ipcMain.handle('cewen:set-theme', async (event, value: unknown) => { if (!authorized(event) || (value !== 'dark' && value !== 'light')) throw new Error('无效的主题请求。'); setTheme(value); await settingsWrite; return value; });
     ipcMain.handle('cewen:command', async (event, command: unknown) => {

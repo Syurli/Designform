@@ -77,19 +77,19 @@ export class KnowledgeGraph {
   private layoutPrefix(mode=this.mode){
     if(mode==='galaxy')return 'galaxy-v2';
     if(mode==='network')return `network:${this.direction}:${this.selected}`;
-    if(mode==='layers')return `layers-v5:${this.direction}:${this.layersScope}`;
-    // 筛选后的脑图重新压紧可见层级，同时不覆盖默认脑图的手工摆放。
+    if(mode==='layers')return `layers-v7:${this.direction}:${this.layersScope}`;
+    // 筛选后的脑图保留真实深度，同一范围独立保存手工摆放。
     const scope=JSON.stringify([this.group,this.query,this.selected,this.directOnly,this.scopeIds,this.detailedGraph,this.includeArchived]);
     let hash=2166136261;for(const char of scope)hash=Math.imul(hash^char.charCodeAt(0),16777619);
-    return `mindmap-v5:${this.direction}:${(hash>>>0).toString(36)}`;
+    return `mindmap-v6:${this.direction}:${(hash>>>0).toString(36)}`;
   }
   private layoutKey(node:KnowledgeNode){return `${this.layoutPrefix()}:${node.id}:${node.group}`;}
   /** 同一场景内切换阅读方向，横纵坐标分别记忆，保留当前帧连续过渡。 */
-  setDirection(direction:GraphDirection){if(this.direction===direction)return;this.direction=direction;if(this.mode!=='galaxy')this.setMode(this.mode);}
+  setDirection(direction:GraphDirection){if(this.direction===direction)return;this.interaction?.flush();this.direction=direction;if(this.mode!=='galaxy')this.setMode(this.mode);}
   /** 从快照恢复时替换旧位置，撤销不会留下刚才挤开的节点。 */
   restoreEditingLayout(value:unknown){this.layoutMemory.clear();this.restoreLayout(value);}
   togglePin(id:string){const node=this.stars.get(id);if(!node||id===this.coreId())return;const key=this.layoutKey(node.data),row=this.layoutMemory.get(key);this.layoutMemory.set(key,{group:node.data.group,point:node.point.position.clone(),pinned:!row?.pinned});this.labelsDirty=true;}
-  resetPositions(){const prefix=`${this.layoutPrefix()}:`;for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
+  resetPositions(){this.interaction?.flush();const prefix=`${this.layoutPrefix()}:`;for(const key of this.layoutMemory.keys())if(key.startsWith(prefix))this.layoutMemory.delete(key);this.setMode(this.mode);}
 
   private camera = new THREE.PerspectiveCamera(42, 1, 1, 8000);
   private renderer: THREE.WebGLRenderer;
@@ -292,6 +292,7 @@ export class KnowledgeGraph {
     this.container.addEventListener('pointerdown',this.contextDown);
     this.container.addEventListener('pointermove',this.contextMove);
     this.interaction=new GraphInteraction({container:this.container,canvas:this.renderer.domElement,camera:this.camera,mode:()=>this.mode,direction:()=>this.direction,selected:()=>this.selected,edge:()=>this.relationIndex===null?undefined:this.data.edges[this.relationIndex],core:()=>this.coreId(),
+      structure:()=>this.data,
       nodes:()=>[...this.stars.values()].map(star=>({data:star.data,point:star.point.position,label:star.label,pinned:this.layoutMemory.get(this.layoutKey(star.data))?.pinned,visible:(this.desiredAppearance.get(star.data.id)?.point??0)>0})),
       edges:()=>this.connections.filter(c=>(this.desiredAppearance.get(c.data.source)?.point??0)>0&&(this.desiredAppearance.get(c.data.target)?.point??0)>0).map(c=>({data:c.data,points:c.points??c.curve.getPoints(40)})),
       begin:()=>{if(this.transition)this.advanceTransition(this.transition.start+this.transition.duration+1);this.controls.enabled=false;this.pointerStart=null;},
@@ -409,6 +410,7 @@ export class KnowledgeGraph {
   /** 布局是纯坐标计算。包含关系与跨系统关系均被保留，不把存在循环的图强制当成树。 */
   private layout(mode: GraphMode) {
     const result = new Map<string, THREE.Vector3>();
+    let legacyLayoutKey: string | undefined;
     const coreId = this.coreId();
     const related = this.neighbors();
     this.data.groups.forEach((group, groupIndex) => {
@@ -457,31 +459,43 @@ export class KnowledgeGraph {
     if (mode === 'layers' || mode === 'mindmap') {
       const visibleIds = new Set(this.data.nodes.filter(node => this.overviewNodeVisible(node, related, mode)).map(node => node.id));
       if (mode === 'layers') {
-        // 排序、归属或筛选改变时重新连续排布；普通点击与缩放不触发布局重排。
-        const structure = JSON.stringify([this.data.nodes.map(node => [node.id, node.title, node.group]), this.data.edges.filter(edge => edge.type === 'contains').map(edge => [edge.source, edge.target, edge.origin?.kind]), [...visibleIds]]);
+        // 排序、归属或筛选改变时按真实层级重排；无总纲时也要计入分类元数据的父子关系。
+        const nodeStructure=this.data.nodes.map(node=>[node.id,node.title,node.group]);
+        const edgeStructure=this.data.edges.filter(edge=>edge.type==='contains').map(edge=>[edge.source,edge.target,edge.origin?.kind]);
+        const structure = JSON.stringify([nodeStructure, this.data.groups.map(group=>[group.id,group.parent]), edgeStructure, [...visibleIds]]);
         let hash = 2166136261;
         for (const char of structure) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
         this.layersScope = (hash >>> 0).toString(36);
+        // v6 曾把同层文档并排铺开；只迁移明确固定的节点，其余坐标重新生成分类列与连续内容序列。
+        legacyLayoutKey=`layers-v6:${this.direction}:${this.layersScope}`;
         layersLayout(this.data, coreId, this.direction, visibleIds, this.hierarchyParent).forEach((point, id) => result.set(id, point));
       } else hierarchyLayout(this.data, coreId, this.direction, false, this.hierarchyParent, visibleIds).forEach((point,id)=>result.set(id,point));
     }
     if (mode === 'network') {this.analysisLayout(result);this.data.nodes.forEach(node=>{const saved=this.layoutMemory.get(`${this.layoutPrefix(mode)}:${node.id}:${node.group}`);if(saved)result.set(node.id,saved.point.clone());});}
     else {
       const layoutKey = this.layoutPrefix(mode);
+      if(mode==='mindmap')legacyLayoutKey=layoutKey.replace('mindmap-v6:','mindmap-v5:');
       const occupied = [...this.layoutMemory].filter(([key]) => key.startsWith(`${layoutKey}:`)).map(([,value]) => value.point);
+      // 在分配新槽位前就计入需要迁移的固定位置，后添加的旧固定节点也不会与新节点重叠。
+      if(legacyLayoutKey)for(const [key,row] of this.layoutMemory)if(key.startsWith(`${legacyLayoutKey}:`)&&row.pinned)occupied.push(row.point);
       this.data.nodes.forEach(node => {
         if((mode==='mindmap'||mode==='layers')&&!this.overviewNodeVisible(node,related,mode)){
           result.set(node.id,(result.get(node.documentId)??result.get(coreId??''))?.clone()??new THREE.Vector3());
           return;
         }
-        const key = `${layoutKey}:${node.id}:${node.group}`, saved = this.layoutMemory.get(key)??(mode==='galaxy'?[...this.layoutMemory].find(([k])=>k.startsWith(`${layoutKey}:${node.id}:`))?.[1]:undefined);
+        const key = `${layoutKey}:${node.id}:${node.group}`, currentSaved=this.layoutMemory.get(key);
+        const legacyPinKey=legacyLayoutKey?`${legacyLayoutKey}:${node.id}:${node.group}`:undefined;
+        const legacyPinned=legacyPinKey?this.layoutMemory.get(legacyPinKey):undefined;
+        const saved = currentSaved??(legacyPinned?.pinned?legacyPinned:undefined)??(mode==='galaxy'?[...this.layoutMemory].find(([k])=>k.startsWith(`${layoutKey}:${node.id}:`))?.[1]:undefined);
+        // 固定位置一次迁入新键后移除旧副本，重置摆放时不会再次恢复已经清除的旧固定状态。
+        if(legacyPinKey&&legacyPinned?.pinned)this.layoutMemory.delete(legacyPinKey);
         if ((mode === 'galaxy' || mode === 'layers' || mode === 'mindmap') && node.id === this.coreId()) { result.set(node.id, new THREE.Vector3()); this.layoutMemory.set(key, { group: node.group, point: new THREE.Vector3() }); return; }
         if (saved) {
           const point=saved.point.clone();
           // 导入或恢复的旧坐标同样遵守层级边界，不能让缓存覆盖总纲最高层。
           if(mode==='layers'){const limit=node.kind==='system'?-105:-210;if(this.direction==='vertical')point.y=Math.min(point.y,limit);else point.x=Math.max(point.x,-limit);}
           result.set(node.id,point);
-          if(!point.equals(saved.point))this.layoutMemory.set(key,{...saved,point});
+          if(!currentSaved||!point.equals(saved.point))this.layoutMemory.set(key,{...saved,point});
         }
         else {
           const point = result.get(node.id)??new THREE.Vector3();
@@ -922,9 +936,11 @@ export class KnowledgeGraph {
   /** 选择、查询与分组过滤只影响可见性，始终保留稳定的节点 ID 和布局坐标。 */
   setState(state: { selected: string | null; group: string | null; query: string; directOnly: boolean; labelsAll: boolean; paused: boolean; relationIndex?: number | null; scopeIds?: string[] | null; includeArchived?: boolean; detailedGraph?: boolean }, options: { deferLayout?: boolean; preserveCamera?: boolean } = {}) {
     const detailChanged=this.detailedGraph!== (state.detailedGraph===true) || this.includeArchived!== (state.includeArchived===true) || JSON.stringify(this.scopeIds)!==JSON.stringify(state.scopeIds??null);
-    this.detailedGraph = state.detailedGraph === true; this.scopeIds = state.scopeIds ?? null; this.includeArchived = state.includeArchived === true;
     const scopeChanged = detailChanged || this.group !== state.group || this.query !== state.query.trim().toLowerCase() || this.directOnly !== state.directOnly || (state.directOnly && this.selected !== state.selected);
     const focusChanged = this.selected !== state.selected;
+    // 先在旧方向及旧筛选键中完成弹性手势，再切换状态，避免将旧坐标误记到新范围。
+    if(scopeChanged||focusChanged)this.interaction?.flush();
+    this.detailedGraph = state.detailedGraph === true; this.scopeIds = state.scopeIds ?? null; this.includeArchived = state.includeArchived === true;
     this.selected = state.selected;
     this.group = state.group;
     this.query = state.query.trim().toLowerCase();
@@ -1323,7 +1339,7 @@ export class KnowledgeGraph {
   };
   /** 右键拖动仍交给镜头，只有未移动的点击才打开上下文菜单。 */
   private contextDown = (event: PointerEvent) => {if(event.button===2)this.contextStart={x:event.clientX,y:event.clientY,moved:false};};
-  private contextMove = (event: PointerEvent) => {if(this.contextStart&&Math.hypot(event.clientX-this.contextStart.x,event.clientY-this.contextStart.y)>5)this.contextStart.moved=true;};
+  private contextMove = (event: PointerEvent) => {if(this.contextStart&&Math.hypot(event.clientX-this.contextStart.x,event.clientY-this.contextStart.y)>=inputPreferences().dragThreshold)this.contextStart.moved=true;};
   private contextMenu = (event: MouseEvent) => {
     event.preventDefault();const start=this.contextStart;this.contextStart=undefined;if(start?.moved)return;
     let id=(event.target as HTMLElement).closest<HTMLElement>('[data-graph-node]')?.dataset.graphNode;
@@ -1451,3 +1467,4 @@ export class KnowledgeGraph {
     this.edgeLayer.remove();
   }
 }
+import { inputPreferences } from './input-settings';

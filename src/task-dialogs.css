@@ -1,0 +1,79 @@
+/* 任务弹窗只有内容区滚动，标题、关闭、反馈和底部操作保持可见。 */
+.desktop-task-dialog[open]{display:flex;flex-direction:column;box-sizing:border-box;max-height:calc(100dvh - 48px);overflow:hidden;padding:22px;color:var(--text-strong)}
+.desktop-task-dialog>form{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden;gap:0}
+.desktop-task-dialog>header,.desktop-task-dialog>form>header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;margin:0 0 18px}
+.desktop-task-dialog h2{margin:4px 0;font-size:24px}
+.desktop-task-dialog header small{color:var(--text-muted)}
+.desktop-task-dialog>header>button,.desktop-task-dialog>form>header>button{flex:none;width:38px;height:38px;padding:0;font-size:22px;border:1px solid var(--line-soft);border-radius:9px;background:var(--surface-raised)}
+.desktop-task-dialog .task-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:2px 4px 6px 2px;scrollbar-gutter:stable}
+.desktop-task-dialog>footer,.desktop-task-dialog>form>footer{flex:none;display:flex;align-items:center;justify-content:flex-end;gap:10px;margin:16px 0 0;padding-top:14px;border-top:1px solid var(--line-soft)}
+.desktop-task-dialog [role=status]{flex:none;margin:8px 0 0;font-size:12px;color:var(--text-body);max-height:66px;overflow:auto;white-space:pre-wrap}
+.desktop-task-dialog [role=status]:empty{display:none}
+.desktop-task-dialog .preset-picker-list{min-height:0;flex:1}
+/* 较早的长面板沿用自身滚动容器，标题栏吸附至窗口顶端。 */
+.project-dialog:not(.desktop-task-dialog):not(.writing-dialog)>.project-dialog-header{position:sticky;top:-30px;z-index:30;background:var(--surface-panel);margin:-30px -30px 18px;padding:22px 30px 16px;border-bottom:1px solid var(--line-soft)}
+.identity-dialog>form>header{position:sticky;top:-26px;z-index:30;margin:-26px -26px 20px;padding:20px 26px 14px;background:var(--surface-card);border-bottom:1px solid var(--line-soft)}
+/* 第二步利用横向空间，开场白默认占较大的半边，可展开到整个工作区。 */
+.project-wizard{width:min(1440px,calc(100vw - 48px));max-width:1440px}
+.project-wizard[data-step="1"]{height:min(940px,calc(100dvh - 48px))}
+.project-wizard:not([data-step="1"]){width:min(960px,calc(100vw - 48px))}
+.project-wizard .wizard-presets{grid-template-columns:repeat(3,minmax(0,1fr))}
+.project-wizard .wizard-presets label{cursor:pointer;background:var(--surface-card)}
+.project-wizard .wizard-presets label:has(:checked){border-color:var(--accent-strong);background:var(--surface-tint)}
+.project-wizard form>footer>small{margin-right:auto;color:var(--text-muted);font-size:12px}
+.project-wizard[data-step="1"] .task-body{display:grid;grid-template-columns:minmax(0,.45fr) minmax(0,.55fr);gap:24px;overflow:hidden;scrollbar-gutter:auto}
+.wizard-assembly{display:flex;flex-direction:column;gap:16px;min-width:0;min-height:0;overflow:auto;padding-right:10px;scrollbar-gutter:stable;overscroll-behavior:contain}
+.wizard-assembly p{margin:0;font-size:12px;line-height:1.5;color:var(--text-body)}
+.project-wizard label{font-size:13px}
+.project-wizard h3{font-size:14px;font-weight:600;margin:0 0 10px}
+.project-wizard h3 small{font-size:11px;color:var(--text-muted);font-weight:400}
+.project-wizard textarea,.project-wizard input{box-sizing:border-box;min-width:0;width:100%;padding:10px 12px;color:var(--text-strong);background:var(--surface-input);border:1px solid var(--line-soft);border-radius:8px;font:inherit}
+.project-wizard input[type=radio]{width:auto}
+.project-wizard textarea[data-field=idea]{resize:vertical;min-height:74px;max-height:160px;line-height:1.5}
+.wizard-combinations{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.wizard-combinations button{display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;padding:10px 12px;border:1px solid var(--line-soft);background:var(--surface-card);border-radius:9px;min-width:0}
+.wizard-combinations strong{font-size:13px}
+.wizard-combinations small{font-size:11px;line-height:1.4;color:var(--text-body)}
+.wizard-combinations [data-combination-mark]{font-size:10px;color:var(--accent-strong)}
+.wizard-combinations button[aria-pressed=true]{border-color:var(--accent-strong);background:var(--surface-tint)}
+.wizard-unsure{margin:9px 0 6px;font-size:12px;padding:6px 10px}
+.wizard-assembly [data-assembly-feedback]{min-height:36px;color:var(--accent-strong)}
+.wizard-facet-tabs{display:flex;gap:4px;position:sticky;top:0;z-index:2;background:var(--surface-page);padding:6px 0;border-bottom:1px solid var(--line-soft);flex:none}
+.wizard-facet-tabs button{flex:1;padding:8px 4px;font-size:12px;border:0;background:transparent;border-radius:6px;color:var(--text-body)}
+.wizard-facet-tabs [aria-selected=true]{background:var(--surface-tint);color:var(--text-strong);font-weight:600}
+.wizard-facets{display:flex;flex-direction:column;gap:16px}
+.wizard-facet-group .idea-options{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.wizard-facet-group .idea-options button{font-size:12px;padding:6px 10px;border:1px solid var(--line-soft);border-radius:7px;background:var(--surface-card)}
+.wizard-facet-group .idea-options [aria-pressed=true]{border-color:var(--accent-strong);background:var(--surface-tint);color:var(--text-strong);box-shadow:inset 3px 0 var(--accent-strong)}
+.wizard-facet-group label{font-size:11px;color:var(--text-muted)}
+.wizard-prompt{min-width:0;min-height:0;display:flex;flex-direction:column;gap:12px;background:var(--surface-card);border:1px solid var(--line-soft);border-radius:12px;padding:16px}
+.wizard-prompt>header{display:flex;justify-content:space-between;gap:12px;align-items:start;flex:none}
+.wizard-prompt>header h3{margin-bottom:4px}
+.wizard-prompt>header button{font-size:12px;flex:none;padding:7px 10px}
+.wizard-prompt small{font-size:11px;line-height:1.5;color:var(--text-muted)}
+.wizard-prompt textarea{flex:1;min-height:120px;resize:none;line-height:1.65;font-size:13px;background:var(--surface-input);overflow:auto}
+.wizard-prompt-actions{display:flex;flex-wrap:wrap;gap:8px;flex:none}
+.wizard-prompt-actions button{padding:8px 12px;font-size:12px}
+.project-wizard.is-prompt-expanded .task-body{grid-template-columns:1fr}
+.project-wizard.is-prompt-expanded .wizard-assembly{display:none}
+/* 示例卡片以学习目标和可尝试操作区分，原生单选保留键盘与读屏支持。 */
+.learning-example-dialog{width:min(1120px,calc(100vw - 48px));max-width:1120px}
+.learning-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.learning-cards .learning-card{position:relative;display:flex;flex-direction:column;gap:8px;border:1px solid var(--line-soft);border-radius:10px;padding:16px;cursor:pointer;background:var(--surface-card);font-size:12px;color:var(--text-body)}
+.learning-card input{position:absolute;top:15px;right:15px;accent-color:var(--accent-strong)}
+.learning-card-level{font-size:11px;color:var(--text-muted);padding-right:22px}
+.learning-card strong{font-size:16px;color:var(--text-strong)}
+.learning-card small{margin-top:auto;padding-top:6px;font-size:11px;line-height:1.5;color:var(--text-muted)}
+.learning-card-state{font-size:11px;color:var(--accent-strong);visibility:hidden}
+.learning-card:has(:checked){border-color:var(--accent-strong);background:var(--surface-tint);box-shadow:inset 0 0 0 1px var(--accent-strong)}
+.learning-card:has(:checked) .learning-card-state{visibility:visible}
+.learning-card:has(:focus-visible){outline:2px solid var(--accent-strong);outline-offset:3px}
+[data-example-selection]{font-size:12px;color:var(--accent-strong)}
+/* 章节定位提示只短暂强调目标，不写入文档或画布布局。 */
+.is-section-target{animation:section-location 1.8s ease-out}
+@keyframes section-location{0%,35%{outline:2px solid var(--accent-strong);background-color:var(--surface-tint)}100%{outline:2px solid transparent}}
+@media(max-width:1000px){.project-wizard[data-step="1"] .task-body{gap:14px;grid-template-columns:minmax(0,.48fr) minmax(0,.52fr)}.wizard-combinations{grid-template-columns:1fr}.wizard-prompt{padding:12px}.learning-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* 较矮的桌面窗口压缩左侧间距，优先把当前分页留在一个屏幕内。 */
+@media(min-width:721px) and (max-height:820px){.wizard-assembly{gap:12px}.wizard-facets{gap:12px}.wizard-assembly label{gap:5px}.wizard-assembly input,.wizard-assembly textarea{padding:8px 10px}.wizard-assembly h3{margin-bottom:8px}}
+@media(max-width:720px){.desktop-task-dialog[open]{padding:16px;max-height:calc(100dvh - 24px);width:calc(100vw - 24px)}.project-wizard[data-step="1"]{height:calc(100dvh - 24px)}.project-wizard[data-step="1"] .task-body{display:flex;flex-direction:column;overflow:auto}.wizard-assembly{overflow:visible;flex:none;padding-right:0}.wizard-combinations{grid-template-columns:1fr 1fr}.wizard-prompt{flex:none;min-height:440px}.project-wizard.is-prompt-expanded .task-body{overflow:hidden}.project-wizard.is-prompt-expanded .wizard-prompt{flex:1;min-height:0}.project-wizard .wizard-presets{grid-template-columns:1fr 1fr}.project-wizard form>footer>small{display:none}.learning-cards{grid-template-columns:1fr}.project-dialog:not(.desktop-task-dialog):not(.writing-dialog)>.project-dialog-header{top:-18px;padding:18px;margin:-18px -18px 14px}}
+@media(prefers-reduced-motion:reduce){.is-section-target{animation:none;outline:2px solid var(--accent-strong)}}

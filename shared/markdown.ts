@@ -4,7 +4,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes, RootContent } from 'mdast';
-import { DOCUMENT_FORMAT, HIERARCHY_MAX_DEPTH, type DesignStatus, type Diagnostic, type KnowledgeData, type KnowledgeEdge, type KnowledgeGroup, type KnowledgeNode, type ProjectDocument, type ProjectInfo, type RelationType } from './model.ts';
+import { DOCUMENT_FORMAT, type DesignStatus, type Diagnostic, type KnowledgeData, type KnowledgeEdge, type KnowledgeGroup, type KnowledgeNode, type ProjectDocument, type ProjectInfo, type RelationType } from './model.ts';
 
 /** 文件由宿主读取；解析器不接触磁盘，浏览器预检与本地服务可复用。 */
 export interface MarkdownFile { path: string; text: string; hash: string }
@@ -49,7 +49,7 @@ function tree(body: string) {
   });
   // 画布稳定块标记只辅助编辑定位；知识规则仍由原始锚点紧邻的标题定义。
   // 仅从语义节点序列排除合法标记，AST 位置继续指向原文，引用偏移不会漂移。
-  result.children = result.children.filter(node => !(node.type === 'html' && /^<!-- cewen:block [A-Za-z0-9][A-Za-z0-9_-]{0,119} -->$/.test(node.value.trim())));
+  result.children = result.children.filter(node => !(node.type === 'html' && /^<!-- cewen:block [A-Za-z0-9][A-Za-z0-9_-]{0,119}(?: parent=(?:root|[A-Za-z0-9][A-Za-z0-9_-]{0,119}))? -->$/.test(node.value.trim())));
   return result;
 }
 function string(value: unknown, fallback = '') { return typeof value === 'string' ? value : fallback; }
@@ -149,10 +149,10 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
   if (root) { root.system = ''; delete root.parent; }
   const groupById = new Map(groups.map(group => [group.id, group]));
   for (const group of groups) if (group.parent) {
-    const visited = new Set([group.id]); let parent: string | undefined = group.parent, depth = 1;
+    const visited = new Set([group.id]); let parent: string | undefined = group.parent;
     while (parent) {
       const ancestor = groupById.get(parent);
-      if (!ancestor || visited.has(parent) || ++depth > HIERARCHY_MAX_DEPTH) { issue(projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', 'INVALID_GROUP_PARENT', `分类 ${group.id} 的父分类不存在、成环或超过层级上限。`); delete group.parent; break; }
+      if (!ancestor || visited.has(parent)) { issue(projectSystems ? 'PROJECT.md' : root?.path ?? 'PROJECT.md', 'INVALID_GROUP_PARENT', `分类 ${group.id} 的父分类不存在或形成循环。`); delete group.parent; break; }
       visited.add(parent); parent = ancestor.parent;
     }
   }
@@ -168,16 +168,13 @@ export function parseKnowledge(files: MarkdownFile[]): KnowledgeData & { documen
     }
   }
   // 父文档决定后代的主要分类；旧稿中不一致的 system 字段保留原文但不误投影。
-  const effectiveSystem = (document: ProjectDocument): string => document.parent ? effectiveSystem(documentById.get(document.parent)!) : document.system;
+  // 任意深度沿已验证的父链迭代取归属，不依赖调用栈深度。
+  const effectiveSystem = (document: ProjectDocument): string => {
+    let current = document;
+    while (current.parent) current = documentById.get(current.parent)!;
+    return current.system;
+  };
   for (const item of parsed) if (item.document !== root && item.document.parent) item.document.system = effectiveSystem(item.document);
-  for (const item of parsed) {
-    const document = item.document; if (document === root) continue;
-    let depth = 1, parent = document.parent;
-    while (parent) { depth++; parent = documentById.get(parent)?.parent; }
-    let group = groupById.get(document.system);
-    while (group) { depth++; group = group.parent ? groupById.get(group.parent) : undefined; }
-    if (depth > HIERARCHY_MAX_DEPTH) issue(item.file.path, 'HIERARCHY_TOO_DEEP', `文档 ${document.id} 超过总纲以下 ${HIERARCHY_MAX_DEPTH} 层。`);
-  }
   // 未指定主归属的内容仍可阅读；总纲本身永不归入未归组。
   if (!groups.some(group => group.id === 'system-unassigned') && parsed.some(item => item.document.type !== 'gdd' && (!groups.some(group => group.id === item.document.system) || Object.values(item.header.metadata.sectionSystems && typeof item.header.metadata.sectionSystems==='object' ? item.header.metadata.sectionSystems : {}).includes('system-unassigned')))) groups.push({ id: 'system-unassigned', label: '未归组', color: '#94A5BC' });
   // 图谱的兄弟节点沿用目录的公开顺序。只调整投影遍历，不重排 Markdown 文件或正文。

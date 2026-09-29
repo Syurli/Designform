@@ -1,4 +1,4 @@
-import { HIERARCHY_MAX_DEPTH, type FileChange, type KnowledgeData, type KnowledgeGroup, type ProjectDocument, type ProjectSnapshot } from './model.ts';
+import { type FileChange, type KnowledgeData, type KnowledgeGroup, type ProjectDocument, type ProjectSnapshot } from './model.ts';
 import { readHeader } from './markdown.ts';
 import { setMetadata } from './editing.ts';
 
@@ -42,23 +42,21 @@ function orderMap(value: unknown): Record<string, string[]> {
   return Object.fromEntries(Object.entries(value).map(([key, row]) => [key, [...row as string[]]]));
 }
 
-/** 所有层级均从总纲以下计数；移动时按结果树核对，不凭单个目标猜深度。 */
-function assertDepth(groups: KnowledgeGroup[], documents: ProjectDocument[], rootId?: string) {
-  const groupById = new Map(groups.map(group => [group.id, group]));
-  const docById = new Map(documents.map(document => [document.id, document]));
-  const groupDepth = (id: string, seen = new Set<string>()): number => {
-    if (seen.has(id)) throw new Error('分类层级形成循环。'); seen.add(id);
-    const group = groupById.get(id); if (!group) throw new Error('分类层级引用了不存在的分类。');
-    return 1 + (group.parent ? groupDepth(group.parent, seen) : 0);
+/** 分类与文档不设人为层数上限；逐条父链检查存在性和循环，避免深树递归溢出。 */
+function assertHierarchy(groups: KnowledgeGroup[], documents: ProjectDocument[], rootId?: string) {
+  const check = <T extends { id: string; parent?: string }>(rows: T[], label: string, root?: (row: T) => boolean) => {
+    const byId = new Map(rows.map(row => [row.id, row])), complete = new Set<string>();
+    for (const row of rows) {
+      const visited = new Set<string>(); let id: string | undefined = row.id;
+      while (id && !complete.has(id)) {
+        if (visited.has(id)) throw new Error(`${label}层级形成循环。`);
+        const current = byId.get(id); if (!current) throw new Error(`${label}层级引用了不存在的上级。`);
+        visited.add(id); id = root?.(current) ? undefined : current.parent;
+      }
+      visited.forEach(value => complete.add(value));
+    }
   };
-  for (const group of groups) if (groupDepth(group.id) > HIERARCHY_MAX_DEPTH) throw new Error(`分类超过总纲以下 ${HIERARCHY_MAX_DEPTH} 层。`);
-  const docDepth = (id: string, seen = new Set<string>()): number => {
-    if (seen.has(id)) throw new Error('文档层级形成循环。'); seen.add(id);
-    const document = docById.get(id); if (!document) throw new Error('父文档不存在。');
-    if (document.type === 'gdd' || id === rootId) return 0;
-    return 1 + (document.parent ? docDepth(document.parent, seen) : document.system && groupById.has(document.system) ? groupDepth(document.system) : 0);
-  };
-  for (const document of documents) if (docDepth(document.id) > HIERARCHY_MAX_DEPTH) throw new Error(`文档超过总纲以下 ${HIERARCHY_MAX_DEPTH} 层。`);
+  check(groups, '分类'); check(documents, '文档', row => row.type === 'gdd' || row.id === rootId);
 }
 
 /** 生成一次原子公开批次；正文、别名和手工关系原样保留。 */
@@ -66,7 +64,7 @@ export function moveHierarchy(snapshot: ProjectSnapshot, move: HierarchyMove): {
   if (snapshot.historical) throw new Error('历史版本只读，请回到最新工作稿。');
   if (!snapshot.projectEntry) throw new Error('缺少 PROJECT.md 修改基准。');
   const rootId = getRootDocumentId(snapshot), groups = snapshot.groups.filter(group => group.id !== 'system-unassigned').map(group => ({ ...group }));
-  const documents = snapshot.documents.filter(document => document.type !== 'guide').map(document => ({ ...document }));
+  const documents = snapshot.documents.filter(document => !['docs/README.md','docs/INDEX.md'].includes(document.path) && !document.path.startsWith('docs/media/') && !document.id.startsWith('unidentified:')).map(document => ({ ...document }));
   const projectMetadata = readHeader(snapshot.projectEntry.text).metadata;
   const changes = new Map<string, FileChange>();
   const stage = (path: string, baseHash: string, original: string, text: string) => { if (text !== original) changes.set(path, { path, baseHash, text }); };
@@ -78,11 +76,11 @@ export function moveHierarchy(snapshot: ProjectSnapshot, move: HierarchyMove): {
     if (move.id === move.targetId) throw new Error('分类不能相对自身移动。');
     const targetGroup = groupById.get(move.targetId);
     if (move.placement !== 'inside' && !targetGroup) throw new Error('分类前移或后移必须选择另一个分类。');
-    if (move.placement === 'inside' && !targetGroup && move.targetId !== rootId) throw new Error('顶层分类只能放入项目总纲。');
+    if (move.placement === 'inside' && !targetGroup && move.targetId !== rootId && move.targetId !== 'root') throw new Error('顶层分类只能放入项目总纲。');
     const parent = move.placement === 'inside' ? targetGroup?.id : targetGroup?.parent;
     if (parent === group.id || parent && groupAncestors({ groups }, parent).some(item => item.id === group.id)) throw new Error('分类不能移入自身或下级分类。');
     group.parent = parent;
-    assertDepth(groups, documents, rootId);
+    assertHierarchy(groups, documents, rootId);
     const source = Array.isArray(projectMetadata.systems) ? projectMetadata.systems : (() => { const root = snapshot.documents.find(item => item.id === rootId); return root && Array.isArray(readHeader(root.text).metadata.systems) ? readHeader(root.text).metadata.systems : groups; })();
     const rows = (source as Record<string, unknown>[]).map(raw => ({ ...raw }));
     const at = rows.findIndex(row => row.id === group.id);
@@ -91,7 +89,7 @@ export function moveHierarchy(snapshot: ProjectSnapshot, move: HierarchyMove): {
     let insert = rows.length;
     if (targetGroup && move.placement !== 'inside') { insert = rows.findIndex(item => item.id === targetGroup.id) + (move.placement === 'after' ? 1 : 0); }
     rows.splice(insert, 0, row);
-    const nextProject = setMetadata(snapshot.projectEntry.text, { systems: rows, minimumAppVersion: '0.7.0' });
+    const nextProject = setMetadata(snapshot.projectEntry.text, { systems: rows, minimumAppVersion: projectMetadata.minimumAppVersion ?? '0.7.0' });
     stage('PROJECT.md', snapshot.projectEntry.hash, snapshot.projectEntry.text, nextProject);
     if (!Array.isArray(projectMetadata.systems)) {
       const root = snapshot.documents.find(item => item.id === rootId);
@@ -117,7 +115,7 @@ export function moveHierarchy(snapshot: ProjectSnapshot, move: HierarchyMove): {
   let expanded = true;
   while (expanded) { expanded = false; for (const child of documents) if (child.parent && descendants.has(child.parent) && !descendants.has(child.id)) { descendants.add(child.id); expanded = true; } }
   for (const child of documents) if (descendants.has(child.id)) child.system = system;
-  assertDepth(groups, documents, rootId);
+  assertHierarchy(groups, documents, rootId);
   for (const child of documents) if (descendants.has(child.id)) {
     const source = snapshot.documents.find(item => item.id === child.id)!;
     stage(source.path, source.hash, source.text, setMetadata(source.text, { system, ...(child.id === document.id ? { parent: parent ?? '' } : {}) }));
@@ -130,6 +128,6 @@ export function moveHierarchy(snapshot: ProjectSnapshot, move: HierarchyMove): {
   let at = list.length;
   if (targetDoc && move.placement !== 'inside') { const targetAt = list.indexOf(targetDoc.id); at = targetAt >= 0 ? targetAt + (move.placement === 'after' ? 1 : 0) : list.length; }
   list.splice(at, 0, document.id); order[key] = list;
-  stage('PROJECT.md', snapshot.projectEntry.hash, snapshot.projectEntry.text, setMetadata(snapshot.projectEntry.text, { documentOrder: order, minimumAppVersion: '0.7.0' }));
+  stage('PROJECT.md', snapshot.projectEntry.hash, snapshot.projectEntry.text, setMetadata(snapshot.projectEntry.text, { documentOrder: order, minimumAppVersion: projectMetadata.minimumAppVersion ?? '0.7.0' }));
   return { changes: [...changes.values()], label: `调整文档层级：${document.title}` };
 }

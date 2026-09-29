@@ -15,8 +15,9 @@ export async function createLearningExample(kind:string){
   const media=async(name:string)=>{const {sampleMedia}=await import('../shared/creative/sample-media.generated');const sample=sampleMedia.find(m=>m.name===name)!;const bytes=Uint8Array.from(atob(sample.data),c=>c.charCodeAt(0));const result=await transientUpload(snapshot.project.id,new File([bytes],name,{type:sample.mime}),{requestId:crypto.randomUUID(),permission:'虚构教学示意素材，合成演示声音，非真人表演',durationMs:sample.durationMs});snapshot=result.snapshot;return {id:result.mediaId,text:sample.text};};
   const prefix='learn-'+crypto.randomUUID().slice(0,8),changes:FileChange[]=[];
   const add=(key:string,title:string,body:string,category:string)=>{const id=prefix+'-'+key;changes.push({path:`docs/dd/${key}.md`,baseHash:null,text:`---\nid: ${id}\ntype: dd\nstatus: draft\nsystem: ${category}\n---\n\n# ${title}\n\n${body}\n`});return id;};
-  add('start','从这里开始','## 这是一份可编辑的学习文档\n\n双击文字块编辑，拖动块顶部调整位置。空白区域左键拖动平移，右键拖动框选。\n\n## 试一试\n\n1. 从左侧打开另一份文档。\n2. 使用右侧插入菜单添加模块。\n3. 保存时另存为你自己的项目。关闭此示例不会保留编辑。','learn');
+  add('start','从这里开始','## 这是一份可编辑的学习文档\n\n默认以标准文档预览。切换“编辑”后单击正文输入，拖动块顶部调整位置；归入章节需进入明确接收区。空白区域左键拖动平移，右键拖动框选。\n\n## 试一试\n\n1. 从左侧打开另一份文档。\n2. 使用右侧插入菜单添加模块。\n3. 保存时另存为你自己的项目。关闭此示例不会保留编辑。','learn');
   if(kind==='cards'){
+    // 学习卡沿用预设的标签合并入口，不再生成文档用途分类；所有改动仅写当前内存示例。
     for(const key of ['character','item']){const preset=builtinDocumentPresets.find(p=>p.id==='builtin-'+key)!,value=instantiateDocumentPreset(preset,key==='character'?'虚构角色 · 灯塔守望者':'虚构道具 · 信号灯');changes.push({path:`docs/dd/${key}.md`,baseHash:null,text:setMetadata(value.markdown,{system:'materials'})});}
   }else if(kind==='maps'){
     const map=moduleRegistry.get('map')!.create(prefix+'-map','港口底图');map.data.points=[{id:prefix+'-point',x:.25,y:.5,label:'灯塔',objectId:''}];

@@ -4,12 +4,13 @@ import { gfmFromMarkdown } from 'mdast-util-gfm';
 import type { Nodes } from 'mdast';
 import { readHeader } from '../shared/markdown.ts';
 import { parseSizedImage } from '../shared/image-markup';
+import { foldTextStyles, textStyleOpenTag } from '../shared/text-style';
 
 /** 渲染采用白名单 AST，不执行用户 HTML，链接和图片必须经过受控地址转换。 */
 export const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 export function markdownView(text: string, resolve: (url: string, image: boolean) => string | null = () => null, terms = new Map<string, string>()): string {
   let body = text; try { body = readHeader(text).body; } catch { /* 格式异常时仍显示可安全阅读的原文。 */ }
-  const ast = fromMarkdown(body, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const ast = foldTextStyles(fromMarkdown(body, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }));
   const definitions = new Map(ast.children.filter(node => node.type === 'definition').map(node => [node.identifier.toLowerCase(), node.url]));
   const plain = (node: Nodes): string => 'value' in node ? String(node.value) : 'children' in node ? node.children.map(plain).join('') : '';
   const relationTable = (node: Nodes) => node.type === 'table' && ['关系 ID', '类型', '目标身份', '依据'].every(name => node.children[0]?.children.some(cell => plain(cell).trim() === name));
@@ -43,6 +44,7 @@ export function markdownView(text: string, resolve: (url: string, image: boolean
       case 'heading': return `<h${node.depth}>${children}</h${node.depth}>`;
       case 'strong': return `<strong>${children}</strong>`;
       case 'emphasis': return `<em>${children}</em>`;
+      case 'cewenTextStyle': return textStyleOpenTag(node.style) + children + '</span>';
       case 'delete': return `<del>${children}</del>`;
       case 'inlineCode': return `<code>${escapeHtml(node.value)}</code>`;
       case 'code': return node.lang==='cewen-object' ? `<div data-creative-source="${escapeHtml(node.value)}"></div>` : ['cewen-dialogue','cewen-palette'].includes(node.lang??'') ? `<div data-design-language="${escapeHtml(node.lang!)}" data-design-source="${escapeHtml(node.value)}"></div>` : `<pre><code>${escapeHtml(node.value)}</code></pre>`;
@@ -62,6 +64,8 @@ export function markdownView(text: string, resolve: (url: string, image: boolean
       case 'break': return '<br/>';
       case 'thematicBreak': return '<hr/>';
       case 'html': {
+        // 编辑器允许连续段内换行；仅识别纯 br 序列，不开放任意 HTML。
+        if(/^\s*(?:<br\s*\/?>\s*)+$/i.test(node.value))return [...node.value.matchAll(/<br\s*\/?>/gi)].map(()=>'<br/>').join('');
         // 图片仅接受受限属性，地址与普通 Markdown 图片共用本地附件校验。
         const image = parseSizedImage(node.value);
         if (image) { const src=resolve(image.src,true);return src?`<img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt)}" title="${escapeHtml(image.title)}" width="${image.width}" style="max-width:100%;height:auto" loading="lazy"/>`:`<span class="quiet">[图片：${escapeHtml(image.alt || image.src)}]</span>`; }

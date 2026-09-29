@@ -14,6 +14,7 @@ import { answerQuestion, inquiry, section, questionAvailable } from '../shared/i
 import { questionDocument, setMetadata, setTitle, putRelation, removeRelation } from '../shared/editing.ts';
 import { indexSnapshot } from './index-store.ts';
 import { companionIdPattern, companionKind, inkCompanionPath, layoutCompanionPath, validateCompanionFile, COMPANION_MAX_BYTES } from '../shared/document-companion.ts';
+import { applyDocumentTimes } from '../shared/document-order.ts';
 
 /** 最近项目是本机配置，不混入任何游戏的公开策划目录。 */
 interface Registry { projects: ProjectInfo[]; current: string | null }
@@ -75,6 +76,34 @@ export class ProjectService {
   private touched = new Map<string, number>();
   private backingUp = new Set<string>();
   private verifiedHistory = new Map<string, { entries: HistoryEntry[]; at: number }>();
+  /** 协作服务在同一提交互斥区检查文档租约；普通接口不能伪造内部任务身份。 */
+  private collaborationGuard?: (id: string, paths: string[], permit?: { taskId: string; generation: number; connectionId: string }) => Promise<void>;
+  private collaborationChanged?: (id: string) => void;
+  private collaborationClose?: () => void;
+
+  /** 宿主注册协作约束，浏览器纯人工模式不需要加载 Node 协作服务。 */
+  setCollaborationGuard(guard: NonNullable<ProjectService['collaborationGuard']>, changed: (id: string) => void, close?: () => void) { this.collaborationGuard = guard; this.collaborationChanged = changed; this.collaborationClose = close; }
+  /** 短事务内读正式稿并更新任务记录，避免登记写锁时与人工提交交错。 */
+  async collaborationExclusive<T>(id: string, action: (root: string, snapshot: ProjectSnapshot) => Promise<T>): Promise<T> {
+    await this.ready;
+    return this.exclusive(id, async () => { const project = this.project(id); return action(project.path, await this.load(project, false)); });
+  }
+  /** 已登记项目的根目录仅给本机服务内部使用，不接受任意磁盘路径。 */
+  async collaborationRoot(id: string) { await this.ready; return this.project(id).path; }
+
+  /** 尚未配对的网页也读取持久任务锁，不能在连接器已经工作时成为第二个写入端。 */
+  private async assertCollaborationWritable(id: string, paths: string[], permit?: { taskId: string; generation: number; connectionId: string }) {
+    if (this.collaborationGuard) return this.collaborationGuard(id, paths, permit);
+    const bytes = await optionalBytes(this.project(id).path, '.cewen/collaboration/tasks.json');
+    if (!bytes) return;
+    let record: { projectId: string; tasks: { id: string; status: string; documents: { current: { id: string; path: string } }[] }[] };
+    try { record = JSON.parse(bytes.toString('utf8')); if (record.projectId !== id || !Array.isArray(record.tasks)) throw new Error(); }
+    catch { throw new ProjectError('WORK_STORE_DAMAGED', '任务记录需要先通过本机服务核对，当前保留文件并停止写入。'); }
+    for (const task of record.tasks) if (task.status === 'running') {
+      const protectedPaths = task.documents.flatMap(({ current }) => [current.path, `docs/layouts/${current.id}.json`, `docs/annotations/${current.id}.ink.json`, `docs/annotations/${current.id}.md`]);
+      if (paths.some(name => name === '*' || name === 'PROJECT.md' || protectedPaths.some(target => target.toLowerCase() === name.toLowerCase()))) throw new ProjectError('DOCUMENT_LOCKED', '本机任务正在编写该文档，请连接服务查看进度或停止任务。', { taskId: task.id });
+    }
+  }
 
   constructor(home: string, templateRoot = defaultTemplateRoot) {
     this.home = path.resolve(home); this.templateRoot = templateRoot;
@@ -121,7 +150,7 @@ export class ProjectService {
       this.watchers.set(project.id, watcher);
     } catch { /* 部分文件系统不支持监听，定期扫描和窗口焦点刷新仍然有效。 */ }
   }
-  close() { this.closing=true;this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
+  close() { this.closing=true;this.collaborationClose?.();this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
   private libraryView() { return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
 
   /** 项目库身份以各项目当前 PROJECT.md 为准；失联或损坏项目保留最近登记，供用户重新定位。 */
@@ -267,6 +296,10 @@ export class ProjectService {
       if (stable && fingerprint(hashFiles(check)) === currentFingerprint) { head = await publishRevision(project.path, project.id, current, { actor: head ? 'external' : 'user', reason: head ? '同步外部文档修改' : '建立项目初始版本', requestId: `observed-${randomUUID()}` }, currentFingerprint, changedPaths(hashes, head?.files)); this.verifiedHistory.delete(project.id); }
       else knowledge.diagnostics.push({ path: 'docs/', code: 'FILES_CHANGING', severity: 'warning', message: '文件仍在变化，稍后重新扫描；本次未发布版本。' });
     }
+    // 文档时间随可信版本投影；新发布的版本尚未加入读取缓存，需显式补入一次。
+    const manifests = versions.filter(entry => entry.valid).map(entry => entry.manifest);
+    if (head && !manifests.some(manifest => manifest.id === head.id)) manifests.push(head);
+    applyDocumentTimes(knowledge.documents, manifests);
     const snapshot: ProjectSnapshot = { project: {...actual,updatedAt:head?.createdAt||actual.createdAt}, ...knowledge, companions: companionFiles(current), fingerprint: currentFingerprint, revision: head?.id ?? null, revisionLabel: head?.label, files: hashes, recoveryRequired: pending.length > 0 || invalid.length > 0, media: actual.format === 2 ? collectMediaFromTexts(current) : {} };
     // 索引失败不遮蔽磁盘稿，保留诊断并允许用户继续读取公开文件。
     try { await indexSnapshot(project.path, snapshot); } catch (error) { snapshot.diagnostics.push({ path: '.cewen/index.sqlite', code: 'INDEX_UNAVAILABLE', severity: 'warning', message: `索引暂不可用：${error instanceof Error ? error.message : String(error)}` }); }
@@ -279,6 +312,7 @@ export class ProjectService {
   async checkpoint(id: string, reason: string, requestId: string) {
     await this.ready;
     return this.exclusive(id, async () => {
+      await this.assertCollaborationWritable(id, ['*']);
       const project = this.project(id), snapshot = await this.load(project, false), versions = await history(project.path, id);
       if (snapshot.recoveryRequired || snapshot.diagnostics.some(issue => issue.severity === 'error')) throw new ProjectError('CHECKPOINT_NOT_READY', '当前文档有错误或未完成写入，无法封版。');
       if (!reason.trim() || !requestId.trim()) throw new ProjectError('INVALID_REQUEST', '封版需要本轮说明和请求 ID。');
@@ -303,7 +337,10 @@ export class ProjectService {
     return this.exclusive(id, async () => {
       const project = this.project(id), saved = await readRevision(project.path, id, revision), files = markdownFiles(saved.files);
       const actual = parseProjectInfo(files.find(file => file.path === 'PROJECT.md')!, project.path);
-      return { project: actual, ...parseKnowledge(files), companions: companionFiles(saved.files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false, media: saved.manifest.media ?? {} };
+      const knowledge = parseKnowledge(files), entries = (await history(project.path, id)).filter(entry => entry.valid);
+      const at = entries.findIndex(entry => entry.manifest.id === saved.manifest.id);
+      applyDocumentTimes(knowledge.documents, at >= 0 ? entries.slice(0, at + 1).map(entry => entry.manifest) : [saved.manifest]);
+      return { project: actual, ...knowledge, companions: companionFiles(saved.files), fingerprint: saved.manifest.fingerprint, files: hashFiles(saved.files), revision: saved.manifest.id, revisionLabel: saved.manifest.label, historical: true, recoveryRequired: false, media: saved.manifest.media ?? {} };
     });
   }
 
@@ -327,6 +364,7 @@ export class ProjectService {
   async beginExternalBatch(id: string, requestId: string) {
     const snapshot = await this.read(id);
     return this.exclusive(id, async () => {
+      await this.assertCollaborationWritable(id, ['*']);
       const root = this.project(id).path, saved = await optionalBytes(root, '.cewen/external-batch.json');
       if (saved) { const record = JSON.parse(saved.toString('utf8')); if (record.requestId === requestId) return record; throw new ProjectError('EXTERNAL_BATCH_OPEN', '已有外部批次，请先结束该轮。'); }
       if (snapshot.recoveryRequired) throw new ProjectError('RECOVERY_REQUIRED', '请先处理未完成提交。');
@@ -593,14 +631,24 @@ export class ProjectService {
     const snapshot = await this.read(id);
     const request = await this.operation(id, input, () => {
     if (!input.requestId || !Array.isArray(input.answers) || !input.answers.length) throw new ProjectError('INVALID_ANSWERS', '请至少回答一个问题。');
-    const changes = input.answers.map(answer => {
+    // 同批回答按前题依赖验证，避免用户必须先提交前题才能提交本轮汇总。
+    const pending=new Map(input.answers.map(a=>[a.documentId,a]));
+    if(pending.size!==input.answers.length)throw new ProjectError('INVALID_ANSWERS','同一批不能重复提交同一道题。');
+    const ordered:typeof input.answers=[],visiting=new Set<string>(),visited=new Set<string>();
+    const visit=(id:string)=>{if(visited.has(id))return;if(visiting.has(id))throw new ProjectError('INVALID_CONDITION','本轮问题存在循环前题依赖。');visiting.add(id);const doc=snapshot.documents.find(d=>d.id===id),meta=doc?readHeader(doc.text).metadata:{},previous=(meta.when as {questionId?:string})?.questionId??(typeof meta.follows==='string'?meta.follows:'');if(previous&&pending.has(previous))visit(previous);visiting.delete(id);visited.add(id);ordered.push(pending.get(id)!);};
+    for(const id of pending.keys())visit(id);
+    const working=snapshot.documents.map(d=>({...d}));
+    const changes = ordered.map(answer => {
       const document = snapshot.documents.find(document => document.id === answer.documentId && document.type === 'question');
       if (!document || document.hash !== answer.baseHash) throw new ProjectError('QUESTION_CHANGED', '题目或已有回答已经变化，请重新核对后作答。');
       if (!Array.isArray(answer.choices) || answer.choices.some(choice => typeof choice !== 'string') || typeof answer.text !== 'string' || !['回答', '暂缓', '前提不成立'].includes(answer.action) || (answer.action === '回答' && !answer.choices.length && !answer.text.trim())) throw new ProjectError('INVALID_ANSWER', '请选择方案、填写自定义回答，或明确暂缓 / 前提不成立。');
-      if (!questionAvailable(document, snapshot.documents).active) throw new ProjectError('QUESTION_NOT_ACTIVE', '前题尚未满足条件，请先处理前题。');
+      if (!questionAvailable(document, working).active) throw new ProjectError('QUESTION_NOT_ACTIVE', '前题尚未满足条件，请先处理前题。');
       const question = inquiry(document);
       if (answer.choices.some(choice => !question.options.includes(choice)) || (!question.multiple && answer.choices.length > 1)) throw new ProjectError('INVALID_ANSWER', '所选方案必须来自当前题目，并符合单选或多选要求。');
-      return { path: document.path, baseHash: document.hash, text: answerQuestion(document, { ...answer, id: `answer-${randomUUID()}`, revision: snapshot.revision }) };
+      const supersedes=[...question.previous.matchAll(/### 回答 ([A-Za-z0-9_-]+)/g)].at(-1)?.[1];
+      const text=answerQuestion(document, { ...answer, supersedes, id: `answer-${randomUUID()}`, revision: snapshot.revision });
+      working.find(d=>d.id===document.id)!.text=text;
+      return { path: document.path, baseHash: document.hash, text };
     });
     return { projectId: id, requestId: input.requestId, baseRevision: snapshot.revision, actor: 'user', reason: `提交 ${changes.length} 个问题的用户回答`, changes };
     }); return this.commit(request);
@@ -676,7 +724,7 @@ export class ProjectService {
       if (!relation || (!relation.startsWith('..') && !path.isAbsolute(relation))) throw new ProjectError('RECURSIVE_BACKUP', '请把备份放在项目目录之外，避免备份套备份。');
       const destination = path.join(destinationParent, `策问-${mode}-${new Date().toISOString().slice(0,10)}-${randomUUID().slice(0,8)}`);
       await mkdir(destination);
-      const selected = await collectFiles(project.path, relative => relative === 'PROJECT.md' || relative === 'docs' || relative.startsWith('docs/') || (mode !== 'current' && (relative === 'versions' || relative.startsWith('versions/'))) || (mode === 'full' && (relative === '.cewen' || ['requests','imports', ...(includePersonal ? ['views','drafts','transactions'] : [])].some(folder => relative === `.cewen/${folder}` || relative.startsWith(`.cewen/${folder}/`)) || (includePersonal && (relative === '.cewen/personal' || relative.startsWith('.cewen/personal/'))))));
+      const selected = await collectFiles(project.path, relative => relative === 'PROJECT.md' || relative === 'docs' || relative.startsWith('docs/') || (mode !== 'current' && (relative === 'versions' || relative.startsWith('versions/'))) || (mode === 'full' && (relative === '.cewen' || ['requests','imports', ...(includePersonal ? ['views','drafts','transactions','collaboration'] : [])].some(folder => relative === `.cewen/${folder}` || relative.startsWith(`.cewen/${folder}/`)) || (includePersonal && (relative === '.cewen/personal' || relative.startsWith('.cewen/personal/'))))));
       if (mode === 'full') {
         const state = await workspace(project.path);
         const included = state.items.filter(item => includePersonal || item.scope !== 'personal'), ids = new Set(included.map(item => item.id));
@@ -792,6 +840,7 @@ export class ProjectService {
   async deleteProject(id:string,confirmedPath:string,confirmedName:string) {
     await this.ready;
     await this.exclusive(id,async()=>{
+      await this.assertCollaborationWritable(id, ['*']);
       const project=this.project(id),root=await realpath(project.path);
       if(root!==await realpath(confirmedPath)||root===path.parse(root).root||root===await realpath(this.home)||confirmedName!==project.name)throw new ProjectError('DELETE_CONFIRMATION','项目路径或名称已改变，请重新确认。');
       const entry=await optionalBytes(root,'PROJECT.md');
@@ -849,7 +898,8 @@ export class ProjectService {
     await mkdir(directory, { recursive: true });
     const drafts: DocumentDraft[] = [];
     for (const name of await readdir(directory)) {
-      if (!/^[a-f0-9-]+\.json$/i.test(name)) continue;
+      // 桌面编辑器以稳定文档身份保存草稿，与保存/移除接口使用相同允许范围。
+      if (!/^(?:[a-f0-9-]{16,50}|desktop-[A-Za-z0-9_-]{1,150})\.json$/i.test(name)) continue;
       const value = await optionalBytes(root, `.cewen/drafts/${name}`);
       if (value) drafts.push(JSON.parse(value.toString('utf8')) as DocumentDraft);
     }
@@ -883,11 +933,12 @@ export class ProjectService {
   }
 
   /** 正文批次校验发生在落盘前；无关文件变动可重新校验后继续，依赖变化必须退回。 */
-  async commit(request: CommitRequest): Promise<ProjectSnapshot> {
+  async commit(request: CommitRequest, permit?: { taskId: string; generation: number; connectionId: string }): Promise<ProjectSnapshot> {
     await this.ready;
     return this.exclusive(request.projectId, async () => {
       const project = this.project(request.projectId), root = project.path;
       if (!request.requestId || request.requestId.length > 180 || !request.reason?.trim() || !Array.isArray(request.changes) || !request.changes.length) throw new ProjectError('INVALID_REQUEST', '提交需要请求 ID、修改说明和至少一个文件变化。');
+      await this.assertCollaborationWritable(request.projectId, request.changes.map(change => change.path), permit);
       const digest = requestDigest(request), entries = await history(root, project.id);
       const existing = entries.find(entry => entry.valid && entry.manifest.requestId === request.requestId)?.manifest;
       if (existing) {
@@ -918,6 +969,11 @@ export class ProjectService {
       }
       const candidateFiles = markdownFiles(candidate);
       if(request.actor==='llm'){
+        // 所有模型提交都保护用户原始回答，不能通过自动保存或旧提案路径代答。
+        for (const old of snapshot.documents.filter(document => document.type === 'question')) {
+          const next = candidateFiles.find(file => file.path === old.path);
+          for (const heading of ['用户原始回答','决定记录']) if (section(old.text, heading).text !== section(next?.text ?? '', heading).text) throw new ProjectError('USER_ANSWER_PROTECTED', `模型不能改写“${heading}”。`);
+        }
         const oldObjects=new Map(buildCreativeIndex(snapshot).objects.map(o=>[o.object.id,o.object]));
         for(const next of buildCreativeIndex({documents:parseKnowledge(candidateFiles).documents}).objects){
           if(next.object.type==='decision'&&JSON.stringify(next.object.data.confirmation??null)!==JSON.stringify(oldObjects.get(next.object.id)?.data.confirmation??null))throw new ProjectError('USER_CONFIRMATION_REQUIRED','模型提案不得新增或改写用户决定确认记录。');
@@ -958,6 +1014,7 @@ export class ProjectService {
         const revision = await publishRevision(root, project.id, after, request, digest, request.changes.map(change => change.path));
         transaction.phase = 'complete'; transaction.revision = revision.id; await this.writeTransaction(root, transaction);
         this.verifiedHistory.delete(project.id);
+        this.collaborationChanged?.(project.id);
         return this.load(project, false);
       } catch (error) {
         transaction.phase = 'conflict'; await this.writeTransaction(root, transaction);
@@ -972,6 +1029,7 @@ export class ProjectService {
   async recover(id: string, direction: 'continue' | 'rollback'): Promise<ProjectSnapshot> {
     await this.ready;
     return this.exclusive(id, async () => {
+      await this.assertCollaborationWritable(id, ['*']);
       const project = this.project(id), root = project.path;
       for (const transaction of await this.pending(root)) {
         const entries = await history(root, id);
