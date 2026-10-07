@@ -1,4 +1,4 @@
-import { createHash, randomUUID, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, path, Buffer, runtimeKind, runtimePid, ownerAlive, runtimeLock } from './platform.ts';
+import { createHash, randomUUID, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, path, Buffer, runtimeKind, runtimePid, runtimeHost, ownerAlive, runtimeLock } from './platform.ts';
 import { companionKind } from '../shared/document-companion.ts';
 
 /** 两个公开伴随目录是受控命名空间；外部编辑也不能塞入任意 JSON 或嵌套路径。 */
@@ -110,20 +110,35 @@ export function assertDocumentPath(relative: string) {
 export async function withProjectLock<T>(root: string, action: () => Promise<T>): Promise<T> { return runtimeLock(root, () => fileLock(root, action)); }
 async function fileLock<T>(root: string, action: () => Promise<T>): Promise<T> {
   const target = await resolveInside(root, '.cewen/project.lock'); await mkdir(path.dirname(target), { recursive: true });
+  // 记录真实目录，使同机复制到另一目录的锁也不会继续占用副本。
+  const projectRoot = path.dirname(path.dirname(target));
   const token = randomUUID(), deadline = Date.now() + 5000;
+  type Owner = { pid: number; token: string; kind?: string; expiresAt?: number; host?: string; projectRoot?: string };
+  /** 桌面与网页都使用续租；过期记录不能被恰好同号的无关进程永久保活。 */
+  const expired = (owner: Owner) => Number.isFinite(owner.expiresAt) && Number(owner.expiresAt) <= Date.now();
+  const stale = (owner: Owner) => expired(owner) || runtimeKind === 'desktop' && owner.kind !== 'web' && (
+    typeof owner.host === 'string' && owner.host !== runtimeHost ||
+    typeof owner.projectRoot === 'string' && owner.projectRoot !== projectRoot || !ownerAlive(owner.pid)
+  );
+  /** 所有续租沿用同一令牌与目录身份，不将副本误当成原项目上的正在进行的操作。 */
+  const ownerRecord = () => JSON.stringify({ pid: runtimePid, token, kind: runtimeKind, host: runtimeHost, projectRoot, expiresAt: Date.now() + 30000 });
   /** 释放或接管前只认完整的所有者记录，不用损坏 JSON 覆盖真正的操作结果。 */
-  const parseOwner = (bytes: Buffer | null): { pid: number; token: string; kind?: string; expiresAt?: number } | undefined => {
-    try { const value = JSON.parse(bytes?.toString('utf8') ?? 'null'); if (Number.isInteger(value?.pid) && value.pid > 0 && typeof value.token === 'string') return value; } catch { /* 创建中的记录可能暂时不完整。 */ }
+  const parseOwner = (bytes: Buffer | null): Owner | undefined => {
+    try { const value = JSON.parse(bytes?.toString('utf8') ?? 'null'); if (Number.isInteger(value?.pid) && value.pid > 0 && typeof value.token === 'string' && value.token) return value; } catch { /* 创建中的记录可能暂时不完整。 */ }
     return undefined;
   };
   while (true) {
-    try { const handle = await open(target, 'wx'); try { await handle.writeFile(JSON.stringify({ pid: runtimePid, token, kind: runtimeKind, expiresAt: Date.now() + 30000 })); await handle.sync(); } finally { await handle.close(); } break; }
+    try { const handle = await open(target, 'wx'); try { await handle.writeFile(ownerRecord()); await handle.sync(); } finally { await handle.close(); } break; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const owner = parseOwner(await readFile(target).catch(() => null));
-      if (owner && Number.isInteger(owner.pid) && owner.pid > 0) {
-        try { if (owner.kind === 'web' ? Number(owner.expiresAt) < Date.now() : !ownerAlive(owner.pid)) throw Object.assign(new Error('锁所有者已结束'), { code: 'ESRCH' }); }
-        catch (failure) { if ((failure as NodeJS.ErrnoException).code === 'ESRCH') { const check = parseOwner(await readFile(target).catch(() => null)); if (check?.token === owner.token) await unlink(target).catch(() => {}); continue; } }
+      if (owner && stale(owner)) {
+        // 接管前再次核对续租时间；原进程已刷新租约时，即使令牌未变也不能删除。
+        const check = parseOwner(await readFile(target).catch(() => null));
+        if (check?.token === owner.token && check.expiresAt === owner.expiresAt && stale(check)) {
+          try { await unlink(target); continue; }
+          catch (failure) { if ((failure as NodeJS.ErrnoException).code === 'ENOENT') continue; throw failure; }
+        }
       }
       if (Date.now() >= deadline) throw new ProjectError(owner ? 'PROJECT_BUSY' : 'LOCK_DAMAGED', owner ? '另一策问进程正在处理这个项目，请稍后重试。' : '项目锁记录不完整。请先关闭所有访问此项目的策问服务，再将 .cewen/project.lock 移出项目后重新打开；文档与草稿未被修改。');
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -131,9 +146,9 @@ async function fileLock<T>(root: string, action: () => Promise<T>): Promise<T> {
   }
   // 等待已开始的续租结束后再释放，避免最后一次异步写入复活过期锁。
   let renewing: Promise<void> = Promise.resolve();
-  const heartbeat = runtimeKind === 'web' ? setInterval(() => {
-    renewing = renewing.then(async () => { const current = parseOwner(await readFile(target).catch(() => null)); if (current?.token === token) await writeBytes(root, '.cewen/project.lock', JSON.stringify({ pid: runtimePid, token, kind: runtimeKind, expiresAt: Date.now() + 30000 })); }).catch(() => {});
-  }, 10000) : undefined;
+  const heartbeat = setInterval(() => {
+    renewing = renewing.then(async () => { const current = parseOwner(await readFile(target).catch(() => null)); if (current?.token === token) await writeBytes(root, '.cewen/project.lock', ownerRecord()); }).catch(() => {});
+  }, 10000);
   try { return await action(); }
   finally { clearInterval(heartbeat); await renewing; const current = parseOwner(await readFile(target).catch(() => null)); if (current?.token === token) await unlink(target); }
 }

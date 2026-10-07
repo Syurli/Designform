@@ -64,6 +64,12 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       const origin = request.headers.origin;
       if ((origin && origin !== `http://${authority}`) || request.headers['sec-fetch-site'] === 'cross-site') throw new ProjectError('ORIGIN_DENIED', '请求来源与本地工作台不一致。');
       const url = new URL(request.url, `http://${authority}`);
+      // 短号只在入口解析，配对范围检查继续使用正式项目身份。
+      const projectRef = /^\/api\/projects\/(P[a-z0-9]{1,7})(?=\/|$)/.exec(url.pathname);
+      if (projectRef) {
+        if(request.headers['x-cewen-session']!==token)throw new ProjectError('SESSION_REQUIRED','连接已更新，请重新连接本地工作台。');
+        url.pathname = url.pathname.replace('/' + projectRef[1], '/' + await service.resolveProjectRef(projectRef[1]));
+      }
       // 独立连接器仅服务启动器核实过的一个项目；原生 MCP 端口也不能越过此边界。
       if (options.projectId) {
         const scoped = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/(.*))?$/.exec(url.pathname);

@@ -146,7 +146,7 @@ export function mountCreationComposer(container: HTMLElement, create: (setup: { 
 
 /** 完成卡片的主按钮直接复制固定任务；失败时由调用处展开可编辑全文。 */
 export async function copyAnswerOpening(snapshot:ProjectSnapshot,answers:AnswerHandoff):Promise<boolean>{
-  const [info,state]=await Promise.allSettled([request<IntegrationInfo>('/api/integration'),readConnections()]);
-  const prompt=composePrompt({scene:'answers',snapshot,documentIds:[...new Set([...answers.documentIds,...answers.questions.map(q=>q.id)])],answers,integration:info.status==='fulfilled'?info.value:{mode:'unknown'},connections:state.status==='fulfilled'?state.value:undefined});
+  const integration=await request<IntegrationInfo>('/api/integration').catch(()=>({mode:'unknown'} as IntegrationInfo));
+  const prompt=composePrompt({scene:'answers',snapshot,answers,integration});
   try{await navigator.clipboard.writeText(prompt);return true;}catch{return false;}
 }
