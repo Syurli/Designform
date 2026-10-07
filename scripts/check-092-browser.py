@@ -55,7 +55,8 @@ with sync_playwright() as playwright:
         stored_before = page.evaluate('Object.keys(localStorage).sort()')
         example('film')
         expect(page.locator('[data-project-title]')).to_contain_text('最后一盏灯')
-        expect(page.locator('.document-tree .project-directory-category-row')).to_have_count(3)
+        # “全部分类”是导航行，三项真实学习分类由正式 group 身份统计。
+        expect(page.locator('.document-tree .project-directory-category-row[data-group]')).to_have_count(3)
         page.locator('[aria-label=搜索项目文档]').fill('分镜与排演')
         page.locator('.document-tree .project-directory-row', has_text='分镜与排演').click()
         page.locator('.document-tab-content:not([hidden]) [data-sequence-play]:visible').first.click()
@@ -94,14 +95,16 @@ with sync_playwright() as playwright:
         snapshot = api('/api/projects/'+project['id'])
         assert len(snapshot['media']) >= 2
         page.locator('[data-home]').click()
-        # 新建向导首次不选预设，返回保留用户输入，取消不建目录。
+        # 当前向导：选择方向→组合设想→保存位置；返回保留输入，取消不建目录。
         initial = len(api('/api/projects')['projects'])
         page.locator('.library-heading [data-new]').click()
-        page.locator('[name=goal]').fill('用于验收的一体化创作设想')
+        page.locator('.project-wizard [name=preset][value=game]').check()
         page.locator('.project-wizard [type=submit]').click()
-        assert page.locator('[name=preset]:checked').count() == 0
+        page.locator('.project-wizard [data-field=idea]').fill('用于验收的一体化创作设想')
+        expect(page.locator('.project-wizard [name=prompt]')).to_have_value(__import__('re').compile('.*一体化创作设想.*', __import__('re').S))
         page.locator('.project-wizard [type=submit]').click()
-        expect(page.locator('[name=prompt]')).to_have_value(__import__('re').compile('.*一体化创作设想.*', __import__('re').S))
+        page.locator('.project-wizard [data-back]').click()
+        expect(page.locator('.project-wizard [data-field=idea]')).to_have_value('用于验收的一体化创作设想')
         page.locator('.project-wizard [data-close]').first.click()
         assert len(api('/api/projects')['projects']) == initial
     else:
