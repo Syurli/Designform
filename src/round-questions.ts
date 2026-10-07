@@ -55,6 +55,8 @@ export class RoundQuestions {
   private autosaveTimer?:ReturnType<typeof setTimeout>;
   private syncing?:Promise<void>;
   private writing=new Set<string>();
+  /** 请求结果未知时保留反向改答，不能用旧快照误判为“没有变化”。 */
+  private unconfirmed=new Set<string>();
   private syncError='';
   private sourceWarnings=new Map<string,string>();
   private questionTrail:QuestionOrigin[]=[];
@@ -176,6 +178,8 @@ export class RoundQuestions {
         }
       }
       draft.hash=doc.hash;draft.questionText=doc.text;
+      const saved=latestAnswer(doc);
+      if(saved&&!this.writing.has(id)&&!this.unconfirmed.has(id)&&this.answerValue(draft)===this.answerValue(saved))delete this.drafts[id];
     }
   }
   private sourceWarning(doc:ProjectDocument){
@@ -231,9 +235,9 @@ export class RoundQuestions {
     if(acceptCurrent&&action==='暂缓'&&(choices.length||text.trim())){
       action='';const field=form.querySelector<HTMLInputElement>('[name=action]');if(field)field.value='';
     }
-    if(!choices.length&&!text.trim()&&!action&&(latestAnswer(doc)||this.writing.has(doc.id)))action='暂缓';
+    if(!choices.length&&!text.trim()&&!action&&(latestAnswer(doc)||this.writing.has(doc.id)||this.unconfirmed.has(doc.id)))action='暂缓';
     const draft:Draft={hash:doc.hash,choices,text,action,questionText:doc.text},saved=latestAnswer(this.current()??doc);
-    if(filled(draft)&&(!saved||this.answerValue(draft)!==this.answerValue(saved)||this.writing.has(doc.id)))this.drafts[doc.id]=draft;
+    if(filled(draft)&&(!saved||this.answerValue(draft)!==this.answerValue(saved)||this.writing.has(doc.id)||this.unconfirmed.has(doc.id)))this.drafts[doc.id]=draft;
     else delete this.drafts[doc.id];
     this.save();this.updateProgress();if(updateNav)this.renderNav();
     if(!this.composing)this.scheduleRecording();
@@ -448,7 +452,7 @@ export class RoundQuestions {
       const receipt=this.receipt();if(!receipt)throw new Error('本轮没有可分析的回答，请先回答问题。');
       if(copy&&await copyAnswerOpening(this.snapshot,receipt)){this.banner='已复制开场白，请发给 LLM 讨论。';return;}
       await openCollaboration('answers',this.snapshot,[...new Set([...receipt.documentIds,...receipt.questions.map(q=>q.id)])],{fixed:true,title:'分析本轮回答，再确认是否继续',answers:receipt});
-    }finally{this.busy=false;this.render();}
+    }finally{this.busy=false;this.render();this.scheduleRecording();}
   }
   /** 连续输入合并记录，写入期间不禁用表单；后续输入不会被已完成的旧请求清除。 */
   private async flushAnswers():Promise<void>{
@@ -468,15 +472,18 @@ export class RoundQuestions {
       const answers=pending.map(doc=>{const d=this.drafts[doc.id];return {documentId:doc.id,baseHash:doc.hash,choices:[...d.choices],text:d.text,action:d.action||'回答'};});
       const signature=JSON.stringify(answers);if(signature!==this.signature){this.signature=signature;this.requestId=crypto.randomUUID();}
       this.writing=new Set(pending.map(doc=>doc.id));
+      for(const doc of pending)this.unconfirmed.add(doc.id);
       let next:ProjectSnapshot;
       try{next=await projectAction<ProjectSnapshot>(this.snapshot.project.id,'answers',{requestId:this.requestId,answers});}
       catch(error){
+        if(error instanceof ClientError&&!['OFFLINE','SERVICE_UNAVAILABLE','REQUEST_FAILED','LOCAL_IO_ERROR','RECOVERY_REQUIRED'].includes(error.code))for(const doc of pending)this.unconfirmed.delete(doc.id);
         // 实际文件冲突先刷新，依据题意决定保留还是转存旧输入，绝不覆盖外部新题。
         if(error instanceof ClientError&&['QUESTION_CHANGED','FILE_CONFLICT'].includes(error.code)){
           this.snapshot=await readProject(this.snapshot.project.id);this.rebaseDrafts();this.sourceWarnings.clear();this.save();
         }
         throw error;
       }finally{this.writing.clear();}
+      for(const doc of pending)this.unconfirmed.delete(doc.id);
       for(const [id,value] of sent)if(this.drafts[id]&&this.answerValue(this.drafts[id])===value)delete this.drafts[id];
       this.snapshot=next;this.rebaseDrafts();this.sourceWarnings.clear();this.syncError='';
       if(this.banner.startsWith('自动记录尚未完成'))this.banner='';

@@ -990,7 +990,15 @@ export class ProjectService {
     assertDocumentPath(draft.documentPath);
     if (draft.assets !== undefined) {
       if (!Array.isArray(draft.assets) || draft.assets.length > 20 || Buffer.byteLength(JSON.stringify(draft.assets)) > 6 * 1024 * 1024) throw new ProjectError('DRAFT_ASSETS_TOO_LARGE','草稿附件合计过大，请先保存当前文档再继续添加。');
-      for (const asset of draft.assets) { if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿图片无效。'); changeBytes({ ...asset, baseHash: null }); }
+      for (const asset of draft.assets) {
+        if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿媒体无效。');
+        // 音频/媒体使用内容地址；这里只保留恢复草稿，正式入库仍在正文确认保存时完成。
+        if(MEDIA_PATH.test(asset.path)){
+          if(!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(asset.text))throw new ProjectError('INVALID_ASSET','草稿媒体编码无效。');
+          const bytes=Buffer.from(asset.text,'base64'),info=detectMedia(bytes);
+          if(asset.path!==`assets/objects/${sha256(bytes)}/content.${info.extension}`)throw new ProjectError('INVALID_ASSET','草稿媒体内容与地址不一致。');
+        }else changeBytes({ ...asset, baseHash: null });
+      }
     }
     if (draft.companions !== undefined) {
       if (!Array.isArray(draft.companions) || draft.companions.length > 20 || Buffer.byteLength(JSON.stringify(draft.companions)) > 4 * 1024 * 1024) throw new ProjectError('INVALID_DRAFT', '草稿伴随文件数量或总大小无效。');
