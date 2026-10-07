@@ -41,7 +41,8 @@ with sync_playwright() as playwright:
 
     def example(kind):
         page.locator('[data-examples]').click()
-        page.locator('dialog[open] [name=example]').select_option(kind)
+        # 示例选择已改为学习卡片的单选入口，按类型身份选择实际卡片。
+        page.locator('dialog[open] [name=example][value="'+kind+'"]').check()
         page.locator('dialog[open] [type=submit]').click()
         expect(page.locator('.desktop-work')).to_be_visible(timeout=60000)
         expect(page.locator('[data-session-kind]')).to_contain_text('临时')
