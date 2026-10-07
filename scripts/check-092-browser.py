@@ -220,7 +220,7 @@ with sync_playwright() as playwright:
         page.screenshot(path=str(out/'092-integrated-document.png'))
         page.set_viewport_size({'width':900,'height':800})
         if page.locator('#app').evaluate("e=>e.classList.contains('sidebar-open')"): page.locator('#sidebar-close').click()
-        page.locator('.document-tab-content:not([hidden]) [data-object-edit]').first.click()
+        page.locator('.document-tab-content:not([hidden]) [data-object-edit]:visible').first.click()
         expect(page.locator('.document-properties')).to_be_visible()
         page.screenshot(path=str(out/'092-narrow-module.png'))
     (out/('092-'+mode+'-result.json')).write_text(json.dumps({'realHttp':True,'mode':mode,'apiMocked':False,'errors':errors},ensure_ascii=False,indent=2),encoding='utf-8')
