@@ -62,10 +62,11 @@ initializeBrowseHistory();initializeContextGestures();initializeInputBindings();
 document.addEventListener('keydown',event=>{if(!event.defaultPrevented&&!document.querySelector('dialog:modal')&&shortcutAction(event)==='settings'){event.preventDefault();void openInputSettings();}},{capture:true});
 
 /** 项目订阅随项目切换释放；事件与轮询共享正式快照刷新。 */
-let liveProject='',disposeLive:(()=>void)|undefined,liveRefreshing=false;
-async function refreshLive(){if(liveRefreshing||!projectSnapshot||projectSnapshot.historical)return;const id=projectSnapshot.project.id;liveRefreshing=true;try{const next=await readProject(id);if(projectSnapshot?.project.id===id)applyProject(next);}catch(error){reportProjectError(error);}finally{liveRefreshing=false;}}
+let liveProject='',disposeLive:(()=>void)|undefined;
+/** 事件、聚焦、手动刷新共用一个在途读取；事件到来时补读一次，避免漏掉在途读取之后的协作写入。 */
+let projectRefresh:Promise<void>|undefined,refreshRequested=false,verifyRequested=false;
+async function refreshLive(){try{await refreshProject(false,true);}catch(error){reportProjectError(error);}}
 function syncLive(snapshot:ProjectSnapshot){const id=snapshot.historical||isTransientProject(snapshot.project.id)?'':snapshot.project.id;if(id===liveProject)return;disposeLive?.();disposeLive=undefined;liveProject=id;if(id)disposeLive=subscribeProjectEvents(id,()=>void refreshLive());}
-setInterval(()=>{if(!document.hidden&&liveProject)void refreshLive();},6000);
 let connectionError = '';
 /** URL 项目读取到工作台显示沿用同一任务，初始化失败或取消时立即释放。 */
 let startupLoading: ProjectLoadingTask | undefined;
@@ -755,13 +756,24 @@ function applyProject(snapshot: ProjectSnapshot, projected=false) {
 }
 
 /** 外部变化到来时只替换已读投影，正在编辑的原稿基准由工作面板独立保留。 */
-async function refreshProject(verify = false) {
+async function refreshProject(verify = false, changed = false) {
   if (!projectSnapshot) { await workbench.projects(); return; }
-  if (projectSnapshot.historical) return;
-  const id = projectSnapshot.project.id, snapshot = await readProject(id, verify);
-  if (projectSnapshot?.project.id !== id) return;
-  if (snapshot.fingerprint !== projectSnapshot.fingerprint || snapshot.revision !== projectSnapshot.revision || snapshot.recoveryRequired !== projectSnapshot.recoveryRequired || JSON.stringify(snapshot.diagnostics) !== JSON.stringify(projectSnapshot.diagnostics)) applyProject(snapshot);
-  else if(!editingSession?.count)get('project-save-state').textContent = snapshot.recoveryRequired ? '有未完成写入 · 请查看版本' : snapshot.diagnostics.length ? `${snapshot.diagnostics.length} 项待核对` : '文档与版本已同步';
+  if (projectSnapshot.historical || isTransientProject(projectSnapshot.project.id)) return;
+  verifyRequested ||= verify;
+  if (projectRefresh) { refreshRequested ||= changed || verify; return projectRefresh; }
+  projectRefresh = (async()=>{
+    do {
+      refreshRequested=false;
+      const id:string=projectSnapshot!.project.id,verifyNow=verifyRequested;verifyRequested=false;
+      const snapshot=await readProject(id,verifyNow);
+      // 项目切换和历史阅读具有独立身份，旧请求不能覆盖新工作区。
+      if(projectSnapshot?.project.id!==id||projectSnapshot.historical)return;
+      // 正式内容不变时，协作工作稿、任务状态和锁变化仍需要更新；空轮询无需重建文档与图谱。
+      if(snapshot.fingerprint!==projectSnapshot.fingerprint||snapshot.revision!==projectSnapshot.revision||snapshot.recoveryRequired!==projectSnapshot.recoveryRequired||JSON.stringify(snapshot.diagnostics)!==JSON.stringify(projectSnapshot.diagnostics)||JSON.stringify(snapshot.collaboration)!==JSON.stringify(projectSnapshot.collaboration))applyProject(snapshot);
+      else if(!editingSession?.count)get('project-save-state').textContent=snapshot.recoveryRequired?'有未完成写入 · 请查看版本':snapshot.diagnostics.length?`${snapshot.diagnostics.length} 项待核对`:'文档与版本已同步';
+    }while(refreshRequested&&!projectSnapshot?.historical);
+  })();
+  try{await projectRefresh;}finally{projectRefresh=undefined;}
 }
 function reportProjectError(error: unknown) { connectionError = error instanceof Error ? error.message : '本地项目操作未完成。'; get('project-save-state').textContent = connectionError; get('announcement').textContent = connectionError; renderInspector(); }
 
@@ -901,8 +913,7 @@ document.querySelectorAll<HTMLElement>('[data-view="creative"],[data-view="quest
 
 if(projectSnapshot)void documentDesktop.open(projectSnapshot,false,startupLoading).catch(reportProjectError).finally(()=>{startupLoading?.finish();startupLoading=undefined;});
 /** 聚焦和定期扫描补足外部保存；后续监听仍需沿用相同哈希核对。 */
-let refreshing = false;
-const scan = () => { if (refreshing || !projectSnapshot || document.hidden || documentDesktop?.isHome || isTransientProject(projectSnapshot.project.id)) return; refreshing = true; void refreshProject().catch(reportProjectError).finally(() => { refreshing = false; }); };
+const scan = () => { if (!projectSnapshot || document.hidden || documentDesktop?.isHome || isTransientProject(projectSnapshot.project.id)) return; void refreshProject().catch(reportProjectError); };
 window.addEventListener('focus', scan);
 setInterval(scan, 4000);
 // 浏览器把页面暂存到前进后退缓存时保留场景；真正卸载时才释放显卡资源。
