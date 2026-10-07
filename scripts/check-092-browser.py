@@ -22,6 +22,13 @@ with sync_playwright() as playwright:
     page.set_default_timeout(20000)
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.on('console', lambda message: errors.append(message.text) if message.type == 'error' else None)
+    # 保留实际错误响应的路径及服务原因，避免只留下浏览器的通用 400 文案。
+    def response_error(response):
+        if response.status >= 400:
+            try: detail=response.text()[:1200]
+            except Exception: detail='响应内容不可读取'
+            errors.append(str(response.status)+' '+response.url+' '+detail)
+    page.on('response', response_error)
     page.goto(url, wait_until='networkidle', timeout=90000)
     expect(page.locator('.desktop-library')).to_be_visible()
     assert page.locator('[data-view=creative],[data-view=quest],[data-view=animatic]').count() == 0

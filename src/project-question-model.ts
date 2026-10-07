@@ -15,7 +15,7 @@ export interface QuestionStateInfo {
 }
 export type QuestionRecords = Readonly<Record<string, QuestionStateInfo>> | readonly QuestionStateInfo[];
 export const questionFilterLabels: Record<QuestionFilter, string> = { all: '全部', pending: '待答', submitted: '已答' };
-export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '已答 · 待保存', submitted: '已答', review: '需复核', deferred: '暂缓', premise: '题目有问题' };
+export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '已答', submitted: '已答', review: '待答', deferred: '暂缓', premise: '题目有问题' };
 
 /** 旧个人筛选只迁移浏览偏好，不迁移、丢弃或改写回答。 */
 export function questionFilter(value: unknown): QuestionFilter {
@@ -30,7 +30,7 @@ export function questionRecord(records: QuestionRecords, id: string): QuestionSt
 }
 export function questionMatchesFilter(record: QuestionStateInfo | undefined, filter: QuestionFilter): boolean {
   const status = record?.status ?? 'pending';
-  // 需要复核的回答回到待答；已答同时包含个人草稿、项目回答和已反馈的问题。
+  // 输入即算已答；记录过程不再作为用户需要区分的独立状态。
   return filter === 'all' || filter === 'submitted' && ['draft','submitted','premise'].includes(status) || filter === 'pending' && ['pending','deferred','review'].includes(status);
 }
 

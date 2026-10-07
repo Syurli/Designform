@@ -21,6 +21,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown';
 import { mountDocumentPresentation, locatePresentationSection } from './document-presentation';
 import { RoundQuestions, forgetRoundSession } from './round-questions';
 import { inquiry } from '../shared/inquiry';
+import { latestSavedAnswer } from '../shared/answer-context';
 import { projectMarkdown } from './document-reading';
 import { mountCreativeBlocks } from './creative/inline';
 import { openObjectEditor } from './creative/editor';
@@ -105,7 +106,7 @@ export class DocumentDesktop {
     });
     window.addEventListener('keydown',e=>{if(this.visible&&!e.defaultPrevented&&!((e.target as HTMLElement).closest('.app-command-menu')))this.key(e);});
     window.addEventListener('cewen:operation-error',e=>this.report((e as CustomEvent).detail));
-    window.addEventListener('cewen:editing-command',e=>{if(this.root.hidden||this.home)return;const cmd=(e as CustomEvent<string>).detail;if(['copy','cut','paste','selectAll'].includes(cmd)&&!(document.activeElement as HTMLElement)?.closest('input,textarea,[contenteditable=true]')){e.preventDefault();void this.current()?.canvas.clipboard(cmd as 'copy'|'cut'|'paste'|'selectAll').catch(error=>this.report(error));return;}if(!['save','undo','redo'].includes(cmd))return;if(this.questionsActive){if(cmd==='save'){e.preventDefault();this.projectQuestions?.captureDraft();this.notice('策问草稿已保留，正式提交请使用本轮汇总。');}return;}if(cmd!=='save'&&(document.activeElement as HTMLElement)?.closest('input,textarea,[contenteditable=true]')&&!(document.activeElement as HTMLElement)?.closest('.canvas-inline-editor,.rich-text-style-panel'))return;e.preventDefault();if(cmd==='save')void this.save().catch(err=>this.report(err));if(cmd==='undo'&&!this.isDocumentLocked())this.current()?.canvas.undo();if(cmd==='redo'&&!this.isDocumentLocked())this.current()?.canvas.redo();},{capture:true});
+    window.addEventListener('cewen:editing-command',e=>{if(this.root.hidden||this.home)return;const cmd=(e as CustomEvent<string>).detail;if(['copy','cut','paste','selectAll'].includes(cmd)&&!(document.activeElement as HTMLElement)?.closest('input,textarea,[contenteditable=true]')){e.preventDefault();void this.current()?.canvas.clipboard(cmd as 'copy'|'cut'|'paste'|'selectAll').catch(error=>this.report(error));return;}if(!['save','undo','redo'].includes(cmd))return;if(this.questionsActive){if(cmd==='save'){e.preventDefault();this.projectQuestions?.captureDraft();this.notice('回答自动记录，无需另行保存或提交。');}return;}if(cmd!=='save'&&(document.activeElement as HTMLElement)?.closest('input,textarea,[contenteditable=true]')&&!(document.activeElement as HTMLElement)?.closest('.canvas-inline-editor,.rich-text-style-panel'))return;e.preventDefault();if(cmd==='save')void this.save().catch(err=>this.report(err));if(cmd==='undo'&&!this.isDocumentLocked())this.current()?.canvas.undo();if(cmd==='redo'&&!this.isDocumentLocked())this.current()?.canvas.redo();},{capture:true});
     window.addEventListener('beforeunload',e=>{this.projectQuestions?.captureDraft();if(this.hasChanges()){e.preventDefault();e.returnValue='';}});
     void this.library.refresh().catch(e=>this.report(e));
   }
@@ -642,7 +643,7 @@ export class DocumentDesktop {
       importQuestions:()=>document.getElementById('project-exchange')?.click(),
       onStateChange:stats=>{this.questionStats=stats;this.updateQuestionBrand();},
     });
-    this.returnToProject();this.notice('策问模式 · 回答自动在本机保留；汇总末尾复制开场白时保存本轮回答。');
+    this.returnToProject();this.notice('策问模式 · 回答自动记录；答完一轮直接复制开场白交给 LLM 讨论。');
   }
   /** 外部主导航离开时只暂存作答；下次策问仍恢复本项目的独立位置。 */
   leaveQuestionMode(){this.exitQuestions(false);}
@@ -655,7 +656,7 @@ export class DocumentDesktop {
     const heading=this.tree.parentElement?.querySelector('header strong');if(heading)heading.textContent='项目文档';
     this.renderTabs();this.renderProperties();
     if(restore&&frame?.overview)this.cards(frame.category);
-    this.updateQuestionBrand();this.notice('已返回阅读，策问草稿保留。');if(restore)returnToReading?.();
+    this.updateQuestionBrand();this.notice('已返回阅读，回答继续自动记录。');if(restore)returnToReading?.();
   }
   private renderProjectQuestions(){
     this.work.classList.add('project-question-mode');this.tree.hidden=true;this.questionNav.hidden=false;this.projectQuestionHost.hidden=false;
@@ -669,12 +670,12 @@ export class DocumentDesktop {
     this.modeHost.onclick=event=>{if((event.target as HTMLElement).closest('[data-return-reading]'))this.exitQuestions();};
     this.projectQuestions?.show(this.questionNav);this.updateQuestionBrand();recordVisit('questions:'+this.snapshot?.project.id,()=>this.askQuestions());
   }
-  /** 字标数量按问题身份统计全项目未提交题，分类多来源不会重复计算。 */
-  private projectPendingCount(){return this.snapshot?.documents.filter(doc=>doc.type==='question'&&doc.status!=='archived'&&inquiry(doc).status!=='answered').length??0;}
+  /** 字标与目录使用同一待答含义；输入由控制器即时回调，重开则读取最新原话。 */
+  private projectPendingCount(){return this.snapshot?.documents.filter(doc=>doc.type==='question'&&doc.status!=='archived'&&latestSavedAnswer(doc).action==='暂缓').length??0;}
   /** 策问快捷键只操作草稿和问题导航，不能顺手保存或改名后台正文。 */
   private questionKey(event:KeyboardEvent){
     if(!this.questionsActive)return false;const action=shortcutAction(event),command=event.ctrlKey||event.metaKey,key=event.key.toLowerCase();
-    if(action==='save'||action==='saveAll'){event.preventDefault();event.stopPropagation();this.projectQuestions?.captureDraft();this.notice('策问草稿已保留，正式提交请使用本轮汇总。');return true;}
+    if(action==='save'||action==='saveAll'){event.preventDefault();event.stopPropagation();this.projectQuestions?.captureDraft();this.notice('回答自动记录，无需另行保存或提交。');return true;}
     if(action==='find'||action==='findDirectory'){event.preventDefault();this.questionNav.querySelector<HTMLInputElement>('input[type=search]')?.focus();return true;}
     if(action==='close'){event.preventDefault();this.exitQuestions();return true;}
     if(event.key==='F2'||command&&['z','y','k'].includes(key))return true;

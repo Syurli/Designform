@@ -18,7 +18,7 @@ export function answerHandoff(snapshot:ProjectSnapshot,ids:string[],requestId:st
 }
 
 /** 普通问询与 Quest 共用分析边界；不能把复制动作当作下一轮授权。 */
-export const answerAnalysisRules='请分析原话，区分推断、建议与待澄清，保留条件和理由，不代答。相关正文按 D 号读取；失败如实说明。修改先提案供我审核；下一轮须等我明确同意。';
+export const answerAnalysisRules='请分析原话，区分推断、建议与待澄清，保留条件和理由，不代答。正文按 D 号读取；修改先提案。改题或追问使用新题、新轮，保留旧问答；下一轮须等我明确同意。';
 
 export function answerHandoffContext(receipt:AnswerHandoff,snapshot?:ProjectSnapshot):string {
   const roundKeys=new Set(receipt.questions.map(q=>JSON.stringify([q.questId??'',q.roundId??q.round])));

@@ -1,12 +1,11 @@
 import type { ProjectDocument, ProjectSnapshot } from '../shared/model';
-import { inquiry, questionAvailable, answerQuestion, questionDisplayTitle, questionDisplayBackground } from '../shared/inquiry';
+import { inquiry, questionAvailable, answerQuestion, questionDisplayTitle, questionDisplayBackground, questionDefinition } from '../shared/inquiry';
 import { readHeader } from '../shared/markdown';
 import { isTransientProject } from '../shared/transient';
 import { answerHandoff, questionRoundKey, type AnswerHandoff } from '../shared/answer-handoff';
-import { buildCreativeIndex } from '../shared/creative/content';
 import { resolveAnchor, hasAnchorTarget } from '../shared/creative/anchors';
 import { relatedQuestions } from './creative/questions';
-import { projectAction } from './project-client';
+import { projectAction, readProject, ClientError } from './project-client';
 import { copyAnswerOpening, openCollaboration } from './prompt-panel';
 import { ProjectQuestionDirectory } from './project-question-directory';
 import { questionDocuments, questionSources, questionFilter, questionMatchesFilter, questionStatusLabels, visibleProjectQuestions, type QuestionDirectoryState, type QuestionStateInfo } from './project-question-model';
@@ -19,8 +18,8 @@ interface QuestionOrigin { questionId:string; directory:QuestionDirectoryState; 
 interface Session {
   round:string; question:string; summary:boolean; summaryMode?:'round'|'all';
   directory?:QuestionDirectoryState; receipt?:AnswerHandoff; receipts?:Record<string,AnswerHandoff>;
-  /** 复核及已提交来源基准仅属个人记录，不改写问题或历史回答。 */
-  reviewedBases?:Record<string,string>; submittedBases?:Record<string,string>;
+  /** 非法外部改题或移除时，旧输入仍在个人历史中保留，不混入新题答案。 */
+  previousDrafts?:{id:string;title:string;draft:Draft}[];
 }
 interface Options {
   apply:(s:ProjectSnapshot)=>void; back:()=>void; source:(id:string)=>void;
@@ -53,8 +52,10 @@ export class RoundQuestions {
   private requestId=''; private signature='';
   private banner=''; private disposed=false; private composing=false;
   private pendingNavigation?:()=>void;
-  private basisCache=new Map<string,string>();
-  private creativeCache?:{snapshot:ProjectSnapshot;index:ReturnType<typeof buildCreativeIndex>};
+  private autosaveTimer?:ReturnType<typeof setTimeout>;
+  private syncing?:Promise<void>;
+  private writing=new Set<string>();
+  private syncError='';
   private sourceWarnings=new Map<string,string>();
   private questionTrail:QuestionOrigin[]=[];
   constructor(private host:HTMLElement,private nav:HTMLElement,private snapshot:ProjectSnapshot,private documentId:string,private options:Options){
@@ -84,11 +85,11 @@ export class RoundQuestions {
     this.session.directory={...defaults,group:typeof saved?.group==='string'?saved.group:'',documentId:typeof saved?.documentId==='string'?saved.documentId:'',
       questionId:this.session.question,query:typeof saved?.query==='string'?saved.query:'',includeArchived:saved?.includeArchived===true,
       filter:questionFilter(saved?.filter)};
-    this.rememberSubmittedBases();this.directory=this.createDirectory();
+    this.rebaseDrafts();this.directory=this.createDirectory();
     this.chooseInitial();
     if(options.initialQuestionId&&this.all().some(q=>q.id===options.initialQuestionId))this.selectQuestion(options.initialQuestionId);
     else if(options.initialDocumentId)this.setScope('',options.initialDocumentId);
-    this.bind();this.render();
+    this.bind();this.render();this.scheduleRecording();
   }
   private state(){return this.session.directory!;}
   /** 同一题的多来源只影响定位，不能重复草稿、计数或提交。 */
@@ -106,7 +107,7 @@ export class RoundQuestions {
   }
   private preferred(questions:ProjectDocument[]){
     const docs=this.projected(),records=this.records(docs);
-    return questions.find(q=>!latestAnswer(q)&&!filled(this.drafts[q.id])&&questionAvailable(q,docs).active&&records[q.id]?.status!=='review')
+    return questions.find(q=>!latestAnswer(q)&&!filled(this.drafts[q.id])&&questionAvailable(q,docs).active)
       ??questions.find(q=>filled(this.drafts[q.id]))??questions[0];
   }
   private chooseInitial(){
@@ -124,7 +125,7 @@ export class RoundQuestions {
     const previous=this.current();
     if(previous&&previous.id!==id){
       const changedRound=questionRoundKey(previous)!==questionRoundKey(q),changedSources=JSON.stringify(questionSources(this.snapshot,previous))!==JSON.stringify(questionSources(this.snapshot,q));
-      if((changedRound||changedSources)&&filled(this.drafts[previous.id]))this.banner='上一题的回答已在本机保留。';
+      if((changedRound||changedSources)&&filled(this.drafts[previous.id]))this.banner='';
     }
     this.session.question=id;this.session.round=questionRoundKey(q);this.session.summary=false;
     this.state().questionId=id;
@@ -162,31 +163,21 @@ export class RoundQuestions {
     try{
       localStorage.setItem('cewen-answers-090:'+this.snapshot.project.id,JSON.stringify(this.drafts));
       localStorage.setItem('cewen-round-sessions:'+this.snapshot.project.id,JSON.stringify(memory.get(this.snapshot.project.id)?.sessions??{}));
-    }catch{this.banner='本机草稿缓存不可用，当前会话仍保留，请及时到汇总复制开场白并保存回答。';}
+    }catch{this.banner='本机应急缓存不可用，当前输入仍保留并继续自动记录。';}
   }
-  private dependency(doc:ProjectDocument){const m=readHeader(doc.text).metadata;return (m.when as {questionId?:string})?.questionId??(typeof m.follows==='string'?m.follows:'');}
-  /** 输入只改变个人草稿，创作对象索引仅在公开快照替换时重新解析。 */
-  private creativeIndex(){
-    if(this.creativeCache?.snapshot!==this.snapshot)this.creativeCache={snapshot:this.snapshot,index:buildCreativeIndex(this.snapshot)};
-    return this.creativeCache.index;
+  /** 外部改动只比较题意，文件 hash 与来源变化不再要求逐题复核。 */
+  private rebaseDrafts(){
+    for(const [id,draft] of Object.entries(this.drafts)){
+      const doc=this.all().find(q=>q.id===id);if(!doc)continue;
+      if(draft.questionText){
+        const old={...doc,text:draft.questionText,title:readHeader(draft.questionText).body.match(/^# (.+)$/m)?.[1]??doc.title};
+        if(questionDefinition(old)!==questionDefinition(doc)){
+          this.session.previousDrafts??=[];this.session.previousDrafts.push({id,title:old.title,draft});delete this.drafts[id];continue;
+        }
+      }
+      draft.hash=doc.hash;draft.questionText=doc.text;
+    }
   }
-  private basis(doc:ProjectDocument){
-    const cached=this.basisCache.get(doc.id);if(cached)return cached;
-    const id=this.dependency(doc),prev=this.all().find(d=>d.id===id),draft=this.drafts[id],meta=readHeader(doc.text).metadata;
-    const objects=this.creativeIndex().objects;
-    const objectIds=[...(Array.isArray(meta.objectTargets)?meta.objectTargets.filter((v):v is string=>typeof v==='string'):[]),...((meta.anchor as {objectId?:string})?.objectId?[(meta.anchor as {objectId:string}).objectId]:[])];
-    // 来源文档与对象身份都参与基准：对象移除、重定位和正文修改均需复核旧草稿。
-    const basis=JSON.stringify([doc.hash,id,prev?.hash??'',draft?[draft.hash,draft.choices,draft.text,draft.action]:null,
-      questionSources(this.snapshot,doc).map(sourceId=>[sourceId,this.snapshot.documents.find(d=>d.id===sourceId)?.hash??'missing']),
-      objectIds.map(objectId=>[objectId,objects.filter(o=>o.object.id===objectId).map(o=>[o.documentId,o.hash])]),meta.anchor??null]);
-    this.basisCache.set(doc.id,basis);return basis;
-  }
-  /** 既有回答第一次出现时仅登记此刻基准，不能推断或声称还原旧回答的历史来源。 */
-  private rememberSubmittedBases(){
-    this.session.submittedBases??={};
-    for(const doc of this.all())if(latestAnswer(doc)&&typeof this.session.submittedBases[doc.id]!=='string')this.session.submittedBases[doc.id]=this.basis(doc);
-  }
-  private stale(doc:ProjectDocument){const draft=this.drafts[doc.id];return !!draft&&(draft.hash!==doc.hash||draft.basis!==undefined&&draft.basis!==this.basis(doc));}
   private sourceWarning(doc:ProjectDocument){
     const cached=this.sourceWarnings.get(doc.id);if(cached!==undefined)return cached;
     const remember=(reason:string)=>{this.sourceWarnings.set(doc.id,reason);return reason;};
@@ -202,65 +193,60 @@ export class RoundQuestions {
     }
     return remember('');
   }
-  private sourceReason(doc:ProjectDocument){
-    // 来源诊断放在折叠依据中；来源暂时不可定位不妨碍用户表达对问题本身的回答。
-    const saved=this.session.submittedBases?.[doc.id];
-    if(saved&&saved!==this.basis(doc))return '已保存回答的来源或前题已变化，请核对后改答。';
-    return '';
-  }
-  private reviewReason(doc:ProjectDocument){
-    if(this.stale(doc))return '题目、来源或前题回答已变化，旧草稿保留。';
-    const reason=this.sourceReason(doc);
-    return reason&&this.session.reviewedBases?.[doc.id]!==this.basis(doc)?reason:'';
-  }
-  /** 条件预显只投影当前轮草稿；其他轮草稿不会因当前轮提交而自动生效。 */
-  private projected(selected?:Set<string>,roundKey=this.session.round){
-    const pending=this.all().filter(d=>questionRoundKey(d)===roundKey&&(this.state().includeArchived||d.status!=='archived')&&(!selected||selected.has(d.id))&&filled(this.drafts[d.id])&&!this.stale(d)&&!this.reviewReason(d));
-    // 大项目的无草稿轮次直接复用只读快照，避免按轮重复复制所有文档。
+  /** 所有正在自动记录的回答用于前题预显，跨轮返回也无需额外保存。 */
+  private projected(){
+    const pending=this.all().filter(d=>filled(this.drafts[d.id]));
     if(!pending.length)return this.snapshot.documents;
-    const docs=this.snapshot.documents.map(d=>({...d}));
-    for(let pass=0;pass<=pending.length;pass++)for(const doc of pending){
-      const draft=this.drafts[doc.id],target=docs.find(d=>d.id===doc.id)!;
-      if(!questionAvailable(doc,docs).active)continue;
-      target.text=answerQuestion(doc,{id:'draft-preview',choices:draft.choices,text:draft.text,action:draft.action||'回答',revision:this.snapshot.revision});
+    const docs=this.snapshot.documents.map(d=>({...d})),done=new Set<string>();
+    for(let pass=0;pass<pending.length;pass++){
+      let changed=false;
+      for(const doc of pending){
+        if(done.has(doc.id)||!questionAvailable(doc,docs).active)continue;
+        const draft=this.drafts[doc.id];
+        docs.find(d=>d.id===doc.id)!.text=answerQuestion(doc,{id:'draft-preview',choices:draft.choices,text:draft.text,action:draft.action||'回答',revision:this.snapshot.revision});
+        done.add(doc.id);changed=true;
+      }
+      if(!changed)break;
     }
     return docs;
   }
   private records(docs=this.projected()):Record<string,QuestionStateInfo>{
-    // 目录逐轮投影，避免当前轮的未保存前题让另一轮题目被错误标成已解锁。
-    const projections=new Map([[this.session.round,docs]]);
     return Object.fromEntries(this.all().map(doc=>{
-      const key=questionRoundKey(doc);if(!projections.has(key))projections.set(key,this.projected(undefined,key));
-      const available=questionAvailable(doc,projections.get(key)!),draft=this.drafts[doc.id],review=this.reviewReason(doc);
-      const saved=latestAnswer(doc),status:QuestionStateInfo['status']=review||saved&&!available.active?'review':filled(draft)?draft!.action==='暂缓'?'deferred':draft!.action==='前提不成立'?'premise':'draft':saved?saved.action==='暂缓'?'deferred':saved.action==='前提不成立'?'premise':'submitted':'pending';
-      return [doc.id,{id:doc.id,status,sourceIds:questionSources(this.snapshot,doc),blocked:!available.active,reason:[review,!available.active?available.reason:''].filter(Boolean).join('；')}];
+      const available=questionAvailable(doc,docs),draft=this.drafts[doc.id],answer=draft??latestAnswer(doc);
+      const status:QuestionStateInfo['status']=answer?answer.action==='暂缓'?'deferred':answer.action==='前提不成立'?'premise':filled(draft)?'draft':'submitted':'pending';
+      // 前题变化不抹去已经回答的历史，也不把已答题重新计入待答。
+      return [doc.id,{id:doc.id,status,sourceIds:questionSources(this.snapshot,doc),blocked:!available.active&&!answer,reason:!available.active&&!answer?available.reason:''}];
     }));
   }
   private status(doc:ProjectDocument,record=this.records()[doc.id]){
     return `${questionStatusLabels[record.status]}${record.blocked?' · 待前题':''}`;
   }
-  /** 公开收尾入口供模式退出使用，只保存草稿，不销毁会话或提交。 */
-  captureDraft(){this.capture(false);this.save();this.notifyStats();}
+  /** 离开作答区也会自动记录；应急缓存保留未完成写入，不增加人工步骤。 */
+  captureDraft(){this.capture(false);this.save();this.notifyStats();this.scheduleRecording(0);}
   private capture(updateNav=true,acceptCurrent=false){
     const form=this.host.querySelector<HTMLFormElement>('[data-round-form]'),doc=this.displayed;
-    if(!form||!doc||this.busy||this.snapshot.historical)return;
-    // 禁用条件题的 FormData 不含输入，不能据此删掉此前的草稿。
-    if(form.querySelector('fieldset[disabled]'))return;
+    if(!form||!doc||this.busy||this.snapshot.historical||form.querySelector('fieldset[disabled]'))return;
     const data=new FormData(form),choices=data.getAll('choice').map(String),text=String(data.get('text')??'');
     let action=String(data.get('action')??'');
-    const old=this.drafts[doc.id],current=this.current(),accept=acceptCurrent&&current?.hash===doc.hash;
-    // 明确修改当前表单即更新作答基准；仅切页或失焦时保留旧题的原始选择。
-    if(old&&!accept&&old.hash!==doc.hash)for(const choice of old.choices)if(!inquiry(doc).options.includes(choice)&&!choices.includes(choice))choices.push(choice);
-    // 修改旧暂缓记录后，填写内容自动恢复为回答；问题反馈标记仍由独立按钮控制。
-    if(accept&&action==='暂缓'&&(choices.length||text.trim())){
+    if(acceptCurrent&&action==='暂缓'&&(choices.length||text.trim())){
       action='';const field=form.querySelector<HTMLInputElement>('[name=action]');if(field)field.value='';
     }
-    // 清空已保存的旧回答表示本次暂缓，不能删除草稿后悄悄回显旧答案。
-    if(!choices.length&&!text.trim()&&!action&&latestAnswer(doc))action='暂缓';
-    if(choices.length||text.trim()||action)this.drafts[doc.id]={hash:accept?doc.hash:old?.hash??doc.hash,choices,text,action,questionText:accept?doc.text:old?.questionText??doc.text,basis:accept?this.basis(doc):old?.basis??this.basis(doc)};
+    if(!choices.length&&!text.trim()&&!action&&(latestAnswer(doc)||this.writing.has(doc.id)))action='暂缓';
+    const draft:Draft={hash:doc.hash,choices,text,action,questionText:doc.text},saved=latestAnswer(this.current()??doc);
+    if(filled(draft)&&(!saved||this.answerValue(draft)!==this.answerValue(saved)||this.writing.has(doc.id)))this.drafts[doc.id]=draft;
     else delete this.drafts[doc.id];
-    if(accept){this.session.reviewedBases??={};this.session.reviewedBases[doc.id]=this.basis(doc);}
-    this.basisCache.clear();this.save();this.updateProgress();if(updateNav)this.renderNav();
+    this.save();this.updateProgress();if(updateNav)this.renderNav();
+    if(!this.composing)this.scheduleRecording();
+  }
+  /** 比较作答值而非文档 hash，重复失焦、切页和复制都不会追加相同答案。 */
+  private answerValue(answer:{choices:string[];text:string;action:string}){return JSON.stringify([answer.choices,answer.text,answer.action||'回答']);}
+  private scheduleRecording(delay=900){
+    if(this.autosaveTimer)clearTimeout(this.autosaveTimer);
+    if(this.snapshot.historical||isTransientProject(this.snapshot.project.id)||this.composing||!Object.values(this.drafts).some(filled))return;
+    this.autosaveTimer=setTimeout(()=>{this.autosaveTimer=undefined;void this.flushAnswers().catch(error=>{
+      this.syncError=error instanceof Error?error.message:String(error);this.banner='自动记录尚未完成，输入已保留。'+this.syncError;this.feedback();
+      if(!this.disposed)this.scheduleRecording(5000);
+    });},delay);
   }
   private navigate(action:()=>void){
     if(this.busy)return;
@@ -271,7 +257,7 @@ export class RoundQuestions {
       return;
     }
     // 先暂存而不重画目录，避免搜索回调中短暂恢复旧query，移动输入光标。
-    this.capture(false);action();
+    this.capture(false);action();this.scheduleRecording(0);
   }
   private createDirectory(){
     return new ProjectQuestionDirectory(this.nav,{
@@ -280,7 +266,7 @@ export class RoundQuestions {
       onFilter:filter=>this.navigate(()=>{this.state().filter=filter;this.reselectScope();}),
       onQuery:query=>this.navigate(()=>{this.state().query=query;this.reselectScope();}),
       onArchived:show=>this.navigate(()=>{this.state().includeArchived=show;this.reselectScope();}),
-      onSummary:()=>this.navigate(()=>{this.session.summary=true;this.session.summaryMode='round';this.render();}),
+      onSummary:()=>this.navigate(()=>{this.session.summary=true;this.session.summaryMode='all';this.render();}),
       onBack:()=>this.navigate(()=>this.options.back())
     });
   }
@@ -313,19 +299,19 @@ export class RoundQuestions {
     this.chooseInitial();this.save();const doc=this.current(),round=this.round();this.displayed=undefined;
     if(!doc&&!this.session.summary){
       const hasQuestions=this.all().length>0;
-      this.host.innerHTML=`<div class="round-empty"><h2>${hasQuestions?'当前范围没有问题':'这个项目还没有问题'}</h2><p>${hasQuestions?'切换全部问题、状态筛选或清除搜索即可继续；回答草稿仍然保留。':'可预览并编辑项目提问开场白，让 LLM 围绕本项目提出一轮明确问题；已有问题可从项目导入入口加入。'}</p><p class="round-feedback" role="status">${h(this.banner)}</p>${hasQuestions?'<button data-all-questions>查看全部问题</button>':''}<button data-start>生成项目提问开场白</button>${this.options.importQuestions?'<button data-import-questions>导入已有问题</button>':''}<button data-all-drafts>全部草稿</button><button data-back>返回策划案</button></div>`;
+      this.host.innerHTML=`<div class="round-empty"><h2>${hasQuestions?'当前范围没有问题':'这个项目还没有问题'}</h2><p>${hasQuestions?'切换全部问题、状态筛选或清除搜索即可继续；回答已记录。':'可预览并编辑项目提问开场白，让 LLM 围绕本项目提出一轮明确问题；已有问题可从项目导入入口加入。'}</p><p class="round-feedback" role="status">${h(this.banner)}</p>${hasQuestions?'<button data-all-questions>查看全部问题</button>':''}<button data-start>生成项目提问开场白</button>${this.options.importQuestions?'<button data-import-questions>导入已有问题</button>':''}<button data-all-drafts>轮次汇总</button><button data-back>返回策划案</button></div>`;
       this.renderNav();return;
     }
     const count=round.filter(d=>{const a=this.drafts[d.id]??latestAnswer(d);return a&&a.action!=='暂缓'&&a.action!=='前提不成立'&&(a.choices.length||a.text.trim());}).length;
-    this.host.innerHTML=`<header class="round-heading"><button data-back>← 返回策划案</button><div><strong>策问</strong><small data-answer-progress>已回答 ${count} / ${round.length} 题</small></div><button data-summary>本轮汇总</button><button data-all-drafts>其他轮回答</button></header><p class="round-feedback" role="status">${h(this.banner)}</p><div class="round-content"></div>`;
+    this.host.innerHTML=`<header class="round-heading"><button data-back>← 返回策划案</button><div><strong>策问</strong>${this.session.summary&&this.session.summaryMode==='all'?'':`<small data-answer-progress>已回答 ${count} / ${round.length} 题</small>`}</div><button data-all-drafts>轮次汇总</button></header><p class="round-feedback" role="status">${h(this.banner)}</p><div class="round-content"></div>`;
     const content=this.host.querySelector<HTMLElement>('.round-content')!;
-    if(this.session.summary){if(this.session.summaryMode==='all')this.allDrafts(content);else this.summary(content);}else if(doc)this.question(content,doc);
+    if(this.session.summary){if(this.session.summaryMode==='all')this.roundCatalog(content);else this.summary(content);}else if(doc)this.question(content,doc);
     this.renderNav();
   }
   /** 作答区只放问题、必要背景与回答，协作来源和历史集中在折叠区。 */
   private question(content:HTMLElement,doc:ProjectDocument){
     const q=inquiry(doc),draft=this.drafts[doc.id],saved=latestAnswer(doc),answer=draft??saved;
-    const available=questionAvailable(doc,this.projected()),visible=this.visible(),index=visible.findIndex(d=>d.id===doc.id),review=this.reviewReason(doc);
+    const available=questionAvailable(doc,this.projected()),visible=this.visible(),index=visible.findIndex(d=>d.id===doc.id);
     this.displayed=doc;
     const ids=questionSources(this.snapshot,doc),validSources=new Set(questionDocuments(this.snapshot).map(d=>d.id));
     const background=questionDisplayBackground(q.background),issue=answer?.action==='前提不成立';
@@ -334,14 +320,12 @@ export class RoundQuestions {
       ${this.returnLink()}
       <h2>${h(questionDisplayTitle(q.title))}</h2>
       ${background?`<p class="round-background">${h(background)}</p>`:''}
-      ${review?`<details class="round-review"><summary>回答需复核，修改即可更新</summary><p>${h(review)}</p>${draft?`<pre>${h(draft.questionText??'')}</pre><p>此前选择：${h(draft.choices.join('；')||'无')}</p>`:''}<button data-reviewed>保留当前回答</button></details>`:''}
       ${this.condition(available)}
-      ${!draft&&saved?'<p class="round-saved-answer">已保存的回答 <button data-revise>修改回答</button></p>':''}
-      <form data-round-form><fieldset ${this.snapshot.historical||!available.active||!draft&&saved?'disabled':''}>
+      <form data-round-form><fieldset ${this.snapshot.historical||!available.active?'disabled':''}>
         ${q.options.map(option=>`<label class="round-option"><input type="${q.multiple?'checkbox':'radio'}" name="choice" value="${h(option)}" ${answer?.choices.includes(option)?'checked':''}/><span>${h(option)}</span></label>`).join('')}
         <button type="button" class="round-text-button" data-clear-choice>清除选择</button>
         <label>我的回答 / 补充理由<textarea name="text" rows="4" placeholder="直接写下你的想法；不填写的题目可以稍后再答。">${h(answer?.text??'')}</textarea></label>
-        <input type="hidden" name="action" value="${h(draft?.action??'')}"/>
+        <input type="hidden" name="action" value="${h(answer?.action==='回答'?'':answer?.action??'')}"/>
         <div class="round-answer-actions"><button type="button" data-question-issue aria-pressed="${issue}">${issue?'已标记题目有问题 · 取消':'题目有问题'}</button>${issue?'<span>可在回答中说明需要调整的地方。</span>':''}</div>
       </fieldset></form>
       <details class="round-source"><summary>查看依据与此前回答</summary>
@@ -351,7 +335,7 @@ export class RoundQuestions {
         ${!['','尚未形成。'].includes(q.interpretation)?`<h4>分析</h4><pre>${h(q.interpretation)}</pre>`:''}
         ${!['','尚未采纳。'].includes(q.decision)?`<h4>决定记录</h4><pre>${h(q.decision)}</pre>`:''}
       </details>
-      <footer class="round-navigation"><button data-previous ${index<=0?'disabled':''}>上一题</button><span>回答自动在本机保留</span><button class="primary-button" data-next>${index>=visible.length-1?'查看本轮汇总':'下一题'}</button></footer>
+      <footer class="round-navigation"><button data-previous ${index<=0?'disabled':''}>上一题</button><span>回答自动记录</span><button class="primary-button" data-next>${index>=visible.length-1?'查看本轮汇总':'下一题'}</button></footer>
     </article>`;
   }
   /** 一轮结果自动收集已填写回答，用户无需再次逐题选择。 */
@@ -365,37 +349,44 @@ export class RoundQuestions {
     // 已保存回答改成全数暂缓也需要保存交接；全新且完全空白的一轮不生成虚假收据。
     const canHandoff=round.some(doc=>filled(this.drafts[doc.id])||latestAnswer(doc));
     let index=0;
-    content.innerHTML=`<div class="round-summary-tools"><h2>本轮回答汇总</h2><button data-all-drafts>其他轮回答</button></div>
+    content.innerHTML=`<div class="round-summary-tools"><h2>${h(round[0]?inquiry(round[0]).round:'本轮回答汇总')}</h2></div>
       ${this.returnLink()}
       <p class="round-result-count">已回答 ${answered} 题 · 暂缓 ${round.length-answered-issues} 题${issues?` · 题目有问题 ${issues} 题`:''}</p>
       <div class="round-summary">${[...groups].map(([source,questions])=>`<section class="round-summary-group"><h3>${h(source?this.snapshot.documents.find(d=>d.id===source)?.title??'其他问题':'其他问题')}</h3>${questions.map(doc=>{
-        const answer=result(doc),available=questionAvailable(doc,docs),review=this.reviewReason(doc);
+        const answer=result(doc),available=questionAvailable(doc,docs);
         return `<article><header><strong>${++index}. ${h(questionDisplayTitle(doc.title))}</strong><button data-question="${h(doc.id)}">修改回答</button></header>
           ${answer?.action==='前提不成立'?'<small>题目有问题</small>':''}
           ${answer?.choices.length?`<p>${h(answer.choices.join('；'))}</p>`:''}
           ${answer?.text?`<p class="round-verbatim">${h(answer.text)}</p>`:''}
           ${!answer||answer.action==='暂缓'?'<p class="quiet">暂缓，稍后再答</p>':''}
-          ${review?'<small class="round-review-note">需复核，请修改回答</small>':''}${this.condition(available)}
+          ${this.condition(available)}
         </article>`;
       }).join('')}</section>`).join('')}</div>
       <section class="round-handoff"><h3>交给 LLM 分析</h3>
-        <p>复制时将本轮回答保存到项目，再把开场白发给你使用的 LLM。</p>
-        <button data-handoff data-copy-opening class="primary-button" ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>${this.busy?'正在保存回答…':'复制开场白，请 LLM 分析'}</button>
+        <p>回答已自动记录。复制开场白发给 LLM，讨论后再开始下一轮。</p>
+        <button data-handoff data-copy-opening class="primary-button" ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>${this.busy?'正在准备开场白…':'复制开场白，请 LLM 分析'}</button>
         <button data-handoff ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>预览 / 编辑开场白</button>
         ${this.options.hasUnsaved()?'<small>策划正文还有未保存修改，分析将使用已保存正文。</small>':''}
       </section>`;
   }
-  /** 返回入口在汇总中也保留；跨轮草稿须明确保存后才能解锁原题。 */
+  /** 前题返回只恢复浏览位置，回答由统一自动记录队列处理。 */
   private returnLink(){
     const origin=this.questionTrail.at(-1);if(!origin)return '';
-    const target=this.all().find(q=>q.id===origin.questionId),crossRound=origin.round!==this.session.round;
-    return `<div class="round-return"><button type="button" data-return-question title="${h(target?questionDisplayTitle(target.title):'原来的浏览位置')}">${origin.summary?'返回原汇总':'返回原题'} ↩</button>${crossRound?'<small>跨轮前题请先在本轮汇总保存回答。</small>':''}</div>`;
+    const target=this.all().find(q=>q.id===origin.questionId);
+    return `<div class="round-return"><button type="button" data-return-question title="${h(target?questionDisplayTitle(target.title):'原来的浏览位置')}">${origin.summary?'返回原汇总':'返回原题'} ↩</button></div>`;
   }
-  private allDrafts(content:HTMLElement){
-    const groups=new Map<string,ProjectDocument[]>(),records=this.records();
-    for(const q of this.all().filter(d=>questionRoundKey(d)!==this.session.round&&filled(this.drafts[d.id]))){const key=questionRoundKey(q);groups.set(key,[...(groups.get(key)??[]),q]);}
-    const missing=Object.keys(this.drafts).filter(id=>filled(this.drafts[id])&&!this.all().some(q=>q.id===id));
-    content.innerHTML=`<div class="round-summary-tools"><h2>其他轮回答</h2><button data-summary>返回本轮汇总</button></div><p>按轮次继续回答，完成后到该轮汇总复制分析开场白。</p>${[...groups].map(([key,questions])=>`<section class="round-draft-group"><header><h3>${h(inquiry(questions[0]).round)} · ${questions.length} 份草稿</h3><button data-draft-round="${h(key)}">打开该轮汇总</button></header>${questions.map(q=>`<button class="round-draft-question" data-question="${h(q.id)}"><strong>${h(q.title)}</strong><small>${h(this.sourceLabel(q))} · ${this.status(q,records[q.id])}</small></button>`).join('')}</section>`).join('')||'<p>没有其他回答草稿。</p>'}${missing.length?`<section class="round-warning"><h3>题目已移除，草稿仍保留</h3>${missing.map(id=>`<details><summary>${h(id)} · 待复核</summary><pre>${h(this.drafts[id].questionText??'旧题正文未缓存')}</pre><p>${h(this.drafts[id].choices.join('；'))}</p><p class="round-verbatim">${h(this.drafts[id].text)}</p></details>`).join('')}</section>`:''}`;
+  /** 汇总入口列出全项目所有轮次，每轮一张卡片，不展开整项目的问题清单。 */
+  private roundCatalog(content:HTMLElement){
+    const groups=new Map<string,ProjectDocument[]>();
+    for(const q of this.all()){const key=questionRoundKey(q);groups.set(key,[...(groups.get(key)??[]),q]);}
+    const rounds=[...groups].reverse(),missing=Object.keys(this.drafts).filter(id=>filled(this.drafts[id])&&!this.all().some(q=>q.id===id));
+    content.innerHTML=`<div class="round-summary-tools"><h2>轮次汇总</h2><button data-summary>查看当前轮</button></div>
+      <p class="quiet">每轮独立查看回答、复制开场白；旧轮问答始终保留。</p>
+      <div class="round-catalog">${rounds.map(([key,questions])=>{
+        const answers=questions.map(q=>this.drafts[q.id]??latestAnswer(q)),answered=answers.filter(a=>a&&a.action!=='暂缓'&&a.action!=='前提不成立'&&(a.choices.length||a.text.trim())).length,issues=answers.filter(a=>a?.action==='前提不成立').length;
+        return `<section class="round-card"><header><h3>${h(inquiry(questions[0]).round)}</h3><button data-draft-round="${h(key)}">查看本轮</button></header><p>共 ${questions.length} 题 · 已回答 ${answered} 题 · 暂缓 ${questions.length-answered-issues} 题${issues?` · 题目有问题 ${issues} 题`:''}</p>${key===this.session.round?'<small>当前轮次</small>':''}</section>`;
+      }).join('')||'<p>还没有轮次。</p>'}</div>
+      ${missing.length||this.session.previousDrafts?.length?`<details class="round-source"><summary>查看旧题的未完成记录</summary>${missing.map(id=>`<details><summary>${h(id)} · 题目已移除</summary><p>${h(this.drafts[id].choices.join('；'))}</p><p class="round-verbatim">${h(this.drafts[id].text)}</p></details>`).join('')}${(this.session.previousDrafts??[]).map(old=>`<details><summary>${h(old.title)} · 题意已变化</summary><p>${h(old.draft.choices.join('；'))}</p><p class="round-verbatim">${h(old.draft.text)}</p></details>`).join('')}</details>`:''}`;
   }
   private compositionStart=()=>{this.composing=true;};
   private compositionEnd=()=>{
@@ -423,16 +414,6 @@ export class RoundQuestions {
         const action=this.host.querySelector<HTMLInputElement>('[name=action]');if(!action)return;
         action.value=action.value==='前提不成立'?'':'前提不成立';this.capture(true,true);this.render();return;
       }
-      if(b.hasAttribute('data-reviewed')){this.navigate(()=>{
-        const doc=this.current();if(!doc)return;const draft=this.drafts[doc.id];
-        if(draft){draft.hash=doc.hash;draft.questionText=doc.text;draft.choices=draft.choices.filter(c=>inquiry(doc).options.includes(c));this.basisCache.clear();draft.basis=this.basis(doc);}
-        this.session.reviewedBases??={};this.session.reviewedBases[doc.id]=this.basis(doc);this.save();this.render();
-      });return;}
-      if(b.hasAttribute('data-revise')){if(this.snapshot.historical)return;this.navigate(()=>{
-        const doc=this.current();if(!doc)return;const answer=latestAnswer(doc);
-        if(answer){this.drafts[doc.id]={...answer,action:answer.action==='回答'?'':answer.action,hash:doc.hash,questionText:doc.text,basis:this.basis(doc)};this.basisCache.clear();}
-        this.render();
-      });return;}
       this.navigate(()=>{
         if(b.hasAttribute('data-next')||b.hasAttribute('data-previous')){
           const visible=this.visible(),at=visible.findIndex(d=>d.id===this.session.question)+(b.hasAttribute('data-next')?1:-1);
@@ -443,7 +424,7 @@ export class RoundQuestions {
         else if(b.hasAttribute('data-all-questions')){this.session.directory=emptyDirectory();this.session.question='';this.session.summary=false;this.render();}
         else if(b.dataset.draftRound){
           this.session.round=b.dataset.draftRound;
-          if(this.all().some(q=>questionRoundKey(q)===this.session.round&&q.status==='archived'&&filled(this.drafts[q.id]))){this.state().includeArchived=true;this.banner='本轮有归档回答，已显示归档问题供核对。';}
+          if(this.all().some(q=>questionRoundKey(q)===this.session.round&&q.status==='archived')){this.state().includeArchived=true;this.banner='本轮包含归档问题。';}
           this.session.question=this.round()[0]?.id??'';this.state().questionId=this.session.question;this.session.summary=true;this.session.summaryMode='round';this.render();
         }
         else if(b.dataset.question){this.selectQuestion(b.dataset.question);this.render();}
@@ -457,37 +438,57 @@ export class RoundQuestions {
     await openCollaboration('inquiry',this.snapshot,this.documentId?[this.documentId]:[],{fixed:true,title:this.documentId?'围绕当前文档发起一轮策问':'围绕当前项目发起一轮策问'});
   }
   private async handoff(copy=false){
-    if(isTransientProject(this.snapshot.project.id)){this.banner='示例回答只在会话中保留；请先另存为项目，再从新项目打开本轮汇总。';this.render();await this.options.saveAs();return;}
-    await this.saveRoundAnswers();
-    const receipt=this.receipt();if(!receipt)throw new Error('本轮没有可分析的回答，请先回答问题。');
-    if(copy){const copied=await copyAnswerOpening(this.snapshot,receipt);if(copied){this.banner='已复制开场白，请发送给你使用的 LLM；等待模型读取并分析。';this.render();return;}}
-    await openCollaboration('answers',this.snapshot,[...new Set([...receipt.documentIds,...receipt.questions.map(q=>q.id)])],{fixed:true,title:'分析本轮回答，再确认是否继续',answers:receipt});
-  }
-  private async saveRoundAnswers(){
-    if(this.snapshot.historical)throw new Error('历史版本只读，不能保存回答。');
-    const round=this.round(),roundKey=this.session.round;
-    const docs=this.projected(),answered=round.filter(d=>filled(this.drafts[d.id]));
-    if(!answered.length){this.refreshReceipt(roundKey);return;}
-    for(const doc of answered){
-      if(this.reviewReason(doc))throw new Error(`“${doc.title}”需要先复核；旧草稿已经保留。`);
-      if(!questionAvailable(doc,docs).active)throw new Error(`“${doc.title}”的前题条件尚未满足，请先复核。`);
-    }
-    const answers=answered.map(doc=>{const d=this.drafts[doc.id];return {documentId:doc.id,baseHash:doc.hash,choices:d.choices,text:d.text,action:d.action||'回答',supersedes:[...inquiry(doc).previous.matchAll(/### 回答 ([A-Za-z0-9_-]+)/g)].at(-1)?.[1]};});
-    const signature=JSON.stringify(answers);if(signature!==this.signature){this.signature=signature;this.requestId=crypto.randomUUID();}
-    this.busy=true;this.render();
+    if(isTransientProject(this.snapshot.project.id)){this.banner='示例回答只在会话中保留；请先另存为项目。';this.render();await this.options.saveAs();return;}
+    this.busy=true;this.feedback();
     try{
-      const next=await projectAction<ProjectSnapshot>(this.snapshot.project.id,'answers',{requestId:this.requestId,answers});
-      for(const answer of answers)delete this.drafts[answer.documentId];
-      this.snapshot=next;this.basisCache.clear();this.sourceWarnings.clear();this.session.receipts??={};
-      // 本轮收据包含此前保存和本次修改的全部回答；空白题保持暂缓，不代选方案。
-      this.refreshReceipt(roundKey);
-      this.session.submittedBases??={};this.session.reviewedBases??={};
-      for(const doc of answered){const saved=this.all().find(q=>q.id===doc.id);if(saved){const basis=this.basis(saved);this.session.submittedBases[doc.id]=basis;this.session.reviewedBases[doc.id]=basis;}}
-      this.session.summary=true;this.session.summaryMode='round';
-      this.banner=isTransientProject(next.project.id)?'示例回答已保留在本次会话，未创建本地项目文件。':'原始回答已保存。请复制开场白交给 LLM 分析整理。';
-      this.save();this.options.apply(next);
-      window.dispatchEvent(new CustomEvent('cewen:tutorial-evidence',{detail:{name:'questions-answered',projectId:next.project.id}}));
+      // 复制只等待尚在进行的自动记录，不是一次人工提交，也不重写旧答案。
+      await this.flushAnswers();
+      if(this.round().some(doc=>filled(this.drafts[doc.id])))throw new Error(this.syncError||'本轮有回答尚未记录，请检查前题条件或服务连接；输入仍保留。');
+      this.refreshReceipt(this.session.round);
+      const receipt=this.receipt();if(!receipt)throw new Error('本轮没有可分析的回答，请先回答问题。');
+      if(copy&&await copyAnswerOpening(this.snapshot,receipt)){this.banner='已复制开场白，请发给 LLM 讨论。';return;}
+      await openCollaboration('answers',this.snapshot,[...new Set([...receipt.documentIds,...receipt.questions.map(q=>q.id)])],{fixed:true,title:'分析本轮回答，再确认是否继续',answers:receipt});
     }finally{this.busy=false;this.render();}
+  }
+  /** 连续输入合并记录，写入期间不禁用表单；后续输入不会被已完成的旧请求清除。 */
+  private async flushAnswers():Promise<void>{
+    if(this.syncing){await this.syncing;return this.flushAnswers();}
+    if(this.snapshot.historical||isTransientProject(this.snapshot.project.id)||this.composing)return;
+    if(this.autosaveTimer){clearTimeout(this.autosaveTimer);this.autosaveTimer=undefined;}
+    this.syncing=this.recordPending();
+    try{await this.syncing;}finally{this.syncing=undefined;}
+  }
+  private async recordPending(){
+    for(;;){
+      this.rebaseDrafts();const docs=this.projected();
+      const pending=this.all().filter(doc=>filled(this.drafts[doc.id])&&questionAvailable(doc,docs).active);
+      if(!pending.length)return;
+      // 不同轮可自动记录，但模型交接仍只读取用户选择的这一轮。
+      const sent=new Map(pending.map(doc=>[doc.id,this.answerValue(this.drafts[doc.id])]));
+      const answers=pending.map(doc=>{const d=this.drafts[doc.id];return {documentId:doc.id,baseHash:doc.hash,choices:[...d.choices],text:d.text,action:d.action||'回答'};});
+      const signature=JSON.stringify(answers);if(signature!==this.signature){this.signature=signature;this.requestId=crypto.randomUUID();}
+      this.writing=new Set(pending.map(doc=>doc.id));
+      let next:ProjectSnapshot;
+      try{next=await projectAction<ProjectSnapshot>(this.snapshot.project.id,'answers',{requestId:this.requestId,answers});}
+      catch(error){
+        // 实际文件冲突先刷新，依据题意决定保留还是转存旧输入，绝不覆盖外部新题。
+        if(error instanceof ClientError&&['QUESTION_CHANGED','FILE_CONFLICT'].includes(error.code)){
+          this.snapshot=await readProject(this.snapshot.project.id);this.rebaseDrafts();this.sourceWarnings.clear();this.save();
+        }
+        throw error;
+      }finally{this.writing.clear();}
+      for(const [id,value] of sent)if(this.drafts[id]&&this.answerValue(this.drafts[id])===value)delete this.drafts[id];
+      this.snapshot=next;this.rebaseDrafts();this.sourceWarnings.clear();this.syncError='';
+      if(this.banner.startsWith('自动记录尚未完成'))this.banner='';
+      this.save();
+      if(!this.disposed){
+        // 让 capture 继续使用新的正文基准，原表单和输入法焦点不替换。
+        if(this.displayed)this.displayed=this.current();
+        this.options.apply(next);this.renderNav();this.updateProgress();this.feedback();
+        window.dispatchEvent(new CustomEvent('cewen:tutorial-evidence',{detail:{name:'questions-answered',projectId:next.project.id}}));
+      }
+      if(this.composing)return;
+    }
   }
   /** 交接依据来自项目中的最新原始回答，重复制不会再次追加相同答案。 */
   private refreshReceipt(roundKey:string){
@@ -499,17 +500,19 @@ export class RoundQuestions {
   /** 新快照只更新目录、数量和提示；正在输入时保留表单及中文组合焦点。 */
   receive(next:ProjectSnapshot){
     if(this.disposed||next.project.id!==this.snapshot.project.id)return;
-    const ids=new Set(this.all().map(q=>q.id));this.capture(false);this.snapshot=next;this.basisCache.clear();this.sourceWarnings.clear();this.rememberSubmittedBases();
+    const ids=new Set(this.all().map(q=>q.id));this.capture(false);this.snapshot=next;this.sourceWarnings.clear();this.rebaseDrafts();
     const added=this.all().filter(q=>!ids.has(q.id)).length;
-    if(added)this.banner=`收到 ${added} 个新问题，可从项目问题目录选择；当前草稿已保留。`;
+    if(added)this.banner=`收到 ${added} 个新问题，可从项目问题目录选择；当前回答已保留。`;
     const current=this.current();
     if(current){
       if(!this.session.summary)this.session.round=questionRoundKey(current);
-      if(this.reviewReason(current))this.banner='当前题目、来源或前题已变化，草稿保留；修改回答即可使用当前题目。';
-      else {const available=questionAvailable(current,this.projected());if(!available.active)this.banner=available.reason+'；本题仍可查看，草稿保留。';}
+      const available=questionAvailable(current,this.projected());if(!this.session.summary&&!available.active&&!latestAnswer(current))this.banner=available.reason;
     }
-    if(!current&&this.displayed)this.banner='当前题目已移除，原草稿保留在全部草稿中待复核。';
-    if(this.composing||this.host.contains(document.activeElement)){this.feedback();this.renderNav();}
+    if(!current&&this.displayed)this.banner='当前题目已移除，原输入保留在轮次汇总的旧题记录中。';
+    const changed=!!current&&!!this.displayed&&questionDefinition(current)!==questionDefinition(this.displayed);
+    if(changed&&this.composing)this.pendingNavigation=()=>this.render();
+    if(!changed&&(this.composing||this.host.contains(document.activeElement))){this.feedback();this.renderNav();}
+    else if(changed&&this.composing){this.feedback();this.renderNav();}
     else this.render();
   }
   show(nav:HTMLElement){

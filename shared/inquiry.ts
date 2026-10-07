@@ -4,7 +4,7 @@ import { readHeader } from './markdown.ts';
 import { setMetadata } from './editing.ts';
 
 /** 发题入口共用简洁编写规范，模型无需依赖额外安装的 Skill 才能获知边界。 */
-export const questionAuthoringRules='问题标题直接描述具体设计问题，不加 Q编号、P等级。背景只解释已有依据与具体未知，不重复分类、登记范围、入库目的、来源路径或软件操作说明；来源和轮次使用工具字段关联。每题确认一个明确边界，选项说明收益与代价，不预选，不将自定义回答、暂缓、问题反馈写成设计选项；这些操作由界面提供。没有明确摘录时不创建空锚点，不能编造来源身份。';
+export const questionAuthoringRules='一轮是一次交给用户回答的完整问题批次，同批跨文档共用轮次身份。已答题不改标题、背景、选项、条件或轮次；修改与追问创建新题ID和新轮，旧问答保留，可用follows关联。分析或来源更新不要求用户逐题复核。问题标题直接描述设计问题，不加Q编号、P等级。背景只解释依据与未知，不重复分类、范围、来源路径或操作说明；来源和轮次用工具字段关联。每题确认一个边界，选项说明收益与代价，不预选，不加入暂缓或问题反馈等操作项。无明确摘录时省略锚点，不编造来源。';
 
 /** 同一题的背景、选项和回答共用一次语法解析；缓存只含原文投影，不保存或修改用户答案。 */
 type QuestionContent = { metadata: Record<string, unknown>; bodyOffset: number; headings: { title: string; depth: number; start: number; end: number }[] };
@@ -41,6 +41,11 @@ export function inquiry(document: ProjectDocument) {
   const { metadata } = questionContent(document.text);
   const options = section(document.text, '可选方案').text.split('\n').filter(line => /^\s*-\s+[A-Z][：:]/.test(line)).map(line => line.replace(/^\s*-\s+/, '').trim());
   return { id: document.id, title: document.title, background: section(document.text, '问题背景').text, options, multiple: metadata.mode === 'multiple', follows: typeof metadata.follows === 'string' ? metadata.follows : '', condition: typeof metadata.condition === 'string' ? metadata.condition : '', status: String(metadata.status ?? 'open'), round: typeof metadata.round === 'string' ? metadata.round : '未分轮次', previous: section(document.text, '用户原始回答').text, interpretation: section(document.text, '模型解释').text, decision: section(document.text, '决定记录').text, baseRevision: typeof metadata.baseRevision === 'string' ? metadata.baseRevision : undefined };
+}
+/** 只有实际题意与条件属于问题定义；分析、回答、来源正文及文件哈希变化不触发重答。 */
+export function questionDefinition(document: ProjectDocument): string {
+  const question=inquiry(document),meta=questionContent(document.text).metadata;
+  return JSON.stringify([question.title,question.background,question.options,question.multiple,question.follows,question.condition,meta.when??null,meta.questId??'',meta.roundId??question.round]);
 }
 /** 作答标题只保留问题描述；旧题中的编号与优先级仍保留在正式 Markdown 中。 */
 export function questionDisplayTitle(title: string): string {
