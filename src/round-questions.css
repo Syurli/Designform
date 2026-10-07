@@ -1,4 +1,4 @@
-/* 策问复用原工作区与左侧目录，一题一屏，汇总后才提交。 */
+/* 策问复用原工作区与左侧目录，一题一屏；汇总末尾复制开场白时保存本轮回答。 */
 .round-heading{display:flex;align-items:center;gap:10px;position:sticky;top:-20px;background:var(--surface-page);padding:10px 0;z-index:2;border-bottom:1px solid var(--line-soft)}
 .round-heading>div{flex:1;min-width:0}.round-heading strong,.round-heading small{display:block}.round-heading small{color:var(--text-muted);font-size:12px;margin-top:5px}
 .round-content{max-width:820px;margin:20px auto}.round-question h2{font-size:24px;margin:12px 0}.round-background{white-space:pre-wrap;line-height:1.8;color:var(--text-body)}.round-question fieldset{border:0;padding:0;display:flex;flex-direction:column;gap:10px}.round-question label:not(.round-option){display:flex;flex-direction:column;gap:8px}.round-question textarea{width:100%;box-sizing:border-box;resize:vertical;font:inherit;line-height:1.7;padding:12px}.round-option{display:flex;align-items:flex-start;gap:10px;border:1px solid var(--line-soft);background:var(--surface-raised);padding:14px;border-radius:7px;cursor:pointer;line-height:1.65}.round-option:has(input:checked){border-color:var(--accent-strong);background:var(--surface-tint)}.round-option input{margin-top:5px;flex:none}.round-navigation{display:flex;gap:12px;align-items:center;justify-content:space-between;margin:24px 0}.round-navigation span{font-size:12px;color:var(--text-muted)}
@@ -24,9 +24,8 @@
 .round-summary header strong{min-width:0;flex:1;overflow-wrap:anywhere}
 .round-summary header>button{flex:none;align-self:flex-start}
 .round-summary-group>h3,.round-summary-tools h2,.round-draft-group h3{min-width:0;overflow-wrap:anywhere}
-.round-submit-choice{display:flex;align-items:center;gap:7px;margin:10px 0;font-size:13px}
 
-/* 全部草稿仅提供分轮跳转，提交按钮始终留在单轮汇总内。 */
+/* 其他轮回答只提供分轮跳转，复制与保存始终留在对应轮的汇总内。 */
 .round-draft-group{margin:20px 0;border:1px solid var(--line-soft);border-radius:7px;overflow:hidden}
 .round-draft-group>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:var(--surface-raised)}
 .round-draft-group h3{font-size:14px;margin:0}
@@ -35,3 +34,14 @@
 .round-draft-question small{font-size:12px;color:var(--text-muted);margin-top:3px}
 .round-empty>button{margin:6px 8px 6px 0}
 @media(max-width:780px){.round-heading{flex-wrap:wrap}.round-heading>div{flex-basis:calc(100% - 150px)}.round-summary-tools,.round-draft-group>header{flex-wrap:wrap}.round-navigation{gap:8px}.round-navigation span{font-size:11px}}
+
+/* 清除选择与问题反馈保持轻量，来源诊断默认折叠，不挤占回答空间。 */
+.round-question .round-text-button{align-self:flex-start;border:0;background:transparent;color:var(--text-muted);padding:3px 0;font-size:12px;box-shadow:none}
+.round-answer-actions{display:flex;align-items:center;gap:10px;margin-top:2px}
+.round-answer-actions button{font-size:12px;padding:6px 10px;background:transparent}
+.round-answer-actions button[aria-pressed=true]{border-color:var(--accent-strong);color:var(--accent-strong)}
+.round-answer-actions span,.round-saved-answer,.round-result-count{font-size:12px;color:var(--text-muted)}
+.round-review{font-size:12px;margin:12px 0;color:var(--text-muted)}
+.round-review pre{white-space:pre-wrap;max-height:180px;overflow:auto}
+.round-condition,.round-review-note{font-size:12px;color:var(--text-muted)}
+.round-handoff h3{font-size:16px;margin:0 0 8px}.round-handoff p{font-size:13px;margin:0 0 10px}.round-handoff small{display:block;color:var(--text-muted);margin-top:8px}

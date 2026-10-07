@@ -642,7 +642,7 @@ export class DocumentDesktop {
       importQuestions:()=>document.getElementById('project-exchange')?.click(),
       onStateChange:stats=>{this.questionStats=stats;this.updateQuestionBrand();},
     });
-    this.returnToProject();this.notice('策问模式 · 切换题目保留草稿；在本轮汇总中明确提交。');
+    this.returnToProject();this.notice('策问模式 · 回答自动在本机保留；汇总末尾复制开场白时保存本轮回答。');
   }
   /** 外部主导航离开时只暂存作答；下次策问仍恢复本项目的独立位置。 */
   leaveQuestionMode(){this.exitQuestions(false);}

@@ -37,6 +37,11 @@ export function parseAnchor(value: unknown): ContentAnchor {
   for(const key of ['localMs','panelLocalMs'] as const){const n=raw[key];if(typeof n==='number'&&Number.isSafeInteger(n)&&n>=0&&n<=86400000)result[key]=n;}if(raw.draft===true)result.draft=true;
   return result;
 }
+/** 空锚点表示未指定来源，不能据此报告文档已丢失。 */
+export function hasAnchorTarget(value: unknown): boolean {
+  const anchor = parseAnchor(value);
+  return Boolean(anchor.documentId.trim() || anchor.objectId?.trim());
+}
 export function anchorFromText(snapshot: ProjectSnapshot, documentId: string, excerpt: string, blockId?: string): ContentAnchor {
   const doc = snapshot.documents.find(d => d.id === documentId);
   const quote = excerpt.trim().slice(0, 4000);

@@ -1,6 +1,6 @@
 import {decisionBasis,decisionState} from '../../shared/creative/decisions.ts';
 import {queryObjects,creativeStatistics} from '../../shared/creative/query.ts';
-import {parseAnchor,resolveAnchor} from '../../shared/creative/anchors.ts';
+import {parseAnchor,resolveAnchor,hasAnchorTarget} from '../../shared/creative/anchors.ts';
 import {prepareWanleiExchange,validateWanleiReturn} from '../../shared/creative/bridge.ts';
 import { APP_VERSION } from '../../shared/version.ts';
 import { detectMedia } from '../../shared/creative/media.ts';
@@ -58,7 +58,9 @@ export class CreativeService {
   return this.projects.runOperation(id,{...input,requestId:requireString(input.requestId,'请求 ID',180)},()=>{const objectId=requireId(input.objectId),documentId=requireId(input.documentId),object=definition.create(objectId,title);object.data={...object.data,...asData(input.data)};object.description=asString(input.description);if(type==='quest')object.data.rounds=[];if(type==='decision')delete object.data.confirmation;const errors=validateObject(object);if(errors.length)throw new ProjectError('INVALID_MODULE',errors.join('；'));return {projectId:id,requestId:asString(input.requestId),baseRevision:snapshot.revision,actor:'user' as const,reason:`创建${definition.title}：${title}`,changes:[{path:`docs/creative/${documentId}.md`,baseHash:null,text:makeDocument(documentId,title,[object])}]};});}
  async createQuest(id:string,input:Record<string,unknown>){const snapshot=await this.projects.read(id);guard(snapshot);
   return this.projects.runOperation(id,{...input,requestId:requireString(input.requestId,'请求 ID',180)},()=>{
-   const questId=requireId(input.questId),quest=moduleRegistry.get('quest')!.create(questId,requireString(input.title,'任务标题',200));quest.data.goal=requireString(input.goal,'目标');quest.data.scope=asString(input.scope);quest.data.targetIds=asStrings(input.targetIds);quest.data.documentIds=asString(input.documentIds);quest.data.anchor=JSON.parse(JSON.stringify(parseAnchor(input.anchor)));
+   const questId=requireId(input.questId),quest=moduleRegistry.get('quest')!.create(questId,requireString(input.title,'任务标题',200));quest.data.goal=requireString(input.goal,'目标');quest.data.scope=asString(input.scope);quest.data.targetIds=asStrings(input.targetIds);quest.data.documentIds=splitIds(input.documentIds).join(',');
+   // 文档级讨论只需真实文档身份；未指定摘录时不要制造 documentId 为空的锚点。
+   if(hasAnchorTarget(input.anchor)){const anchor=parseAnchor(input.anchor),resolved=resolveAnchor(snapshot,anchor);if(['missing','ambiguous'].includes(resolved.state))throw new ProjectError('ANCHOR_UNRESOLVED',resolved.reason);quest.data.anchor=JSON.parse(JSON.stringify(anchor));}else delete quest.data.anchor;
    for(const target of asStrings(quest.data.targetIds))findObject(snapshot,target);
    for(const target of splitIds(input.documentIds))if(!snapshot.documents.some(d=>d.id===target))throw new ProjectError('MISSING_DOCUMENT','关联文档不存在');
    return {projectId:id,requestId:asString(input.requestId),baseRevision:snapshot.revision,actor:'llm' as const,reason:`发起 Quest：${quest.title}`,changes:[{path:`docs/quests/${questId}.md`,baseHash:null,text:makeDocument(`doc-${questId}`,quest.title,[quest],'Quest 是创作讨论，不代表已确认规则。')}]};
@@ -81,7 +83,10 @@ export class CreativeService {
     const options=asStrings(q.options);if(options.length>26)throw new ProjectError('INVALID_QUESTION','单题最多 26 个选项');
     const targets=[...documents].filter(doc=>snapshot.nodes.some(n=>n.id===doc));
     let text=questionDocument({id:qid,title:requireString(q.title,'问题标题',200),background:requireString(q.background,'问题背景'),options,targets,revision:snapshot.revision,round:`${quest.title} / 第 ${rounds.length+1} 轮`,mode:q.mode==='multiple'?'multiple':'single',...(when.questionId?{when:{questionId:requireId(when.questionId),...(when.option?{option:asString(when.option)}:{})}}:{}),...(q.follows?{follows:requireId(q.follows),condition:asString(q.condition)}:{})});
-    text=setMetadata(text,{questId,roundId,objectTargets:asStrings(q.targetIds).length?asStrings(q.targetIds):asStrings(quest.data.targetIds),anchor:quest.data.anchor});changes.push({path:`docs/questions/${qid}.md`,baseHash:null,text});
+    // 老 Quest 可能带有空锚点；发新题时省略它，有明确来源才继承并校验。
+    const anchor=hasAnchorTarget(q.anchor)?q.anchor:quest.data.anchor;
+    if(hasAnchorTarget(anchor)){const resolved=resolveAnchor(snapshot,anchor);if(['missing','ambiguous'].includes(resolved.state))throw new ProjectError('ANCHOR_UNRESOLVED',resolved.reason);}
+    text=setMetadata(text,{questId,roundId,objectTargets:asStrings(q.targetIds).length?asStrings(q.targetIds):asStrings(quest.data.targetIds),...(hasAnchorTarget(anchor)?{anchor:parseAnchor(anchor)}:{})});changes.push({path:`docs/questions/${qid}.md`,baseHash:null,text});
    }
    quest.data.rounds=[...rounds,{id:roundId,number:rounds.length+1,summary:asString(input.summary),questionIds:[...seen],sourceRevision:snapshot.revision,createdAt:new Date().toISOString()}];
    const doc=snapshot.documents.find(d=>d.id===located.documentId)!;changes.push({path:doc.path,baseHash:doc.hash,text:replaceObject(doc.text,located,quest)});

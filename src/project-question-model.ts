@@ -17,8 +17,8 @@ export interface QuestionStateInfo {
   sourceIds: string[]; blocked?: boolean; reason?: string;
 }
 export type QuestionRecords = Readonly<Record<string, QuestionStateInfo>> | readonly QuestionStateInfo[];
-export const questionFilterLabels: Record<QuestionFilter, string> = { all: '全部', pending: '待答', draft: '草稿', submitted: '已答', review: '待复核' };
-export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '草稿', submitted: '已答', review: '待复核', deferred: '暂缓草稿', premise: '前提不成立草稿' };
+export const questionFilterLabels: Record<QuestionFilter, string> = { all: '全部', pending: '待答', draft: '本机回答', submitted: '已答', review: '题目更新' };
+export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '已回答', submitted: '已保存', review: '题目已更新', deferred: '暂缓', premise: '题目有问题' };
 
 /** 普通来源必须真实存在于当前快照，不把问题、索引、README 或媒体说明当成文档入口。 */
 export function questionDocuments(snapshot: ProjectSnapshot): ProjectDocument[] {
@@ -83,7 +83,7 @@ export function questionRecord(records: QuestionRecords, id: string): QuestionSt
 }
 export function questionMatchesFilter(record: QuestionStateInfo | undefined, filter: QuestionFilter): boolean {
   const status = record?.status ?? 'pending';
-  return filter === 'all' || filter === 'draft' && ['draft', 'deferred', 'premise'].includes(status) || status === filter;
+  return filter === 'all' || filter === 'draft' && ['draft', 'deferred', 'premise'].includes(status) || filter === 'submitted' && ['draft','submitted','premise'].includes(status) || filter === 'pending' && ['pending','deferred'].includes(status) || status === filter;
 }
 
 /** 同一问题只返回一次；分类汇总自身和后代的正式问题及普通来源文档，不改变问题归属。 */

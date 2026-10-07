@@ -1,10 +1,10 @@
 import type { ProjectDocument, ProjectSnapshot } from '../shared/model';
-import { inquiry, questionAvailable, answerQuestion } from '../shared/inquiry';
+import { inquiry, questionAvailable, answerQuestion, questionDisplayTitle, questionDisplayBackground } from '../shared/inquiry';
 import { readHeader } from '../shared/markdown';
 import { isTransientProject } from '../shared/transient';
 import { answerHandoff, questionRoundKey, type AnswerHandoff } from '../shared/answer-handoff';
 import { buildCreativeIndex } from '../shared/creative/content';
-import { resolveAnchor } from '../shared/creative/anchors';
+import { resolveAnchor, hasAnchorTarget } from '../shared/creative/anchors';
 import { relatedQuestions } from './creative/questions';
 import { projectAction } from './project-client';
 import { copyAnswerOpening, openCollaboration } from './prompt-panel';
@@ -121,7 +121,7 @@ export class RoundQuestions {
     const previous=this.current();
     if(previous&&previous.id!==id){
       const changedRound=questionRoundKey(previous)!==questionRoundKey(q),changedSources=JSON.stringify(questionSources(this.snapshot,previous))!==JSON.stringify(questionSources(this.snapshot,q));
-      if(changedRound||changedSources)this.banner=`已切换到${changedSources?'另一来源文档的':''}${inquiry(q).round}；上一题只暂存，未提交。`;
+      if(changedRound||changedSources)this.banner='上一题的回答已在本机保留。';
     }
     this.session.question=id;this.session.round=questionRoundKey(q);this.session.summary=false;
     this.state().questionId=id;
@@ -136,7 +136,7 @@ export class RoundQuestions {
     try{
       localStorage.setItem('cewen-answers-090:'+this.snapshot.project.id,JSON.stringify(this.drafts));
       localStorage.setItem('cewen-round-sessions:'+this.snapshot.project.id,JSON.stringify(memory.get(this.snapshot.project.id)?.sessions??{}));
-    }catch{this.banner='本机草稿缓存不可用，当前会话仍保留，请及时复制或提交。';}
+    }catch{this.banner='本机草稿缓存不可用，当前会话仍保留，请及时到汇总复制开场白并保存回答。';}
   }
   private dependency(doc:ProjectDocument){const m=readHeader(doc.text).metadata;return (m.when as {questionId?:string})?.questionId??(typeof m.follows==='string'?m.follows:'');}
   /** 输入只改变个人草稿，创作对象索引仅在公开快照替换时重新解析。 */
@@ -168,7 +168,7 @@ export class RoundQuestions {
     const missing=questionSources(this.snapshot,doc).filter(id=>!valid.has(id));
     if(missing.length)return remember(`来源已失效：${missing.join('、')}；问题与原始回答保留。`);
     const meta=readHeader(doc.text).metadata;
-    if(meta.anchor){
+    if(hasAnchorTarget(meta.anchor)){
       const resolved=resolveAnchor(this.snapshot,meta.anchor);
       if(resolved.state==='missing'||resolved.state==='ambiguous')return remember(resolved.reason);
       const anchor=meta.anchor as {documentHash?:string};
@@ -177,9 +177,9 @@ export class RoundQuestions {
     return remember('');
   }
   private sourceReason(doc:ProjectDocument){
-    const warning=this.sourceWarning(doc);if(warning)return warning;
+    // 来源诊断放在折叠依据中；来源暂时不可定位不妨碍用户表达对问题本身的回答。
     const saved=this.session.submittedBases?.[doc.id];
-    if(saved&&saved!==this.basis(doc))return '已提交回答的来源或前题已变化，请复核后改答。';
+    if(saved&&saved!==this.basis(doc))return '已保存回答的来源或前题已变化，请核对后改答。';
     return '';
   }
   private reviewReason(doc:ProjectDocument){
@@ -201,27 +201,36 @@ export class RoundQuestions {
   private records(docs=this.projected()):Record<string,QuestionStateInfo>{
     return Object.fromEntries(this.all().map(doc=>{
       const available=questionAvailable(doc,docs),draft=this.drafts[doc.id],review=this.reviewReason(doc);
-      const status:QuestionStateInfo['status']=review||latestAnswer(doc)&&!available.active?'review':filled(draft)?draft!.action==='暂缓'?'deferred':draft!.action==='前提不成立'?'premise':'draft':latestAnswer(doc)?'submitted':'pending';
+      const saved=latestAnswer(doc),status:QuestionStateInfo['status']=review||saved&&!available.active?'review':filled(draft)?draft!.action==='暂缓'?'deferred':draft!.action==='前提不成立'?'premise':'draft':saved?saved.action==='暂缓'?'deferred':saved.action==='前提不成立'?'premise':'submitted':'pending';
       return [doc.id,{id:doc.id,status,sourceIds:questionSources(this.snapshot,doc),blocked:!available.active,reason:[review,!available.active?available.reason:''].filter(Boolean).join('；')}];
     }));
   }
   private status(doc:ProjectDocument,record=this.records()[doc.id]){
-    const labels:Record<QuestionStateInfo['status'],string>={review:'待复核',draft:'已填写草稿',deferred:'暂缓草稿',premise:'前提不成立草稿',submitted:'已提交',pending:'待回答'};
+    const labels:Record<QuestionStateInfo['status'],string>={review:'题目已更新',draft:'已回答',deferred:'暂缓',premise:'题目有问题',submitted:'已保存',pending:'待回答'};
     return `${labels[record.status]}${record.blocked?' · 条件尚未满足':''}`;
   }
   /** 公开收尾入口供模式退出使用，只保存草稿，不销毁会话或提交。 */
   captureDraft(){this.capture(false);this.save();this.notifyStats();}
-  private capture(updateNav=true){
+  private capture(updateNav=true,acceptCurrent=false){
     const form=this.host.querySelector<HTMLFormElement>('[data-round-form]'),doc=this.displayed;
     if(!form||!doc||this.busy||this.snapshot.historical)return;
     // 禁用条件题的 FormData 不含输入，不能据此删掉此前的草稿。
     if(form.querySelector('fieldset[disabled]'))return;
-    const data=new FormData(form),choices=data.getAll('choice').map(String),text=String(data.get('text')??''),action=String(data.get('action')??'');
-    const old=this.drafts[doc.id];
-    if(old&&old.hash!==doc.hash)for(const choice of old.choices)if(!inquiry(doc).options.includes(choice)&&!choices.includes(choice))choices.push(choice);
-    if(choices.length||text.trim()||action)this.drafts[doc.id]={hash:old?.hash??doc.hash,choices,text,action,questionText:old?.questionText??doc.text,basis:old?.basis??this.basis(doc)};
+    const data=new FormData(form),choices=data.getAll('choice').map(String),text=String(data.get('text')??'');
+    let action=String(data.get('action')??'');
+    const old=this.drafts[doc.id],current=this.current(),accept=acceptCurrent&&current?.hash===doc.hash;
+    // 明确修改当前表单即更新作答基准；仅切页或失焦时保留旧题的原始选择。
+    if(old&&!accept&&old.hash!==doc.hash)for(const choice of old.choices)if(!inquiry(doc).options.includes(choice)&&!choices.includes(choice))choices.push(choice);
+    // 修改旧暂缓记录后，填写内容自动恢复为回答；问题反馈标记仍由独立按钮控制。
+    if(accept&&action==='暂缓'&&(choices.length||text.trim())){
+      action='';const field=form.querySelector<HTMLInputElement>('[name=action]');if(field)field.value='';
+    }
+    // 清空已保存的旧回答表示本次暂缓，不能删除草稿后悄悄回显旧答案。
+    if(!choices.length&&!text.trim()&&!action&&latestAnswer(doc))action='暂缓';
+    if(choices.length||text.trim()||action)this.drafts[doc.id]={hash:accept?doc.hash:old?.hash??doc.hash,choices,text,action,questionText:accept?doc.text:old?.questionText??doc.text,basis:accept?this.basis(doc):old?.basis??this.basis(doc)};
     else delete this.drafts[doc.id];
-    this.basisCache.clear();this.save();if(updateNav)this.renderNav();
+    if(accept){this.session.reviewedBases??={};this.session.reviewedBases[doc.id]=this.basis(doc);}
+    this.basisCache.clear();this.save();this.updateProgress();if(updateNav)this.renderNav();
   }
   private navigate(action:()=>void){
     if(this.busy)return;
@@ -258,10 +267,16 @@ export class RoundQuestions {
     this.notifyStats(records);
   }
   private notifyStats(records=this.records()){
-    this.options.onStateChange?.({pending:this.all().filter(q=>q.status!=='archived'&&records[q.id]?.status!=='submitted').length,drafts:Object.values(this.drafts).filter(filled).length});
+    this.options.onStateChange?.({pending:this.all().filter(q=>q.status!=='archived'&&['pending','deferred','review'].includes(records[q.id]?.status)).length,drafts:Object.values(this.drafts).filter(filled).length});
   }
   private sourceLabel(doc:ProjectDocument){
     return questionSources(this.snapshot,doc).map(id=>this.snapshot.documents.find(d=>d.id===id)?.title??`失效来源 ${id}`).join('、')||'未关联问题';
+  }
+  /** 只替换计数字符，不重画正在输入的表单和中文输入法焦点。 */
+  private updateProgress(){
+    const round=this.round(),count=round.filter(d=>{const a=this.drafts[d.id]??latestAnswer(d);return a&&a.action!=='暂缓'&&a.action!=='前提不成立'&&(a.choices.length||a.text.trim());}).length;
+    const progress=this.host.querySelector<HTMLElement>('[data-answer-progress]');
+    if(progress)progress.textContent=`已回答 ${count} / ${round.length} 题`;
   }
   private render(){
     if(this.disposed)return;
@@ -271,46 +286,90 @@ export class RoundQuestions {
       this.host.innerHTML=`<div class="round-empty"><h2>${hasQuestions?'当前范围没有问题':'这个项目还没有问题'}</h2><p>${hasQuestions?'切换全部问题、状态筛选或清除搜索即可继续；回答草稿仍然保留。':'可预览并编辑项目提问开场白，让 LLM 围绕本项目提出一轮明确问题；已有问题可从项目导入入口加入。'}</p><p class="round-feedback" role="status">${h(this.banner)}</p>${hasQuestions?'<button data-all-questions>查看全部问题</button>':''}<button data-start>生成项目提问开场白</button>${this.options.importQuestions?'<button data-import-questions>导入已有问题</button>':''}<button data-all-drafts>全部草稿</button><button data-back>返回策划案</button></div>`;
       this.renderNav();return;
     }
-    const count=round.filter(d=>filled(this.drafts[d.id])).length,submitted=round.filter(d=>latestAnswer(d)).length;
-    this.host.innerHTML=`<header class="round-heading"><button data-back>← 返回策划案</button><div><strong>${h(doc?this.sourceLabel(doc):this.snapshot.project.name)}</strong><small>${h(doc?inquiry(doc).round:'项目草稿')} · 本轮草稿 ${count}／${round.length} · 已提交 ${submitted}／${round.length}</small></div><button data-summary>本轮汇总</button><button data-all-drafts>全部草稿</button></header><p class="round-feedback" role="status">${h(this.banner)}</p><div class="round-content"></div>`;
+    const count=round.filter(d=>{const a=this.drafts[d.id]??latestAnswer(d);return a&&a.action!=='暂缓'&&a.action!=='前提不成立'&&(a.choices.length||a.text.trim());}).length;
+    this.host.innerHTML=`<header class="round-heading"><button data-back>← 返回策划案</button><div><strong>策问</strong><small data-answer-progress>已回答 ${count} / ${round.length} 题</small></div><button data-summary>本轮汇总</button><button data-all-drafts>其他轮回答</button></header><p class="round-feedback" role="status">${h(this.banner)}</p><div class="round-content"></div>`;
     const content=this.host.querySelector<HTMLElement>('.round-content')!;
     if(this.session.summary){if(this.session.summaryMode==='all')this.allDrafts(content);else this.summary(content);}else if(doc)this.question(content,doc);
     this.renderNav();
   }
+  /** 作答区只放问题、必要背景与回答，协作来源和历史集中在折叠区。 */
   private question(content:HTMLElement,doc:ProjectDocument){
-    const q=inquiry(doc),draft=this.drafts[doc.id],available=questionAvailable(doc,this.projected()),visible=this.visible(),index=visible.findIndex(d=>d.id===doc.id),review=this.reviewReason(doc);
+    const q=inquiry(doc),draft=this.drafts[doc.id],saved=latestAnswer(doc),answer=draft??saved;
+    const available=questionAvailable(doc,this.projected()),visible=this.visible(),index=visible.findIndex(d=>d.id===doc.id),review=this.reviewReason(doc);
     this.displayed=doc;
     const ids=questionSources(this.snapshot,doc),validSources=new Set(questionDocuments(this.snapshot).map(d=>d.id));
-    content.innerHTML=`<article class="round-question"><small>${index>=0?`当前范围第 ${index+1}／${visible.length} 题`:'当前题已不在筛选范围，草稿仍保留'} · ${this.status(doc)}</small><h2>${h(q.title)}</h2><p class="round-background">${h(q.background)}</p>${review?`<section class="round-warning"><strong>${h(review)}</strong>${draft?`<details><summary>查看草稿对应的旧题</summary><pre>${h(draft.questionText??'旧题正文未缓存，请对照历史版本。')}</pre></details><p>旧选择：${h(draft.choices.join('；')||'无')}。已移除的选项不会替你转换。</p>`:''}<button data-reviewed ${available.active&&!this.snapshot.historical?'':'disabled'}>我已核对当前题目与来源</button></section>`:''}${!available.active?`<p class="round-warning">${h(available.reason)}。本题仍可查看，旧回答与草稿保留。</p>`:''}${!draft&&latestAnswer(doc)?'<p>本题已有已提交回答。<button data-revise>在上次答案基础上修改</button></p>':''}<form data-round-form><fieldset ${this.snapshot.historical||!available.active?'disabled':''}>${q.options.map(option=>`<label class="round-option"><input type="${q.multiple?'checkbox':'radio'}" name="choice" value="${h(option)}" ${draft?.choices.includes(option)?'checked':''}/><span>${h(option)}</span></label>`).join('')}<button type="button" data-clear-choice>清除预设选择，改为自由回答</button><label>我的回答／补充理由<textarea name="text" rows="5" placeholder="可以直接表达你的想法、条件和理由。">${h(draft?.text??'')}</textarea></label><label>本题处理<select name="action"><option value="">回答（有内容时计入汇总）</option><option value="暂缓" ${draft?.action==='暂缓'?'selected':''}>暂缓</option><option value="前提不成立" ${draft?.action==='前提不成立'?'selected':''}>前提不成立</option></select></label></fieldset></form><details class="round-source"><summary>原文依据与此前回答</summary>${ids.map(id=>{const source=this.snapshot.documents.find(d=>d.id===id);return source&&validSources.has(id)?`<button data-source="${h(id)}">返回正文：${h(source.title)}</button><pre>${h(readHeader(source.text).body.slice(0,5000))}</pre>`:`<p class="round-warning">来源 ${h(id)} 已失效；本题保留待复核。</p>`;}).join('')}<h4>原始回答</h4><pre>${h(q.previous)}</pre><h4>模型解释</h4><pre>${h(q.interpretation)}</pre><h4>决定记录</h4><pre>${h(q.decision)}</pre></details><footer class="round-navigation"><button data-previous ${index<=0?'disabled':''}>上一题</button><span>沿当前范围切题，可跨文档与轮次；只暂存</span><button class="primary-button" data-next>${index>=visible.length-1?'核对本轮汇总':'下一题'}</button></footer></article>`;
+    const background=questionDisplayBackground(q.background),issue=answer?.action==='前提不成立';
+    content.innerHTML=`<article class="round-question">
+      <small>${index>=0?`第 ${index+1} / ${visible.length} 题`:''}</small>
+      <h2>${h(questionDisplayTitle(q.title))}</h2>
+      ${background?`<p class="round-background">${h(background)}</p>`:''}
+      ${review?`<details class="round-review"><summary>题目已更新，修改回答即可使用当前题目</summary><p>${h(review)}</p>${draft?`<pre>${h(draft.questionText??'')}</pre><p>此前选择：${h(draft.choices.join('；')||'无')}</p>`:''}<button data-reviewed>保留当前回答</button></details>`:''}
+      ${!available.active?`<p class="round-condition">${h(available.reason)}</p>`:''}
+      ${!draft&&saved?'<p class="round-saved-answer">已保存的回答 <button data-revise>修改回答</button></p>':''}
+      <form data-round-form><fieldset ${this.snapshot.historical||!available.active||!draft&&saved?'disabled':''}>
+        ${q.options.map(option=>`<label class="round-option"><input type="${q.multiple?'checkbox':'radio'}" name="choice" value="${h(option)}" ${answer?.choices.includes(option)?'checked':''}/><span>${h(option)}</span></label>`).join('')}
+        <button type="button" class="round-text-button" data-clear-choice>清除选择</button>
+        <label>我的回答 / 补充理由<textarea name="text" rows="4" placeholder="直接写下你的想法；不填写的题目可以稍后再答。">${h(answer?.text??'')}</textarea></label>
+        <input type="hidden" name="action" value="${h(draft?.action??'')}"/>
+        <div class="round-answer-actions"><button type="button" data-question-issue aria-pressed="${issue}">${issue?'已标记题目有问题 · 取消':'题目有问题'}</button>${issue?'<span>可在回答中说明需要调整的地方。</span>':''}</div>
+      </fieldset></form>
+      <details class="round-source"><summary>查看依据与此前回答</summary>
+        ${ids.map(id=>{const source=this.snapshot.documents.find(d=>d.id===id);return source&&validSources.has(id)?`<button data-source="${h(id)}">${h(source.title)}</button><pre>${h(readHeader(source.text).body.slice(0,5000))}</pre>`:`<p>关联记录暂不可定位：${h(id)}</p>`;}).join('')}
+        ${this.sourceWarning(doc)?`<p>${h(this.sourceWarning(doc))}</p>`:''}
+        <h4>此前回答</h4><pre>${h(q.previous)}</pre>
+        ${!['','尚未形成。'].includes(q.interpretation)?`<h4>分析</h4><pre>${h(q.interpretation)}</pre>`:''}
+        ${!['','尚未采纳。'].includes(q.decision)?`<h4>决定记录</h4><pre>${h(q.decision)}</pre>`:''}
+      </details>
+      <footer class="round-navigation"><button data-previous ${index<=0?'disabled':''}>上一题</button><span>回答自动在本机保留</span><button class="primary-button" data-next>${index>=visible.length-1?'查看本轮汇总':'下一题'}</button></footer>
+    </article>`;
   }
+  /** 一轮结果自动收集已填写回答，用户无需再次逐题选择。 */
   private summary(content:HTMLElement){
-    const round=this.round(),receipt=this.receipt(),groups=new Map<string,ProjectDocument[]>(),docs=this.projected(),records=this.records(docs);
+    const round=this.round(),groups=new Map<string,ProjectDocument[]>(),docs=this.projected();
     const valid=new Set(questionDocuments(this.snapshot).map(d=>d.id));
-    for(const doc of round){const ids=questionSources(this.snapshot,doc),source=ids.find(id=>valid.has(id))??ids[0]??'';groups.set(source,[...(groups.get(source)??[]),doc]);}
+    for(const doc of round){const source=questionSources(this.snapshot,doc).find(id=>valid.has(id))??'';groups.set(source,[...(groups.get(source)??[]),doc]);}
+    const result=(doc:ProjectDocument)=>this.drafts[doc.id]??latestAnswer(doc);
+    const answered=round.filter(doc=>{const a=result(doc);return a&&a.action!=='暂缓'&&a.action!=='前提不成立'&&(a.choices.length||a.text.trim());}).length;
+    const issues=round.filter(doc=>result(doc)?.action==='前提不成立').length;
+    // 已保存回答改成全数暂缓也需要保存交接；全新且完全空白的一轮不生成虚假收据。
+    const canHandoff=round.some(doc=>filled(this.drafts[doc.id])||latestAnswer(doc));
     let index=0;
-    content.innerHTML=`<div class="round-summary-tools"><h2>本轮汇总 · ${h(round[0]?inquiry(round[0]).round:'尚未选择轮次')}</h2><button data-all-drafts>查看全部草稿</button></div><p>包含全项目同一轮次的问题，归档题按“含归档”开关显示；按来源文档归组，多来源题只列一次。只提交勾选的已填写回答，其他轮次草稿不参与。</p><div class="round-summary">${[...groups].map(([source,questions])=>`<section class="round-summary-group"><h3>${h(source?this.snapshot.documents.find(d=>d.id===source)?.title??`失效来源 ${source}`:'未关联问题')}</h3>${questions.map(doc=>{
-      const draft=this.drafts[doc.id],answer=latestAnswer(doc),available=questionAvailable(doc,docs),review=this.reviewReason(doc);
-      return `<article><header><strong>${++index}. ${h(doc.title)}</strong><button data-question="${h(doc.id)}">查看／修改</button></header><small>${this.status(doc,records[doc.id])} · ${h(this.sourceLabel(doc))}</small>${filled(draft)?`<label class="round-submit-choice"><input type="checkbox" data-submit-question="${h(doc.id)}" ${!review&&available.active?'checked':''} ${this.snapshot.historical?'disabled':''}/> 本次提交此题</label>`:''}${review||!available.active?`<p class="round-warning">${h(review||available.reason)}</p>`:''}<p>${h(draft?.choices.join('；')||answer?.choices.join('；')||'未选择预设选项')}</p><p class="round-verbatim">${h(draft?.text||(!draft?answer?.text:'')||'本次未填写自定义回答')}</p>${draft?.action?`<p>${h(draft.action)}</p>`:''}</article>`;
-    }).join('')}</section>`).join('')}</div><button class="primary-button" data-submit ${this.busy||this.snapshot.historical||!round.some(d=>filled(this.drafts[d.id]))?'disabled':''}>${this.busy?'正在提交…':'提交本轮勾选回答'}</button>${receipt?`<section class="round-handoff"><h3>本轮回答已提交</h3><p>已保存 ${receipt.questions.length} 份回答。交给 LLM 分析后，由你决定是否开始下一轮。</p>${this.options.hasUnsaved()?'<p>正文还有未保存修改，MCP 将读取已保存版本。</p>':''}<button data-handoff data-copy-opening class="primary-button">复制给 LLM 的开场白</button><button data-handoff>预览／编辑开场白</button><button data-back>返回策划案</button></section>`:''}`;
-    const card=content.querySelector('.round-handoff');if(card)content.prepend(card);
+    content.innerHTML=`<div class="round-summary-tools"><h2>本轮回答汇总</h2><button data-all-drafts>其他轮回答</button></div>
+      <p class="round-result-count">已回答 ${answered} 题 · 暂缓 ${round.length-answered-issues} 题${issues?` · 题目有问题 ${issues} 题`:''}</p>
+      <div class="round-summary">${[...groups].map(([source,questions])=>`<section class="round-summary-group"><h3>${h(source?this.snapshot.documents.find(d=>d.id===source)?.title??'其他问题':'其他问题')}</h3>${questions.map(doc=>{
+        const answer=result(doc),available=questionAvailable(doc,docs),review=this.reviewReason(doc);
+        return `<article><header><strong>${++index}. ${h(questionDisplayTitle(doc.title))}</strong><button data-question="${h(doc.id)}">修改回答</button></header>
+          ${answer?.action==='前提不成立'?'<small>题目有问题</small>':''}
+          ${answer?.choices.length?`<p>${h(answer.choices.join('；'))}</p>`:''}
+          ${answer?.text?`<p class="round-verbatim">${h(answer.text)}</p>`:''}
+          ${!answer||answer.action==='暂缓'?'<p class="quiet">暂缓，稍后再答</p>':''}
+          ${review||!available.active?`<small class="round-review-note">${h(review?'题目已更新，请返回修改回答':available.reason)}</small>`:''}
+        </article>`;
+      }).join('')}</section>`).join('')}</div>
+      <section class="round-handoff"><h3>交给 LLM 分析</h3>
+        <p>复制时将本轮回答保存到项目，再把开场白发给你使用的 LLM。</p>
+        <button data-handoff data-copy-opening class="primary-button" ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>${this.busy?'正在保存回答…':'复制开场白，请 LLM 分析'}</button>
+        <button data-handoff ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>预览 / 编辑开场白</button>
+        ${this.options.hasUnsaved()?'<small>策划正文还有未保存修改，分析将使用已保存正文。</small>':''}
+      </section>`;
   }
   private allDrafts(content:HTMLElement){
     const groups=new Map<string,ProjectDocument[]>(),records=this.records();
-    for(const q of this.all().filter(d=>filled(this.drafts[d.id]))){const key=questionRoundKey(q);groups.set(key,[...(groups.get(key)??[]),q]);}
+    for(const q of this.all().filter(d=>questionRoundKey(d)!==this.session.round&&filled(this.drafts[d.id]))){const key=questionRoundKey(q);groups.set(key,[...(groups.get(key)??[]),q]);}
     const missing=Object.keys(this.drafts).filter(id=>filled(this.drafts[id])&&!this.all().some(q=>q.id===id));
-    content.innerHTML=`<div class="round-summary-tools"><h2>全部回答草稿</h2><button data-summary>返回本轮汇总</button></div><p>按轮次查看或跳转。这里不提供跨轮提交；打开一轮汇总后，再明确勾选该轮答案。</p>${[...groups].map(([key,questions])=>`<section class="round-draft-group"><header><h3>${h(inquiry(questions[0]).round)} · ${questions.length} 份草稿</h3><button data-draft-round="${h(key)}">打开该轮汇总</button></header>${questions.map(q=>`<button class="round-draft-question" data-question="${h(q.id)}"><strong>${h(q.title)}</strong><small>${h(this.sourceLabel(q))} · ${this.status(q,records[q.id])}</small></button>`).join('')}</section>`).join('')||'<p>没有未提交回答草稿。</p>'}${missing.length?`<section class="round-warning"><h3>题目已移除，草稿仍保留</h3>${missing.map(id=>`<details><summary>${h(id)} · 待复核</summary><pre>${h(this.drafts[id].questionText??'旧题正文未缓存')}</pre><p>${h(this.drafts[id].choices.join('；'))}</p><p class="round-verbatim">${h(this.drafts[id].text)}</p></details>`).join('')}</section>`:''}`;
+    content.innerHTML=`<div class="round-summary-tools"><h2>其他轮回答</h2><button data-summary>返回本轮汇总</button></div><p>按轮次继续回答，完成后到该轮汇总复制分析开场白。</p>${[...groups].map(([key,questions])=>`<section class="round-draft-group"><header><h3>${h(inquiry(questions[0]).round)} · ${questions.length} 份草稿</h3><button data-draft-round="${h(key)}">打开该轮汇总</button></header>${questions.map(q=>`<button class="round-draft-question" data-question="${h(q.id)}"><strong>${h(q.title)}</strong><small>${h(this.sourceLabel(q))} · ${this.status(q,records[q.id])}</small></button>`).join('')}</section>`).join('')||'<p>没有其他回答草稿。</p>'}${missing.length?`<section class="round-warning"><h3>题目已移除，草稿仍保留</h3>${missing.map(id=>`<details><summary>${h(id)} · 待复核</summary><pre>${h(this.drafts[id].questionText??'旧题正文未缓存')}</pre><p>${h(this.drafts[id].choices.join('；'))}</p><p class="round-verbatim">${h(this.drafts[id].text)}</p></details>`).join('')}</section>`:''}`;
   }
   private compositionStart=()=>{this.composing=true;};
   private compositionEnd=()=>{
-    this.composing=false;this.capture();const action=this.pendingNavigation;this.pendingNavigation=undefined;
+    this.composing=false;this.capture(true,true);const action=this.pendingNavigation;this.pendingNavigation=undefined;
     if(action)queueMicrotask(()=>{if(!this.disposed)this.navigate(action);});
   };
   private bind(){
     this.host.addEventListener('compositionstart',this.compositionStart);this.host.addEventListener('compositionend',this.compositionEnd);
-    this.host.oninput=()=>this.capture();
+    this.host.oninput=()=>this.capture(true,true);
     // 点击目录会先让文本框失焦；此时不能在按下与抬起之间替换目标按钮。
     // 输入事件已更新目录状态，失焦仅补存最终值与数量，不重绘导航。
-    this.host.onchange=()=>{this.capture(false);this.notifyStats();};
+    this.host.onchange=()=>{this.capture(false,true);this.notifyStats();};
     this.host.onsubmit=e=>e.preventDefault();
     this.host.onclick=e=>{
       const b=(e.target as HTMLElement).closest<HTMLButtonElement>('button');if(!b||b.disabled||this.busy)return;
@@ -319,7 +378,11 @@ export class RoundQuestions {
       if(b.dataset.source){this.navigate(()=>this.options.source(b.dataset.source!));return;}
       if(b.hasAttribute('data-start')){this.capture();run(()=>this.start());return;}
       if(b.hasAttribute('data-import-questions')){this.navigate(()=>this.options.importQuestions?.());return;}
-      if(b.hasAttribute('data-clear-choice')){this.host.querySelectorAll<HTMLInputElement>('[name=choice]').forEach(input=>input.checked=false);this.capture();return;}
+      if(b.hasAttribute('data-clear-choice')){this.host.querySelectorAll<HTMLInputElement>('[name=choice]').forEach(input=>input.checked=false);this.capture(true,true);return;}
+      if(b.hasAttribute('data-question-issue')){
+        const action=this.host.querySelector<HTMLInputElement>('[name=action]');if(!action)return;
+        action.value=action.value==='前提不成立'?'':'前提不成立';this.capture(true,true);this.render();return;
+      }
       if(b.hasAttribute('data-reviewed')){this.navigate(()=>{
         const doc=this.current();if(!doc)return;const draft=this.drafts[doc.id];
         if(draft){draft.hash=doc.hash;draft.questionText=doc.text;draft.choices=draft.choices.filter(c=>inquiry(doc).options.includes(c));this.basisCache.clear();draft.basis=this.basis(doc);}
@@ -340,11 +403,10 @@ export class RoundQuestions {
         else if(b.hasAttribute('data-all-questions')){this.session.directory=emptyDirectory();this.session.question='';this.session.summary=false;this.render();}
         else if(b.dataset.draftRound){
           this.session.round=b.dataset.draftRound;
-          if(this.all().some(q=>questionRoundKey(q)===this.session.round&&q.status==='archived'&&filled(this.drafts[q.id]))){this.state().includeArchived=true;this.banner='本轮有归档草稿，已显示归档问题供复核；尚未提交。';}
+          if(this.all().some(q=>questionRoundKey(q)===this.session.round&&q.status==='archived'&&filled(this.drafts[q.id]))){this.state().includeArchived=true;this.banner='本轮有归档回答，已显示归档问题供核对。';}
           this.session.question=this.round()[0]?.id??'';this.state().questionId=this.session.question;this.session.summary=true;this.session.summaryMode='round';this.render();
         }
         else if(b.dataset.question){this.selectQuestion(b.dataset.question);this.render();}
-        else if(b.hasAttribute('data-submit'))run(()=>this.submit());
         else if(b.hasAttribute('data-handoff'))run(()=>this.handoff(b.hasAttribute('data-copy-opening')));
       });
     };
@@ -356,31 +418,29 @@ export class RoundQuestions {
   }
   private async handoff(copy=false){
     if(isTransientProject(this.snapshot.project.id)){this.banner='示例回答只在会话中保留；请先另存为项目，再从新项目打开本轮汇总。';this.render();await this.options.saveAs();return;}
-    const receipt=this.receipt();if(!receipt)return;
+    await this.saveRoundAnswers();
+    const receipt=this.receipt();if(!receipt)throw new Error('本轮没有可分析的回答，请先回答问题。');
     if(copy){const copied=await copyAnswerOpening(this.snapshot,receipt);if(copied){this.banner='已复制开场白，请发送给你使用的 LLM；等待模型读取并分析。';this.render();return;}}
     await openCollaboration('answers',this.snapshot,[...new Set([...receipt.documentIds,...receipt.questions.map(q=>q.id)])],{fixed:true,title:'分析本轮回答，再确认是否继续',answers:receipt});
   }
-  private async submit(){
-    if(this.snapshot.historical)throw new Error('历史版本只读，不能提交回答。');
+  private async saveRoundAnswers(){
+    if(this.snapshot.historical)throw new Error('历史版本只读，不能保存回答。');
     const round=this.round(),roundKey=this.session.round;
-    const selected=new Set([...this.host.querySelectorAll<HTMLInputElement>('[data-submit-question]:checked')].map(el=>el.dataset.submitQuestion!));
-    const docs=this.projected(selected),answered=round.filter(d=>filled(this.drafts[d.id])&&selected.has(d.id));
-    if(!answered.length)throw new Error('请勾选本次需要提交的已填写问题。');
+    const docs=this.projected(),answered=round.filter(d=>filled(this.drafts[d.id]));
+    if(!answered.length){this.refreshReceipt(roundKey);return;}
     for(const doc of answered){
       if(this.reviewReason(doc))throw new Error(`“${doc.title}”需要先复核；旧草稿已经保留。`);
       if(!questionAvailable(doc,docs).active)throw new Error(`“${doc.title}”的前题条件尚未满足，请先复核。`);
     }
     const answers=answered.map(doc=>{const d=this.drafts[doc.id];return {documentId:doc.id,baseHash:doc.hash,choices:d.choices,text:d.text,action:d.action||'回答',supersedes:[...inquiry(doc).previous.matchAll(/### 回答 ([A-Za-z0-9_-]+)/g)].at(-1)?.[1]};});
-    const validSources=new Set(questionDocuments(this.snapshot).map(d=>d.id));
-    const sourceIds=[...new Set(answered.flatMap(q=>questionSources(this.snapshot,q)).filter(id=>validSources.has(id)))];
     const signature=JSON.stringify(answers);if(signature!==this.signature){this.signature=signature;this.requestId=crypto.randomUUID();}
     this.busy=true;this.render();
     try{
       const next=await projectAction<ProjectSnapshot>(this.snapshot.project.id,'answers',{requestId:this.requestId,answers});
       for(const answer of answers)delete this.drafts[answer.documentId];
       this.snapshot=next;this.basisCache.clear();this.sourceWarnings.clear();this.session.receipts??={};
-      // 收据只绑定本次勾选题的去重来源；无源题仍由稳定问题身份交接。
-      this.session.receipts[roundKey]=answerHandoff(next,answers.map(a=>a.documentId),this.requestId,sourceIds);
+      // 本轮收据包含此前保存和本次修改的全部回答；空白题保持暂缓，不代选方案。
+      this.refreshReceipt(roundKey);
       this.session.submittedBases??={};this.session.reviewedBases??={};
       for(const doc of answered){const saved=this.all().find(q=>q.id===doc.id);if(saved){const basis=this.basis(saved);this.session.submittedBases[doc.id]=basis;this.session.reviewedBases[doc.id]=basis;}}
       this.session.summary=true;this.session.summaryMode='round';
@@ -388,6 +448,13 @@ export class RoundQuestions {
       this.save();this.options.apply(next);
       window.dispatchEvent(new CustomEvent('cewen:tutorial-evidence',{detail:{name:'questions-answered',projectId:next.project.id}}));
     }finally{this.busy=false;this.render();}
+  }
+  /** 交接依据来自项目中的最新原始回答，重复制不会再次追加相同答案。 */
+  private refreshReceipt(roundKey:string){
+    const round=this.all().filter(q=>questionRoundKey(q)===roundKey&&(this.state().includeArchived||q.status!=='archived')),answered=round.filter(q=>latestAnswer(q));
+    const validSources=new Set(questionDocuments(this.snapshot).map(d=>d.id));
+    const sourceIds=[...new Set(answered.flatMap(q=>questionSources(this.snapshot,q)).filter(id=>validSources.has(id)))];
+    if(answered.length){this.session.receipts??={};this.session.receipts[roundKey]={...answerHandoff(this.snapshot,answered.map(q=>q.id),this.requestId||crypto.randomUUID(),sourceIds),roundQuestionIds:round.map(q=>q.id)};this.save();}
   }
   /** 新快照只更新目录、数量和提示；正在输入时保留表单及中文组合焦点。 */
   receive(next:ProjectSnapshot){
@@ -398,7 +465,7 @@ export class RoundQuestions {
     const current=this.current();
     if(current){
       if(!this.session.summary)this.session.round=questionRoundKey(current);
-      if(this.reviewReason(current))this.banner='当前题目、来源或前题已变化，草稿保留；请核对后再提交。';
+      if(this.reviewReason(current))this.banner='当前题目、来源或前题已变化，草稿保留；修改回答即可使用当前题目。';
       else {const available=questionAvailable(current,this.projected());if(!available.active)this.banner=available.reason+'；本题仍可查看，草稿保留。';}
     }
     if(!current&&this.displayed)this.banner='当前题目已移除，原草稿保留在全部草稿中待复核。';

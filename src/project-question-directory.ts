@@ -104,8 +104,8 @@ export class ProjectQuestionDirectory {
   private questions(ignoreSearchAndFilter = false) {
     return visibleProjectQuestions(this.snapshot!, ignoreSearchAndFilter ? { ...this.allState(), query: '', filter: 'all' } : this.allState(), this.records);
   }
-  /** 待答总数与模式按钮统一：未归档且尚未提交的草稿、暂缓与待复核都仍需处理。 */
-  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && (questionRecord(this.records, question.id)?.status ?? 'pending') !== 'submitted').length; }
+  /** 选择或填写即算已回答；暂缓题及真正更新的题仍计入待处理数量。 */
+  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && ['pending','deferred','review'].includes(questionRecord(this.records, question.id)?.status ?? 'pending')).length; }
   private validSources(question: ProjectDocument) {
     const normal = new Set(questionDocuments(this.snapshot!).map(doc => doc.id)); return questionSources(this.snapshot!, question).filter(id => normal.has(id));
   }

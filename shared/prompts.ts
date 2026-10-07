@@ -5,6 +5,7 @@ import { readHeader } from './markdown.ts';
 import { parseDocumentBlocks } from './document-blocks.ts';
 import { parseDesignBlock } from './design-blocks.ts';
 import { countDocumentContent } from './content-statistics.ts';
+import { questionAuthoringRules } from './inquiry.ts';
 
 /** 开场白模板为应用资源，输入和候选方向均不自动成为设计决定。 */
 export const promptScenes = [
@@ -82,6 +83,12 @@ export function composeConnectionPrompt(snapshot?:ProjectSnapshot,integration?:I
 }
 /** 软件只提供已知真实入口，不凭网页地址或复制动作宣称 MCP 在线。 */
 export function composePrompt(input: { scene: PromptScene; idea?: GameIdea; snapshot?: ProjectSnapshot; documentIds?: string[]; integration?: IntegrationInfo; connections?: LlmConnectionState; extra?: string; answers?:AnswerHandoff }) {
+  // 回答分析入口直接说明本轮结果与读取方式，不再拼入通用创作、安装及发题说明。
+  if(input.scene==='answers'&&input.answers&&input.snapshot){
+    const local=input.integration?.mode==='local',cli=input.integration?.launcher?.replace(/策问MCP\.cmd$/,'策问CLI.cmd');
+    const access=local?`优先使用当前可用的策问 MCP 核对项目并读取公开回答。如果本次会话没有 MCP 且可以执行本机命令，直接使用现有 CLI${cli?`“${cli}”`:''}的 context 命令读取指定范围，不要求我先重启客户端。${input.integration?.url?`本机服务：${input.integration.url}。`:''}\n项目目录：${input.snapshot.project.path}`:'请使用已有策问工具读取以下公开记录；如果无法访问，说明缺少哪些材料。';
+    return ['我已经完成这一轮策问，请分析我的回答并说明下一步建议。',answerHandoffContext(input.answers,input.snapshot),access,answerAnalysisRules,input.extra?.trim()?`我的补充要求：\n${input.extra.trim()}`:''].filter(Boolean).join('\n\n');
+  }
   if(input.scene==='connect')return composeConnectionPrompt(input.snapshot,input.integration,input.connections)+(input.extra?.trim()?`\n\n补充要求：${input.extra.trim()}`:'');
   const scene = promptScenes.find(scene => scene[0] === input.scene) ?? promptScenes[0], snapshot = input.snapshot;
   const documents = input.documentIds?.length ? snapshot?.documents.filter(doc => input.documentIds!.includes(doc.id)) : [];
@@ -89,5 +96,5 @@ export function composePrompt(input: { scene: PromptScene; idea?: GameIdea; snap
   const taskContext = snapshot ? publicTaskContext(input.scene, snapshot, taskDocuments) : '';
   const context = snapshot ? `继续策问中的项目“${snapshot.project.name}”（身份 ${snapshot.project.id}）。当前查看修订：${snapshot.revisionLabel ?? '尚无版本'} / ${snapshot.revision ?? '无'}${snapshot.historical ? '，此为只读历史，请先确认当前工作稿，不能回写历史。' : '。'}\n${input.integration?.mode === 'local' ? `项目文件夹：${snapshot.project.path}\n` : '通过可用策问工具核对项目并读取公开文件；无工具时读取我另行提供的材料。网页项目标识只供核对，不代表本机文件访问权限。\n'}${documents?.length ? `本轮聚焦：\n${documents.map(doc => `- ${doc.title}（${doc.id}，${doc.path}）`).join('\n')}\n需要更多背景时，再读取关联文档。` : '工具接入后读取 PROJECT.md、公开文档目录及总纲；没有工具时先向我索取公开材料。没有总纲时根据已有设想先起草暂定初稿与关键问题，不把假设当作确认。'}` : '目前尚未创建项目，请先讨论；等方向明确后再整理项目，不擅自创建本地文件夹。';
   const integration=connectionPrelude(input.integration,input.connections);
-  return [integration, `我希望与你一起使用策问完成：${scene[1]}。`, input.idea ? ideaBrief(input.idea) : '', context, taskContext, input.scene==='answers'?(input.answers?answerHandoffContext(input.answers,snapshot)+'\n\n':'')+answerAnalysisRules:'', input.idea ? `本轮协作方式：${input.idea.approach}。` : '', `请完成：${scene[2]}`, input.extra?.trim() ? `我的补充要求：\n${input.extra.trim()}` : '', input.scene==='answers'?'回答分析以以上专用规则为准；先分析并等待我明确发起下一轮，本轮不自动保存新问题。':'', '协作规则：区分已确定条件、尝试方向和未决问题；不替我作答，不将未选方案当成决定。推荐要说明理由与代价。正文优先满足阅读，用自然文句链接相关 DD，将功能字段和关系索引后置。对白、色板属于原 Markdown 文档；需要布局或注释时只读取对应公开伴随文件，.cewen 私人数据不自动分享。分类归属与手工关联分别核对来源。保留稳定身份、原始回答与历史；除已有回答分析的专用流程外，普通创作先用 cewen_work_begin 开始协作任务，cewen_work_documents 读取范围，cewen_work_write 自动保存初稿与关键问题，再用 cewen_work_finish 完成本轮。用 cewen_work_status 核对进度，遵守 cewen_work_control 的暂停或停止状态。初稿、假设与尝试方向是暂定，不表示用户确认；文档结构按实际内容决定，不预建固定空文档。只有我明确要求审核时才走提案流程，不替我回答问题。'].filter(Boolean).join('\n\n');
+  return [integration, `我希望与你一起使用策问完成：${scene[1]}。`, input.idea ? ideaBrief(input.idea) : '', context, taskContext, input.scene==='inquiry'?questionAuthoringRules:'', input.scene==='answers'?(input.answers?answerHandoffContext(input.answers,snapshot)+'\n\n':'')+answerAnalysisRules:'', input.idea ? `本轮协作方式：${input.idea.approach}。` : '', `请完成：${scene[2]}`, input.extra?.trim() ? `我的补充要求：\n${input.extra.trim()}` : '', input.scene==='answers'?'回答分析以以上专用规则为准；先分析并等待我明确发起下一轮，本轮不自动保存新问题。':'', '协作规则：区分已确定条件、尝试方向和未决问题；不替我作答，不将未选方案当成决定。推荐要说明理由与代价。正文优先满足阅读，用自然文句链接相关 DD，将功能字段和关系索引后置。对白、色板属于原 Markdown 文档；需要布局或注释时只读取对应公开伴随文件，.cewen 私人数据不自动分享。分类归属与手工关联分别核对来源。保留稳定身份、原始回答与历史；除已有回答分析的专用流程外，普通创作先用 cewen_work_begin 开始协作任务，cewen_work_documents 读取范围，cewen_work_write 自动保存初稿与关键问题，再用 cewen_work_finish 完成本轮。用 cewen_work_status 核对进度，遵守 cewen_work_control 的暂停或停止状态。初稿、假设与尝试方向是暂定，不表示用户确认；文档结构按实际内容决定，不预建固定空文档。只有我明确要求审核时才走提案流程，不替我回答问题。'].filter(Boolean).join('\n\n');
 }
