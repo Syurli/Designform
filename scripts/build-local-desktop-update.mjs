@@ -25,7 +25,7 @@ for (const name of ['策问MCP.cmd', '策问CLI.cmd', '使用说明.md']) await 
 await cp(path.join(root, 'LICENSE'), path.join(output, 'LICENSE'));
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 const sourceHashes = {};
-for (const name of ['server/files.ts', 'server/projects.ts', 'server/creative/service.ts', 'shared/inquiry.ts', 'shared/answer-handoff.ts', 'shared/prompts.ts', 'src/round-questions.ts', 'src/document-desktop.ts']) sourceHashes[name] = createHash('sha256').update(await readFile(path.join(root, name))).digest('hex');
+for (const name of ['server/files.ts', 'server/projects.ts', 'server/http.ts', 'server/creative/service.ts', 'shared/inquiry.ts', 'shared/answer-handoff.ts', 'shared/answer-context.ts', 'shared/question-sources.ts', 'shared/prompts.ts', 'integration/mcp.ts', 'integration/cli.ts', 'src/round-questions.ts', 'src/document-desktop.ts']) sourceHashes[name] = createHash('sha256').update(await readFile(path.join(root, name))).digest('hex');
 const build = { product: '策问 Designform', version: metadata.version, channel: 'local-inquiry-flow', builtAt: new Date().toISOString(), sourceRoot: root, branch: git('branch', '--show-current'), sourceCommit: git('rev-parse', 'HEAD'), uncommitted: !!git('status', '--porcelain'), performanceCommit: git('rev-parse', 'origin/codex/large-project-performance'), sourceHashes, desktopBuild: 'passed', webBuild: 'passed', runtimeBuild: 'passed', automatedTestSuite: 'not-run', electronEngine: 'reuse existing installation', output };
 await writeFile(path.join(output, 'BUILD.json'), JSON.stringify(build, null, 2));
 await writeFile(path.join(root, '.local/desktop-update.json'), JSON.stringify(build, null, 2));

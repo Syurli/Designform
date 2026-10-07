@@ -6,6 +6,8 @@
 
 **当前版本：0.9.3 · 项目格式：1 / 2 · 接口协议：1**
 
+回答分析进一步压缩：开场白使用短项目号、短版本号与单个读取引用；读取仅返回本轮问答和 Q/D 短号，文档正文按需获取。逐题 UUID、hash 和重复轮次不再交给模型，提案基准由软件自动补全。详见 [token 精简规范](docs/protocol/ANSWER_CONTEXT_0.9.3.md)。
+
 2026-10-07 策问流程修订：作答区只保留题目与回答；空锚点不再误报来源不存在，问题反馈使用独立按钮。汇总自动收集本轮回答，末尾一键保存并复制分析开场白，无需逐题二次勾选或独立提交。开场白携带实际版本与回答数量，允许现有 CLI 接续分析。详见 [策问流程规范](docs/protocol/INQUIRY_FLOW_0.9.3.md)。
 
 [打开网页版](https://syurli.github.io/Designform/) · [下载 Windows 0.9.3](https://github.com/Syurli/Designform/releases/tag/v0.9.3) · [LLM 接入说明](docs/protocol/INTEGRATION.md) · [开发与发布](docs/双版本开发与发布.md)

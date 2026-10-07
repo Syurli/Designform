@@ -6,6 +6,7 @@ import { parseDocumentBlocks } from './document-blocks.ts';
 import { parseDesignBlock } from './design-blocks.ts';
 import { countDocumentContent } from './content-statistics.ts';
 import { questionAuthoringRules } from './inquiry.ts';
+import { answerContextRefs, compactProjectRef } from './answer-context.ts';
 
 /** 开场白模板为应用资源，输入和候选方向均不自动成为设计决定。 */
 export const promptScenes = [
@@ -86,8 +87,11 @@ export function composePrompt(input: { scene: PromptScene; idea?: GameIdea; snap
   // 回答分析入口直接说明本轮结果与读取方式，不再拼入通用创作、安装及发题说明。
   if(input.scene==='answers'&&input.answers&&input.snapshot){
     const local=input.integration?.mode==='local',cli=input.integration?.launcher?.replace(/策问MCP\.cmd$/,'策问CLI.cmd');
-    const access=local?`优先使用当前可用的策问 MCP 核对项目并读取公开回答。如果本次会话没有 MCP 且可以执行本机命令，直接使用现有 CLI${cli?`“${cli}”`:''}的 context 命令读取指定范围，不要求我先重启客户端。${input.integration?.url?`本机服务：${input.integration.url}。`:''}\n项目目录：${input.snapshot.project.path}`:'请使用已有策问工具读取以下公开记录；如果无法访问，说明缺少哪些材料。';
-    return ['我已经完成这一轮策问，请分析我的回答并说明下一步建议。',answerHandoffContext(input.answers,input.snapshot),access,answerAnalysisRules,input.extra?.trim()?`我的补充要求：\n${input.extra.trim()}`:''].filter(Boolean).join('\n\n');
+    const projectId=compactProjectRef(input.snapshot.project.id),refs=answerContextRefs(input.answers,input.snapshot);
+    const access=`读取 cewen_context ${JSON.stringify({projectId,documentIds:refs})}`;
+    // 既有 MCP 直接透传读取引用；无工具时使用已安装 CLI，不要求重启宿主。
+    const fallback=local&&cli?`无 MCP 时：${refs.map(ref=>`& "${cli}" answers ${projectId} "${ref}"`).join('；')}`:'';
+    return [answerHandoffContext(input.answers,input.snapshot),access,fallback,answerAnalysisRules,input.extra?.trim()?input.extra.trim():''].filter(Boolean).join('\n');
   }
   if(input.scene==='connect')return composeConnectionPrompt(input.snapshot,input.integration,input.connections)+(input.extra?.trim()?`\n\n补充要求：${input.extra.trim()}`:'');
   const scene = promptScenes.find(scene => scene[0] === input.scene) ?? promptScenes[0], snapshot = input.snapshot;

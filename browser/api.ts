@@ -38,7 +38,7 @@ export async function browserApi(route: string, value?: unknown, temporary?: Pro
   if (url.pathname === '/api/projects/open') return prepareSnapshot(await activeService.read((await activeService.open(str('path'))).id), activeService);
   const match = /^\/api\/projects\/([A-Za-z0-9_-]+)(?:\/([a-z-]+))?$/.exec(url.pathname);
   if (!match) throw new ProjectError('NOT_FOUND','没有这个项目操作。');
-  const [, id, operation] = match;
+  const id = /^P[a-z0-9]{1,7}$/.test(match[1]) ? await activeService.resolveProjectRef(match[1]) : match[1], operation = match[2];
   const run = async (): Promise<unknown> => {
     switch (operation) {
       case undefined: return activeService.read(id,true,url.searchParams.get('verify') === '1');

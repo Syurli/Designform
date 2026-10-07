@@ -15,6 +15,8 @@ import { questionDocument, setMetadata, setTitle, putRelation, removeRelation } 
 import { indexSnapshot } from './index-store.ts';
 import { companionIdPattern, companionKind, inkCompanionPath, layoutCompanionPath, validateCompanionFile, COMPANION_MAX_BYTES } from '../shared/document-companion.ts';
 import { applyDocumentTimes } from '../shared/document-order.ts';
+import { compactProjectRef, compactAnswerContext, parseAnswerContextRef, answerContextSelection, expandAnswerLinks } from '../shared/answer-context.ts';
+import { questionSources } from '../shared/question-sources.ts';
 
 /** 最近项目是本机配置，不混入任何游戏的公开策划目录。 */
 interface Registry { projects: ProjectInfo[]; current: string | null }
@@ -137,6 +139,14 @@ export class ProjectService {
     const project = this.registry.projects.find(project => project.id === id);
     if (!project) throw new ProjectError('PROJECT_NOT_OPEN', '项目尚未打开或身份不匹配。');
     return project;
+  }
+  /** 入口短号在本机项目库解析；正式身份优先，碰撞时要求重新选择项目。 */
+  async resolveProjectRef(reference: string): Promise<string> {
+    await this.ready;
+    if(this.registry.projects.some(project=>project.id===reference))return reference;
+    const matches=this.registry.projects.filter(project=>compactProjectRef(project.id)===reference);
+    if(matches.length!==1)throw new ProjectError('PROJECT_REF_INVALID',matches.length?'项目短号存在歧义，请重新选择项目。':'项目尚未打开，请先在策问打开它。');
+    return matches[0].id;
   }
   private async saveRegistry() { await writeBytes(this.home, 'library.json', JSON.stringify(this.registry, null, 2)); }
   /** 监听只标记变化；哈希扫描仍负责判断真正内容，平台不支持时继续使用补扫。 */
@@ -576,7 +586,27 @@ export class ProjectService {
   }
 
   /** 交换包内容可预览且有明确上限；默认只读取公开文档，不附带私人工作记录。 */
+  private async answerContextSnapshot(id:string,version:number):Promise<ProjectSnapshot>{
+    const versions=await this.versions(id),saved=versions.filter(entry=>entry.valid&&Number(/^V(\d+)$/.exec(entry.manifest.label)?.[1])===version);
+    if(saved.length!==1)throw new ProjectError('ANSWER_CONTEXT_INVALID','指定保存版本不存在或不唯一，请重新复制开场白。');
+    return this.revision(id,saved[0].manifest.id);
+  }
+  /** 精简引用和普通交换包分开读取，不隐式扩展模型请求范围。 */
   async context(id: string, documentIds: string[] = [], scope: { nodeIds?: string[]; collectionIds?: string[]; annotationIds?: string[] } = {}) {
+    // 保留旧工具参数，精简引用只读指定保存版本，不载入私有工作区或整个项目交换包。
+    if(documentIds.some(ref=>ref.startsWith('@a'))){
+      if(documentIds.some(ref=>!ref.startsWith('@a'))||[scope.nodeIds,scope.collectionIds,scope.annotationIds].some(ids=>ids?.length))throw new ProjectError('INVALID_CONTEXT_SCOPE','回答引用请与普通上下文分别读取。');
+      try{
+        const selectors=documentIds.map(parseAnswerContextRef);
+        const snapshots=new Map<number,ProjectSnapshot>();
+        for(const {version} of selectors)if(!snapshots.has(version)){
+          snapshots.set(version,await this.answerContextSnapshot(id,version));
+        }
+        const text=documentIds.map((ref,index)=>compactAnswerContext(snapshots.get(selectors[index].version)!,ref)).join('\n\n');
+        if(Buffer.byteLength(text)>4*1024*1024)throw new Error('回答范围过大，请分轮读取。');
+        return text;
+      }catch(error){if(error instanceof ProjectError)throw error;throw new ProjectError('ANSWER_CONTEXT_INVALID',error instanceof Error?error.message:'回答引用无法读取。');}
+    }
     const snapshot = await this.read(id);
     const work = await this.work(id), nodeIdsInput = [...(scope.nodeIds ?? [])];
     for (const collectionId of scope.collectionIds ?? []) { const item = work.items.find(item => item.id === collectionId && item.kind === 'collection'); if (!item) throw new ProjectError('MISSING_COLLECTION', '所选工作分组不存在。'); nodeIdsInput.push(...item.targets); }
@@ -669,6 +699,35 @@ export class ProjectService {
 
   /** 模型建议仅进入工作区；接收提案不写正式 DD，也不信任“用户已批准”等字段。 */
   async propose(id: string, proposal: Proposal) {
+    const compact=proposal.baseRevision?.startsWith('@a');
+    if(compact){
+      // 模型仅传版本引用、Q/D 短号和正文；内部根据已读版本补全身份、头部与保存基准。
+      try{
+        const selector=parseAnswerContextRef(proposal.baseRevision),saved=await this.answerContextSnapshot(id,selector.version);
+        const {questions,documents}=answerContextSelection(saved,proposal.baseRevision);
+        const questionIds=proposal.questionIds.map(ref=>{const match=/^Q([1-9]\d*)$/.exec(ref),question=match&&questions[Number(match[1])-1];if(!question)throw new Error('提案问题短号无效。');return question.id;});
+        const related=questions.filter(question=>questionIds.includes(question.id)),sourceIds=new Set(related.flatMap(question=>questionSources(saved,question)));
+        const dependencies=Object.fromEntries([...related,...documents.filter(doc=>sourceIds.has(doc.id))].map(doc=>[doc.path,doc.hash]));
+        const changes=proposal.changes.map(change=>{
+          const match=/^D([1-9]\d*)$/.exec(change.path),document=match&&documents[Number(match[1])-1];
+          if(!document)throw new Error('提案文档短号无效，请使用本版本的 D 数字。');
+          // 候选只改普通正文，正式元数据与问答历史不会被模型压缩掉。
+          if(change.encoding||(change.text!==null&&typeof change.text!=='string'))throw new Error('精简提案仅支持 Markdown 正文。');
+          return {path:document.path,baseHash:document.hash,text:change.text===null?null:document.text.slice(0,readHeader(document.text).bodyOffset)+expandAnswerLinks(readHeader(change.text).body,document,saved,proposal.baseRevision)};
+        });
+        for(const question of related){
+          if(!inquiry(question).previous.includes('### 回答 '))throw new Error('未回答的问题不能作为文档决定依据。');
+          // 来源题的候选说明由提案理由生成；原始回答和已有决定逐字保留，审核后再记实际落实。
+          let text=question.text;
+          for(const title of ['模型解释','决定记录']){
+            const part=section(text,title),entry=`\n\n提案建议「${proposal.title}」：${proposal.reason}\n\n是否采纳以用户审核结果为准。\n\n`;
+            text=part.start===text.length?text+`\n\n## ${title}${entry}`:text.slice(0,part.end)+entry+text.slice(part.end);
+          }
+          changes.push({path:question.path,baseHash:question.hash,text});
+        }
+        proposal={...proposal,baseRevision:saved.revision!,questionIds,dependencies,changes};
+      }catch(error){if(error instanceof ProjectError)throw error;throw new ProjectError('INVALID_PROPOSAL',error instanceof Error?error.message:'提案短号无法解析。');}
+    }
     const snapshot = await this.read(id), root = this.project(id).path;
     if (!/^[A-Za-z0-9_-]{1,150}$/.test(proposal.id) || !proposal.title?.trim() || !proposal.reason?.trim() || !Array.isArray(proposal.changes) || !proposal.changes.length || !proposal.baseRevision || !proposal.dependencies || !Array.isArray(proposal.questionIds)) throw new ProjectError('INVALID_PROPOSAL', '提案需要身份、理由、基础修订、文件变化、依赖及问题来源。');
     if (!(await this.versions(id)).some(entry => entry.valid && entry.manifest.id === proposal.baseRevision)) throw new ProjectError('UNKNOWN_BASE_REVISION', '提案基础修订不属于本项目。');
@@ -679,12 +738,14 @@ export class ProjectService {
       if (!original && change.text && readHeader(change.text).metadata.type === 'question' && section(change.text, '用户原始回答').text.includes('### 回答 ')) throw new ProjectError('ORIGINAL_ANSWER_CHANGED', '新问题不能携带模型代填的用户答案。');
     }
     for (const questionId of proposal.questionIds) if (!snapshot.documents.some(document => document.id === questionId && document.type === 'question')) throw new ProjectError('MISSING_QUESTION', '提案引用的问题不存在。');
-    return this.exclusive(id, async () => {
+    const item=await this.exclusive(id, async () => {
       const state = await workspace(root), existing = state.items.find(item => item.id === proposal.id);
       if (existing) { if (JSON.stringify(existing.payload) !== JSON.stringify(proposal)) throw new ProjectError('IDEMPOTENCY_MISMATCH', '同一个提案 ID 已用于不同内容。'); return existing; }
       const now = new Date().toISOString(), item: WorkspaceItem = { id: proposal.id, kind: 'proposal', title: proposal.title, scope: 'project', targets: proposal.questionIds, text: proposal.reason, tags: [], state: 'pending', payload: proposal, createdAt: now, updatedAt: now };
       await workspace(root, { baseRevision: state.revision, item }); return item;
     });
+    // 精简入口不回显内部哈希、完整候选和 UUID，避免同一正文再传一次。
+    return compact?{id:item.id,title:item.title,state:item.state}:item;
   }
 
   /** 只有界面审核入口调用采纳；原始提案与采纳后的版本均保留。 */
@@ -718,7 +779,8 @@ export class ProjectService {
         const index = changes.findIndex(change => change.path === question.path); if (index >= 0) changes.splice(index, 1);
         changes.push({ path: question.path, baseHash: question.hash, text: next });
       }
-      return { projectId: id, requestId, baseRevision: proposal.baseRevision, actor: 'llm', reason: `采纳提案：${proposal.title}；${proposal.reason}`, dependencies, changes };
+      // 此批由用户审核采纳发起；候选来源仍记录在理由中，不能误走模型直接写入的保护分支。
+      return { projectId: id, requestId, baseRevision: proposal.baseRevision, actor: 'user', reason: `采纳提案：${proposal.title}；${proposal.reason}`, dependencies, changes };
     });
     const snapshot = await this.commit(request), latest = await this.work(id);
     const present = latest.items.find(record => record.id === item.id) ?? item;
