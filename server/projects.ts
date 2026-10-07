@@ -76,6 +76,8 @@ export class ProjectService {
   private touched = new Map<string, number>();
   private backingUp = new Set<string>();
   private verifiedHistory = new Map<string, { entries: HistoryEntry[]; at: number }>();
+  /** 仅缓存已读字节的纯解析结果；每次仍重新读取并哈希公开文件，不用缓存掩盖磁盘变化。 */
+  private parsedContent = new Map<string, { fingerprint: string; knowledge: ReturnType<typeof parseKnowledge> }>();
   /** 协作服务在同一提交互斥区检查文档租约；普通接口不能伪造内部任务身份。 */
   private collaborationGuard?: (id: string, paths: string[], permit?: { taskId: string; generation: number; connectionId: string }) => Promise<void>;
   private collaborationChanged?: (id: string) => void;
@@ -150,7 +152,7 @@ export class ProjectService {
       this.watchers.set(project.id, watcher);
     } catch { /* 部分文件系统不支持监听，定期扫描和窗口焦点刷新仍然有效。 */ }
   }
-  close() { this.closing=true;this.collaborationClose?.();this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); }
+  close() { this.closing=true;this.collaborationClose?.();this.watchers.forEach(watcher => watcher.close()); this.watchers.clear(); this.parsedContent.clear(); }
   private libraryView() { return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
 
   /** 项目库身份以各项目当前 PROJECT.md 为准；失联或损坏项目保留最近登记，供用户重新定位。 */
@@ -203,7 +205,7 @@ export class ProjectService {
       const duplicate = this.registry.projects.find(entry => entry.id === project.id && entry.path.toLowerCase() !== canonical.toLowerCase());
       if (duplicate) throw new ProjectError('DUPLICATE_PROJECT', '同一项目身份已经从另一目录打开，请恢复原入口或复制为新项目。', { existingPath: duplicate.path });
       // 同身份副本切换后不能沿用旧目录的已验证历史或稳定观察窗口。
-      this.verifiedHistory.delete(project.id); this.observations.delete(project.id); this.touched.delete(project.id);
+      this.verifiedHistory.delete(project.id); this.parsedContent.delete(project.id); this.observations.delete(project.id); this.touched.delete(project.id);
       this.registry.projects = [project, ...this.registry.projects.filter(entry => entry.id !== project.id)];
       this.registry.current = project.id;
       await this.saveRegistry();
@@ -274,10 +276,21 @@ export class ProjectService {
     const current = await readCurrentFiles(project.path), files = markdownFiles(current);
     const actual = parseProjectInfo(files.find(file => file.path === 'PROJECT.md')!, project.path);
     if (actual.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '磁盘项目 ID 已变化，请核对身份后重新打开，未继续写入。');
-    const knowledge = parseKnowledge(files), hashes = hashFiles(current), currentFingerprint = fingerprint(hashes);
-    knowledge.diagnostics.push(...companionDiagnostics(current));
-    if (actual.format === 2) knowledge.diagnostics.push(...buildCreativeIndex(knowledge).diagnostics);
-    knowledge.diagnostics.push(...diagnoseLinks(new Map([...current].map(([name,bytes]) => [name, name.endsWith('.md') ? bytes.toString('utf8') : null]))));
+    const hashes = hashFiles(current), currentFingerprint = fingerprint(hashes);
+    let parsed = this.parsedContent.get(project.id);
+    if (parsed?.fingerprint !== currentFingerprint) {
+      const knowledge = parseKnowledge(files);
+      knowledge.diagnostics.push(...companionDiagnostics(current));
+      if (actual.format === 2) knowledge.diagnostics.push(...buildCreativeIndex(knowledge).diagnostics);
+      knowledge.diagnostics.push(...diagnoseLinks(new Map([...current].map(([name,bytes]) => [name, name.endsWith('.md') ? bytes.toString('utf8') : null]))));
+      parsed = { fingerprint: currentFingerprint, knowledge };
+      // 只保留最近八个项目的一份解析结果，关闭或重新打开入口时释放，避免资料库越用越占内存。
+      this.parsedContent.delete(project.id);
+      this.parsedContent.set(project.id, parsed);
+      if (this.parsedContent.size > 8) this.parsedContent.delete(this.parsedContent.keys().next().value!);
+    }
+    // 时间投影、历史损坏和外部批次诊断属于本次读取，不能污染下一次复用的纯内容缓存。
+    const knowledge = structuredClone(parsed.knowledge);
     const cached = this.verifiedHistory.get(project.id);
     const versions = cached && this.watchers.has(project.id) && Date.now() - cached.at < 60000 ? cached.entries : await history(project.path, project.id), pending = await this.pending(project.path);
     if (versions !== cached?.entries) this.verifiedHistory.set(project.id, { entries: versions, at: Date.now() });
@@ -852,7 +865,7 @@ export class ProjectService {
     return this.forget(id);
   }
 
-  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); this.verifiedHistory.delete(id); this.observations.delete(id); this.touched.delete(id); await this.saveRegistry(); return this.libraryView(); }); }
+  async forget(id: string) { await this.ready; return this.exclusive('library', async () => { this.registry.projects = this.registry.projects.filter(project => project.id !== id); if (this.registry.current === id) this.registry.current = null; this.watchers.get(id)?.close(); this.watchers.delete(id); this.verifiedHistory.delete(id); this.parsedContent.delete(id); this.observations.delete(id); this.touched.delete(id); await this.saveRegistry(); return this.libraryView(); }); }
 
   /** 图片等附件只从当前或已校验快照读取，不允许任意本机路径。 */
   async asset(id: string, relative: string, revision?: string) {

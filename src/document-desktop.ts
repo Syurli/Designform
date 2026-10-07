@@ -64,6 +64,8 @@ export class DocumentDesktop {
   private libraryHost=document.createElement('section');private work=document.createElement('section');private library:ProjectLibraryView;
   private snapshot?:ProjectSnapshot;private tabs=new Map<string,DocumentTab>();private active='';private selected=new Set<string>();private lastSelected='';
   private directory?:ProjectDirectory;
+  /** 目录只随正文、身份、分类或时间投影变化重解析；切换标签和展开目录复用相同知识结构。 */
+  private directoryProjection?:{source:ProjectSnapshot;key:string;value:ProjectSnapshot};
   private toolbarHost!:HTMLElement;private modeHost!:HTMLElement;private questionNav=document.createElement('div');
   /** 策问属于整个项目，阅读标签、目录筛选和画布始终保留自己的实例。 */
   private projectQuestions?:RoundQuestions;private projectQuestionHost=document.createElement('section');private questionsActive=false;
@@ -354,10 +356,14 @@ export class DocumentDesktop {
 
   /** 目录聚合正式文档与当前草稿，排序不会把不同层级的文档重新归属。 */
   private directorySnapshot():ProjectSnapshot{
-    const snapshot=this.projected(),entry=snapshot.projectEntry!;
-    snapshot.documents=[...new Map([...this.snapshot!.documents.filter(d=>!this.removed.has(d.id)),...this.documents()].map(d=>[d.id,d])).values()];
-    const knowledge=parseKnowledge([{path:'PROJECT.md',text:entry.text,hash:entry.hash},...snapshot.documents]);
-    return {...snapshot,...knowledge,documents:snapshot.documents,projectEntry:entry};
+    const source=this.snapshot!,entry=this.structure?{text:this.structure.text,hash:this.structure.baseHash}:source.projectEntry!;
+    const documents=[...new Map([...source.documents.filter(d=>!this.removed.has(d.id)),...this.documents()].map(d=>[d.id,d])).values()];
+    // 草稿正文尚未保存时哈希可能不变，必须比较正文和元数据，不能仅依赖正式修订。
+    const key=JSON.stringify([entry.text,entry.hash,documents]);
+    if(this.directoryProjection?.source===source&&this.directoryProjection.key===key)return this.directoryProjection.value;
+    const knowledge=parseKnowledge([{path:'PROJECT.md',text:entry.text,hash:entry.hash},...documents]);
+    const value={...source,...knowledge,documents,projectEntry:entry};
+    this.directoryProjection={source,key,value};return value;
   }
   /** 卡片库读取当前项目的结构草稿，手工顺序无需等到保存后才在视图中生效。 */
   documentListSnapshot(projectId:string):ProjectSnapshot|undefined{
