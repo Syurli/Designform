@@ -10,7 +10,7 @@ import { workspace } from './workspace.ts';
 import { collectFiles, prepareImport, readImport } from './exchange.ts';
 import { undoText } from '../shared/undo.ts';
 import { rewriteLinks, diagnoseLinks } from '../shared/links.ts';
-import { answerQuestion, inquiry, section, questionAvailable } from '../shared/inquiry.ts';
+import { answerQuestion, inquiry, section, questionAvailable, questionDefinition } from '../shared/inquiry.ts';
 import { questionDocument, setMetadata, setTitle, putRelation, removeRelation } from '../shared/editing.ts';
 import { indexSnapshot } from './index-store.ts';
 import { companionIdPattern, companionKind, inkCompanionPath, layoutCompanionPath, validateCompanionFile, COMPANION_MAX_BYTES } from '../shared/document-companion.ts';
@@ -654,13 +654,16 @@ export class ProjectService {
     const snapshot = await this.read(id);
     const request = await this.operation(id, input, () => {
     if (!input.requestId || typeof input.round !== 'string' || !input.round.trim() || !Array.isArray(input.questions) || !input.questions.length || input.questions.length > 30) throw new ProjectError('INVALID_QUESTIONS', '一轮问询需要 1～30 个有稳定 ID 的问题。');
+    if(snapshot.documents.some(document=>document.type==='question'&&inquiry(document).round===input.round&&inquiry(document).previous.includes('### 回答 ')))throw new ProjectError('ROUND_ALREADY_ANSWERED','此轮已有回答；修改和追问请另起新轮次，保留原轮问答。');
+    // 一轮原子发布时允许引用同批前题，用户不用拆成多个发布步骤。
+    const questionIds=new Set([...snapshot.documents.filter(document=>document.type==='question').map(document=>document.id),...input.questions.map(question=>question.id)]);
     const changes: FileChange[] = input.questions.map(question => {
       if (!/^[A-Za-z0-9_-]{1,120}$/.test(question.id) || !question.title?.trim() || typeof question.background !== 'string' || !Array.isArray(question.options) || question.options.length > 26 || question.options.some(option => typeof option !== 'string') || !Array.isArray(question.targets) || question.targets.some(target => !snapshot.nodes.some(node => node.id === target))) throw new ProjectError('INVALID_QUESTION', '问题标题、选项或目标身份不正确。');
       if (question.mode && !['single','multiple'].includes(question.mode)) throw new ProjectError('INVALID_QUESTION', '作答模式只能为单选或多选。');
-      if (question.when && !snapshot.documents.some(document => document.id === question.when!.questionId && document.type === 'question')) throw new ProjectError('INVALID_CONDITION', '条件题必须引用已发布的问题。');
-      if (question.follows && !snapshot.documents.some(document => document.id === question.follows && document.type === 'question')) throw new ProjectError('MISSING_QUESTION', '后续题关联的原问题不存在。');
+      if (question.when && !questionIds.has(question.when.questionId)) throw new ProjectError('INVALID_CONDITION', '条件题必须引用已有或本轮发布的问题。');
+      if (question.follows && !questionIds.has(question.follows)) throw new ProjectError('MISSING_QUESTION', '后续题关联的原问题不存在。');
       const path = `docs/questions/${question.id}.md`;
-      if (snapshot.documents.some(document => document.id === question.id)) throw new ProjectError('QUESTION_EXISTS', '此问题已经存在，请引用原问题继续讨论，不要重复发布。');
+    if (snapshot.documents.some(document => document.id === question.id)) throw new ProjectError('QUESTION_EXISTS', '此问题已经存在；修改或追问请使用新问题 ID 与新轮次，保留旧问答。');
       return { path, baseHash: null, text: questionDocument({ ...question, round: input.round, revision: snapshot.revision }) };
     });
     const index = snapshot.documents.find(document => document.path === 'docs/questions/INDEX.md');
@@ -693,7 +696,7 @@ export class ProjectService {
       working.find(d=>d.id===document.id)!.text=text;
       return { path: document.path, baseHash: document.hash, text };
     });
-    return { projectId: id, requestId: input.requestId, baseRevision: snapshot.revision, actor: 'user', reason: `提交 ${changes.length} 个问题的用户回答`, changes };
+    return { projectId: id, requestId: input.requestId, baseRevision: snapshot.revision, actor: 'user', reason: `自动记录 ${changes.length} 个问题的用户回答`, changes };
     }); return this.commit(request);
   }
 
@@ -987,7 +990,15 @@ export class ProjectService {
     assertDocumentPath(draft.documentPath);
     if (draft.assets !== undefined) {
       if (!Array.isArray(draft.assets) || draft.assets.length > 20 || Buffer.byteLength(JSON.stringify(draft.assets)) > 6 * 1024 * 1024) throw new ProjectError('DRAFT_ASSETS_TOO_LARGE','草稿附件合计过大，请先保存当前文档再继续添加。');
-      for (const asset of draft.assets) { if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿图片无效。'); changeBytes({ ...asset, baseHash: null }); }
+      for (const asset of draft.assets) {
+        if (!asset || asset.encoding !== 'base64' || typeof asset.text !== 'string') throw new ProjectError('INVALID_ASSET','草稿媒体无效。');
+        // 音频/媒体使用内容地址；这里只保留恢复草稿，正式入库仍在正文确认保存时完成。
+        if(MEDIA_PATH.test(asset.path)){
+          if(!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(asset.text))throw new ProjectError('INVALID_ASSET','草稿媒体编码无效。');
+          const bytes=Buffer.from(asset.text,'base64'),info=detectMedia(bytes);
+          if(asset.path!==`assets/objects/${sha256(bytes)}/content.${info.extension}`)throw new ProjectError('INVALID_ASSET','草稿媒体内容与地址不一致。');
+        }else changeBytes({ ...asset, baseHash: null });
+      }
     }
     if (draft.companions !== undefined) {
       if (!Array.isArray(draft.companions) || draft.companions.length > 20 || Buffer.byteLength(JSON.stringify(draft.companions)) > 4 * 1024 * 1024) throw new ProjectError('INVALID_DRAFT', '草稿伴随文件数量或总大小无效。');
@@ -1043,6 +1054,12 @@ export class ProjectService {
         if (beforeHashes[name] !== hash) throw new ProjectError('DEPENDENCY_CHANGED', '本次修改依赖的文档已变化，需要重新核对。', { path: name });
       }
       const candidateFiles = markdownFiles(candidate);
+      // 已回答的题意与轮次固定，后续修改必须发成新题；分析和来源更新继续允许。
+      const candidateKnowledge=parseKnowledge(candidateFiles),candidateQuestions=candidateKnowledge.documents.filter(document=>document.type==='question');
+      for(const old of snapshot.documents.filter(document=>document.type==='question'&&inquiry(document).previous.includes('### 回答 '))){
+        const next=candidateQuestions.find(document=>document.id===old.id);
+        if(next&&questionDefinition(next)!==questionDefinition(old))throw new ProjectError('ANSWERED_QUESTION_IMMUTABLE','已答题保留在原轮次；修改或追问请创建新问题 ID 与新轮次，可用 follows 关联旧题。');
+      }
       if(request.actor==='llm'){
         // 所有模型提交都保护用户原始回答，不能通过自动保存或旧提案路径代答。
         for (const old of snapshot.documents.filter(document => document.type === 'question')) {
@@ -1057,9 +1074,9 @@ export class ProjectService {
 
       const candidateProject = parseProjectInfo(candidateFiles.find(file => file.path === 'PROJECT.md')!, root);
       if (candidateProject.id !== project.id) throw new ProjectError('PROJECT_ID_CHANGED', '保存不能改变项目身份，请使用复制项目。');
-      const diagnostics = parseKnowledge(candidateFiles).diagnostics.filter(issue => issue.severity === 'error');
+      const diagnostics = candidateKnowledge.diagnostics.filter(issue => issue.severity === 'error');
       diagnostics.push(...companionDiagnostics(candidate));
-      if (candidateProject.format === 2) diagnostics.push(...buildCreativeIndex({documents:parseKnowledge(candidateFiles).documents}).diagnostics.filter(issue=>issue.severity==='error'));
+      if (candidateProject.format === 2) diagnostics.push(...buildCreativeIndex({documents:candidateKnowledge.documents}).diagnostics.filter(issue=>issue.severity==='error'));
       else if (candidateFiles.some(file=>buildCreativeIndex({documents:parseKnowledge([file]).documents}).objects.some(item=>item.language==='cewen-object'))) throw new ProjectError('FORMAT_UPGRADE_REQUIRED','创作模块需要格式 2，请先在副本升级。');
       if (snapshot.project.format === 2 && candidateProject.format !== 2) throw new ProjectError('FORMAT_DOWNGRADE_DENIED','不能把新项目直接降级并丢失媒体语义。');
       if (diagnostics.length) throw new ProjectError('DOCUMENT_INVALID', '修改后存在重复身份、缺失目标或格式错误；草稿已保留，请先修正。', diagnostics);

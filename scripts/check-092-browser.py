@@ -22,6 +22,13 @@ with sync_playwright() as playwright:
     page.set_default_timeout(20000)
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.on('console', lambda message: errors.append(message.text) if message.type == 'error' else None)
+    # 保留实际错误响应的路径及服务原因，避免只留下浏览器的通用 400 文案。
+    def response_error(response):
+        if response.status >= 400:
+            try: detail=response.text()[:1200]
+            except Exception: detail='响应内容不可读取'
+            errors.append(str(response.status)+' '+response.url+' '+detail)
+    page.on('response', response_error)
     page.goto(url, wait_until='networkidle', timeout=90000)
     expect(page.locator('.desktop-library')).to_be_visible()
     assert page.locator('[data-view=creative],[data-view=quest],[data-view=animatic]').count() == 0
@@ -34,9 +41,12 @@ with sync_playwright() as playwright:
 
     def example(kind):
         page.locator('[data-examples]').click()
-        page.locator('dialog[open] [name=example]').select_option(kind)
+        # 示例选择已改为学习卡片的单选入口，按类型身份选择实际卡片。
+        page.locator('dialog[open] [name=example][value="'+kind+'"]').check()
         page.locator('dialog[open] [type=submit]').click()
         expect(page.locator('.desktop-work')).to_be_visible(timeout=60000)
+        # 工作区先显示再准备首份文档；等待载入模态完成，避免快捷键被进度框保护掉。
+        expect(page.locator('.project-loading-dialog')).to_have_count(0, timeout=60000)
         expect(page.locator('[data-session-kind]')).to_contain_text('临时')
 
     def menu(name):
@@ -47,10 +57,11 @@ with sync_playwright() as playwright:
         stored_before = page.evaluate('Object.keys(localStorage).sort()')
         example('film')
         expect(page.locator('[data-project-title]')).to_contain_text('最后一盏灯')
-        expect(page.locator('.document-tree .project-directory-category-row')).to_have_count(3)
+        # “全部分类”是导航行，三项真实学习分类由正式 group 身份统计。
+        expect(page.locator('.document-tree .project-directory-category-row[data-group]')).to_have_count(3)
         page.locator('[aria-label=搜索项目文档]').fill('分镜与排演')
         page.locator('.document-tree .project-directory-row', has_text='分镜与排演').click()
-        page.locator('.document-tab-content:not([hidden]) [data-sequence-play]').click()
+        page.locator('.document-tab-content:not([hidden]) [data-sequence-play]:visible').first.click()
         expect(page.locator('[data-tutorial=animatic-player]')).to_be_visible()
         start = page.locator('[data-clock]').inner_text()
         page.locator('[data-play]').click()
@@ -66,7 +77,9 @@ with sync_playwright() as playwright:
         assert disk_state() == before, '另存为取消前发生了本地文件写入'
         assert page.evaluate('Object.keys(localStorage).sort()') == stored_before, '示例编辑写入持久偏好/草稿'
         assert page.evaluate('async()=> (await indexedDB.databases()).length') == 0, '示例打开持久数据库'
-        page.locator('[data-home]').click()
+        # 返回项目库只挂起会话；此处明确关闭示例，核对放弃后恢复原始内容。
+        page.locator('.document-menu [data-file]').click()
+        page.get_by_role('menuitem', name='关闭当前项目', exact=True).click()
         page.locator('[value=discard]').check()
         page.locator('dialog[open] [type=submit]').click()
         expect(page.locator('.desktop-library')).to_be_visible()
@@ -84,14 +97,16 @@ with sync_playwright() as playwright:
         snapshot = api('/api/projects/'+project['id'])
         assert len(snapshot['media']) >= 2
         page.locator('[data-home]').click()
-        # 新建向导首次不选预设，返回保留用户输入，取消不建目录。
+        # 当前向导：选择方向→组合设想→保存位置；返回保留输入，取消不建目录。
         initial = len(api('/api/projects')['projects'])
         page.locator('.library-heading [data-new]').click()
-        page.locator('[name=goal]').fill('用于验收的一体化创作设想')
+        page.locator('.project-wizard [name=preset][value=game]').check()
         page.locator('.project-wizard [type=submit]').click()
-        assert page.locator('[name=preset]:checked').count() == 0
+        page.locator('.project-wizard [data-field=idea]').fill('用于验收的一体化创作设想')
+        expect(page.locator('.project-wizard [name=prompt]')).to_have_value(__import__('re').compile('.*一体化创作设想.*', __import__('re').S))
         page.locator('.project-wizard [type=submit]').click()
-        expect(page.locator('[name=prompt]')).to_have_value(__import__('re').compile('.*一体化创作设想.*', __import__('re').S))
+        page.locator('.project-wizard [data-back]').click()
+        expect(page.locator('.project-wizard [data-field=idea]')).to_have_value('用于验收的一体化创作设想')
         page.locator('.project-wizard [data-close]').first.click()
         assert len(api('/api/projects')['projects']) == initial
     else:
@@ -106,8 +121,9 @@ with sync_playwright() as playwright:
             page.locator('[aria-label=搜索项目文档]').fill(doc['title'])
             page.locator('.document-tree .project-directory-row[data-id="'+doc['id']+'"]').click()
             return page.locator('.document-tab-content:not([hidden])')
+        # 文档及画布同时保留模块投影；只操作可见入口，同一对象的入口共用正式身份。
         active = open_object('check-use-combat')
-        active.locator('[data-object-edit="check-use-combat"]').click()
+        active.locator('[data-object-edit="check-use-combat"]:visible').first.click()
         stage=page.locator('.map-editor-canvas svg')
         expect(stage).to_be_visible()
         before=page.locator('[data-map-layer] [data-map-mark]').count()
@@ -138,11 +154,12 @@ with sync_playwright() as playwright:
         page.locator('.main-nav [data-view=document]').click()
         expect(page.locator('.document-tree .project-directory-category').first).to_be_visible()
         active=open_object('check-quest0')
-        active.locator('[data-quest-open="check-quest0"]').click()
-        expect(page.locator('[data-tutorial=quest-workspace]')).to_be_visible()
-        page.locator('.document-context > button').click()
+        active.locator('[data-quest-open="check-quest0"]:visible').first.click()
+        expect(page.locator('.project-question-directory')).to_be_visible()
+        expect(page.locator('.question-directory-filters button')).to_have_count(3)
+        page.locator('.project-round-questions [data-back]').click()
         active=open_object('check-sequence')
-        active.locator('[data-sequence-play="check-sequence"]').click()
+        active.locator('[data-sequence-play="check-sequence"]:visible').first.click()
         expect(page.locator('[data-tutorial=animatic-player]')).to_be_visible()
         start=page.locator('[data-clock]').inner_text()
         page.locator('[data-play]').click()
@@ -151,7 +168,7 @@ with sync_playwright() as playwright:
         page.locator('[data-play]').click()
         page.locator('.document-context > button').click()
         active=open_object('check-production')
-        active.locator('[data-production-open="check-production"]').click()
+        active.locator('[data-production-open="check-production"]:visible').first.click()
         expect(page.locator('[data-tutorial=production-panel]')).to_be_visible()
         page.locator('.document-context > button').click()
         # 角色卡预设生成普通文档；编辑、保存、菜单限位与窄窗口入口。
@@ -159,7 +176,7 @@ with sync_playwright() as playwright:
         page.locator('[data-preset=builtin-character]').click()
         page.locator('dialog[open] [name=name]').fill('0.9.2 中文角色验收')
         page.locator('dialog[open] [type=submit]').click()
-        page.locator('.document-properties [name=purpose]').fill('自定义人物用途')
+        page.locator('.document-properties [name=tags]').fill('自定义人物用途')
         page.keyboard.press('Control+s')
         expect(page.locator('.document-status')).to_contain_text('已保存', timeout=60000)
         page.locator('[aria-label=搜索项目文档]').fill('0.9.2 中文角色验收')
@@ -175,9 +192,13 @@ with sync_playwright() as playwright:
         with wave.open(str(fixture),'wb') as sound:
             sound.setnchannels(1);sound.setsampwidth(2);sound.setframerate(8000);sound.writeframes(bytes(16000))
         prior=api('/api/projects/'+project['id'])
-        page.locator('.document-properties [data-insert]').click()
+        # 属性已统一为标签，媒体入口使用当前文档右键插入菜单。
+        page.locator('[data-doc-mode=preview]').click()
+        page.locator('.document-tab-content:not([hidden]) .desktop-document-preview').click(button='right', position={'x':25,'y':30})
+        # 分类项包含展开箭头，按可读标签定位；子命令仍精确匹配。
+        page.get_by_role('menuitem', name='图片与媒体', exact=False).click()
         with page.expect_file_chooser() as picker:
-            page.locator('[data-media]').click()
+            page.get_by_role('menuitem', name='音频 / 媒体…', exact=True).click()
         picker.value.set_files(str(fixture))
         page.locator('dialog[open] [name=permission]').fill('自动生成的虚构静音，仅验收使用')
         page.locator('dialog[open] [type=submit]').click()
@@ -190,16 +211,16 @@ with sync_playwright() as playwright:
         # 多文档草稿独立：只保存另一页，不顺带提交当前页的用途。
         role_id=page.locator('.document-tab-content:not([hidden])').get_attribute('data-document-id')
         role=next(d for d in now['documents'] if d['id']==role_id)
-        page.locator('.document-properties [name=purpose]').fill('尚未保存的个人预设草稿')
+        page.locator('.document-properties [name=tags]').fill('尚未保存的个人预设草稿')
         active=open_object('check-map-station')
-        page.locator('.document-properties [name=purpose]').fill('共享地图说明验收 '+str(now['revision']))
+        page.locator('.document-properties [name=tags]').fill('共享地图说明验收 '+str(now['revision']))
         page.keyboard.press('Control+s')
         expect(page.locator('.document-status')).to_contain_text('已保存',timeout=60000)
         disk=api('/api/projects/'+project['id'])
         assert '尚未保存的个人预设草稿' not in next(d['text'] for d in disk['documents'] if d['id']==role['id'])
         page.locator('[aria-label=搜索项目文档]').fill(role['title'])
         page.locator('.document-tree .project-directory-row[data-id="'+role['id']+'"]').click()
-        expect(page.locator('.document-properties [name=purpose]')).to_have_value('尚未保存的个人预设草稿')
+        expect(page.locator('.document-properties [name=tags]')).to_have_value('尚未保存的个人预设草稿')
         page.keyboard.press('Control+s')
         expect(page.locator('.document-status')).to_contain_text('已保存',timeout=60000)
         page.locator('.document-menu [data-file]').click()
@@ -212,7 +233,7 @@ with sync_playwright() as playwright:
         page.screenshot(path=str(out/'092-integrated-document.png'))
         page.set_viewport_size({'width':900,'height':800})
         if page.locator('#app').evaluate("e=>e.classList.contains('sidebar-open')"): page.locator('#sidebar-close').click()
-        page.locator('.document-tab-content:not([hidden]) [data-object-edit]').first.click()
+        page.locator('.document-tab-content:not([hidden]) [data-object-edit]:visible').first.click()
         expect(page.locator('.document-properties')).to_be_visible()
         page.screenshot(path=str(out/'092-narrow-module.png'))
     (out/('092-'+mode+'-result.json')).write_text(json.dumps({'realHttp':True,'mode':mode,'apiMocked':False,'errors':errors},ensure_ascii=False,indent=2),encoding='utf-8')

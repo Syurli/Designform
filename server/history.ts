@@ -101,7 +101,15 @@ export async function publishRevision(root: string, projectId: string, current: 
   const manifest: RevisionManifest = { format, ...(format === 2 ? { media } : {}), state: 'complete', projectId, id, label, parent: previous?.id ?? null, createdAt, actor: request.actor, reason: request.reason, requestId: request.requestId, requestHash, bytes: [...current.values()].reduce((total, bytes) => total + bytes.byteLength, 0) + Buffer.byteLength(explanation), files: { ...hashes, 'README.md': sha256(explanation) }, fingerprint: fingerprint(hashes), changedPaths, ...(request.restoredFrom ? { restoredFrom: request.restoredFrom } : {}) };
   // 完成清单最后生成；没有它的暂存目录不属于可选择的历史版本。
   await writeBytes(root, `${staged}/manifest.json`, JSON.stringify(manifest, null, 2));
-  await rename(await resolveInside(root, staged), await resolveInside(root, `versions/${label}`));
+  // Windows 刚写完的目录可能短暂被其他文件服务占用；只重试原子改名，不覆盖既有版本。
+  const stagedPath=await resolveInside(root,staged),publishedPath=await resolveInside(root,`versions/${label}`);
+  for(let attempt=0;;attempt++){
+    try{await rename(stagedPath,publishedPath);break;}
+    catch(error){
+      if(attempt>=6||!['EPERM','EACCES','EBUSY'].includes((error as NodeJS.ErrnoException).code??''))throw error;
+      await new Promise(resolve=>setTimeout(resolve,100*(attempt+1)));
+    }
+  }
   await rebuildHistoryIndex(root, [...entries.map(entry => entry.manifest), manifest]);
   return manifest;
 }

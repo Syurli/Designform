@@ -51,8 +51,8 @@ jobs:
           REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./package.json').version")
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid version'; exit 1; }
+          # 四段修订号由同一映射校验，npm 元数据仍满足 SemVer。
+          VERSION=$(node scripts/release-version.mjs)
           node -e "const p=require('./package.json');const l=require('./package-lock.json');if(p.version!==l.version||p.version!==l.packages[''].version)process.exit(1)" || { echo 'Package and lockfile versions differ'; exit 1; }
           TAG="v$VERSION"
           SHA=$(git rev-parse HEAD)
@@ -61,11 +61,11 @@ jobs:
           echo 'publish=false' >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" == *-* ]] || node -e "const p=require('./.github/release-intent.json');if(p.version!==require('./package.json').version||p.channel!=='prerelease')process.exit(1)"; then
+          if [[ "$VERSION" == *-* ]] || node -e "const p=require('./.github/release-intent.json');const m=require('./package.json');if(p.version!==(m.releaseVersion||m.version)||p.channel!=='prerelease')process.exit(1)"; then
             echo 'prerelease=true' >> "$GITHUB_OUTPUT"
             # 用户批准的候选通过精确版本意图发布为 prerelease，不会变成稳定最新版。
             if [[ "$EVENT_NAME" == workflow_run ]]; then
-              node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('.github/release-intent.json','utf8'));if(p.version!==require('./package.json').version||p.channel!=='prerelease')process.exit(1)" || { echo 'No matching explicit prerelease intent'; exit 0; }
+              node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('.github/release-intent.json','utf8'));const m=require('./package.json');if(p.version!==(m.releaseVersion||m.version)||p.channel!=='prerelease')process.exit(1)" || { echo 'No matching explicit prerelease intent'; exit 0; }
             fi
           else
             echo 'prerelease=false' >> "$GITHUB_OUTPUT"
@@ -114,7 +114,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $version = node scripts/release-version.mjs
           $tagSha = git rev-parse "$env:RELEASE_TAG^{commit}"
           if ($LASTEXITCODE -ne 0 -or $tagSha -ne $env:SOURCE_SHA -or "v$version" -ne $env:RELEASE_TAG) { throw '版本、标签与实际源码不一致' }
       - run: npm run package:win
@@ -126,7 +126,7 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $version = node scripts/release-version.mjs
           $expectedName = "Designform-$version-Windows-x64.zip"
           $packages = @(Get-ChildItem release/Designform-*-Windows-x64.zip)
           if ($packages.Count -ne 1) { throw '发行包数量异常' }

@@ -7,7 +7,7 @@ import { isTransientProject } from '../shared/transient';
 import { createElement as createLucideElement, ChevronDown, PanelLeft, PanelLeftOpen, PanelsTopLeft, ArrowLeft, CircleAlert } from 'lucide';
 import { categoryColor } from './category-color';
 import { showAppMenu } from './app-menu';
-import { questionDocuments, questionSources, questionRecord, visibleProjectQuestions, questionFilterLabels, questionStatusLabels, type QuestionDirectoryState, type QuestionFilter, type QuestionRecords } from './project-question-model';
+import { questionDocuments, questionSources, questionRecord, questionMatchesFilter, visibleProjectQuestions, questionFilterLabels, questionStatusLabels, type QuestionDirectoryState, type QuestionFilter, type QuestionRecords } from './project-question-model';
 import './project-question-directory.css';
 
 export type { QuestionDirectoryState, QuestionFilter, QuestionStateInfo, QuestionRecords } from './project-question-model';
@@ -105,7 +105,7 @@ export class ProjectQuestionDirectory {
     return visibleProjectQuestions(this.snapshot!, ignoreSearchAndFilter ? { ...this.allState(), query: '', filter: 'all' } : this.allState(), this.records);
   }
   /** 选择或填写即算已回答；暂缓题及真正更新的题仍计入待处理数量。 */
-  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && ['pending','deferred','review'].includes(questionRecord(this.records, question.id)?.status ?? 'pending')).length; }
+  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && questionMatchesFilter(questionRecord(this.records, question.id), 'pending')).length; }
   private validSources(question: ProjectDocument) {
     const normal = new Set(questionDocuments(this.snapshot!).map(doc => doc.id)); return questionSources(this.snapshot!, question).filter(id => normal.has(id));
   }
@@ -156,7 +156,7 @@ export class ProjectQuestionDirectory {
     const footer = document.createElement('footer'); footer.className = 'question-directory-footer';
     const path = document.createElement('span'); path.className = 'question-directory-path'; path.textContent = [['question-all', 'question-unlinked'].includes(this.state.group) ? scopeName : '全部分类', ...groupAncestors(this.snapshot, this.state.group).map(group => group.label), group?.label, normal.find(doc => doc.id === this.state.documentId)?.title].filter(Boolean).join(' › '); path.title = path.textContent; path.setAttribute('aria-label', '当前策问范围路径'); footer.append(path);
     const actions = document.createElement('div'); const archive = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = this.state.includeArchived; checkbox.dataset.role = 'question-archived'; archive.append(checkbox, document.createTextNode('含归档'));
-    const summary = this.button('本轮汇总', 'summary'); summary.disabled = !all.length; const total = document.createElement('small'); total.textContent = `${scoped.length} 题`; actions.append(archive, total, summary); footer.append(actions); this.root.append(footer); this.updateCategoryLayout();
+    const summary = this.button('轮次汇总', 'summary'); summary.disabled = !all.length; const total = document.createElement('small'); total.textContent = `${scoped.length} 题`; actions.append(archive, total, summary); footer.append(actions); this.root.append(footer); this.updateCategoryLayout();
     categories.scrollTop = categoryScroll; items.scrollTop = listScroll;
     const focus = searchFocused ? search : focusKey ? this.root.querySelector<HTMLElement>(`[data-focus="${CSS.escape(focusKey)}"]`) : undefined;
     if (focus) { focus.focus({ preventScroll: true }); if (selection && focus instanceof HTMLInputElement) focus.setSelectionRange(selection[0], selection[1]); }

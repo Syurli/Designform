@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 const url=process.env.CEWEN_URL;if(!url)throw new Error('请设置 CEWEN_URL，指向隔离验证服务');
 const transport=new StdioClientTransport({command:process.execPath,args:[path.resolve('runtime/mcp.js')],env:{...process.env,CEWEN_URL:url},stderr:'pipe'}),client=new Client({name:'Designform-090-protocol-check',version:'1.0.0'},{capabilities:{}});let log='';transport.stderr?.on('data',b=>{log+=b;});
-try{await client.connect(transport);const tools=await client.listTools();assert.equal(tools.tools.length,32);const names=tools.tools.map(t=>t.name);for(const name of ['cewen_quest_read','cewen_quest_events','cewen_production_preview','cewen_media'])assert(names.includes(name));for(const name of ['cewen_answer','cewen_accept_proposal','cewen_commit','cewen_production_adopt'])assert(!names.includes(name));
+// 工具可按协议扩展；检查必要能力与敏感接口边界，不以固定总数误判扩展。
+try{await client.connect(transport);const tools=await client.listTools();const names=tools.tools.map(t=>t.name);for(const name of ['cewen_context','cewen_quest_read','cewen_quest_events','cewen_production_preview','cewen_media'])assert(names.includes(name));for(const name of ['cewen_answer','cewen_accept_proposal','cewen_commit','cewen_production_adopt'])assert(!names.includes(name));
  const call=async(name,args={})=>{const r=await client.callTool({name,arguments:args});if(r.isError)throw new Error(JSON.stringify(r));return r;};
  const caps=JSON.parse((await call('cewen_capabilities')).content[0].text);assert.equal(caps.creativeFormat,2);
  const library=JSON.parse((await call('cewen_projects')).content[0].text),projectId=library.current;
@@ -15,5 +16,5 @@ try{await client.connect(transport);const tools=await client.listTools();assert.
  const schema=await client.readResource({uri:'cewen://schemas/modules'});assert(schema.contents.length);
  const prompts=await client.listPrompts();assert(prompts.prompts.some(p=>p.name==='continue-quest'));
  const bad=await client.callTool({name:'cewen_quest_events',arguments:{projectId,questId:list.objects.find(o=>o.type==='quest')?.id??'absent-quest',cursor:'not-a-revision'}});assert(bad.isError);
- console.log('PASS 32 tools; no approval/answer/commit tools; capabilities; media content; resource; prompt; invalid cursor error');
+ console.log('PASS required tools; no approval/answer/commit tools; capabilities; media content; resource; prompt; invalid cursor error');
 }finally{await client.close();await transport.close();if(log.trim())console.error('Adapter stderr:',log.trim());}
