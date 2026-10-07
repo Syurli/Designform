@@ -8,6 +8,8 @@ export { path, Buffer };
 export const randomUUID = () => crypto.randomUUID();
 export const runtimeKind: 'desktop' | 'web' = 'web';
 export const runtimePid = 1;
+/** 浏览器没有可信的主机身份，跨标签页互斥与文件租约共同负责保护项目。 */
+export const runtimeHost: string | undefined = undefined;
 export const defaultTemplateRoot = '/app/templates/example';
 export const backupStateFile = '.cewen/backup-state.web.json';
 export const ownerAlive = (_pid: number) => true;
