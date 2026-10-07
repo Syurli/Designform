@@ -3,6 +3,7 @@ import { mkdir, writeFile, readFile, cp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { releaseVersion } from './release-version.mjs';
 
 /** 固定官方 Node 24 运行时；先验证官方 SHASUMS，再取 node.exe。 */
 const version = '24.13.0', archive = `node-v${version}-win-x64.zip`;
@@ -37,5 +38,5 @@ const destination = path.resolve('dist-web/connector.zip');
 if (process.platform === 'win32') execFileSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${runtime.replaceAll("'", "''")}/*' -DestinationPath '${destination.replaceAll("'", "''")}' -Force`]);
 else execFileSync('zip', ['-q', '-r', destination, '.'], { cwd: runtime });
 const result = await readFile(destination);
-await writeFile('dist-web/connector.manifest.json', JSON.stringify({ version: JSON.parse(await readFile('package.json', 'utf8')).version, platform: 'win-x64', nodeVersion: version, size: result.length, sha256: createHash('sha256').update(result).digest('hex') }, null, 2));
+await writeFile('dist-web/connector.manifest.json', JSON.stringify({ version: releaseVersion, platform: 'win-x64', nodeVersion: version, size: result.length, sha256: createHash('sha256').update(result).digest('hex') }, null, 2));
 console.log('Pages 同源 Windows x64 接入包已生成并校验。');

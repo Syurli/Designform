@@ -7,7 +7,7 @@ import { isTransientProject } from '../shared/transient';
 import { createElement as createLucideElement, ChevronDown, PanelLeft, PanelLeftOpen, PanelsTopLeft, ArrowLeft, CircleAlert } from 'lucide';
 import { categoryColor } from './category-color';
 import { showAppMenu } from './app-menu';
-import { questionDocuments, questionSources, questionRecord, visibleProjectQuestions, questionFilterLabels, questionStatusLabels, type QuestionDirectoryState, type QuestionFilter, type QuestionRecords } from './project-question-model';
+import { questionDocuments, questionSources, questionRecord, questionMatchesFilter, visibleProjectQuestions, questionFilterLabels, questionStatusLabels, type QuestionDirectoryState, type QuestionFilter, type QuestionRecords } from './project-question-model';
 import './project-question-directory.css';
 
 export type { QuestionDirectoryState, QuestionFilter, QuestionStateInfo, QuestionRecords } from './project-question-model';
@@ -105,7 +105,7 @@ export class ProjectQuestionDirectory {
     return visibleProjectQuestions(this.snapshot!, ignoreSearchAndFilter ? { ...this.allState(), query: '', filter: 'all' } : this.allState(), this.records);
   }
   /** 选择或填写即算已回答；暂缓题及真正更新的题仍计入待处理数量。 */
-  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && ['pending','deferred','review'].includes(questionRecord(this.records, question.id)?.status ?? 'pending')).length; }
+  private pending(questions: ProjectDocument[]) { return questions.filter(question => question.status !== 'archived' && questionMatchesFilter(questionRecord(this.records, question.id), 'pending')).length; }
   private validSources(question: ProjectDocument) {
     const normal = new Set(questionDocuments(this.snapshot!).map(doc => doc.id)); return questionSources(this.snapshot!, question).filter(id => normal.has(id));
   }

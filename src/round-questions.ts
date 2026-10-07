@@ -9,11 +9,13 @@ import { relatedQuestions } from './creative/questions';
 import { projectAction } from './project-client';
 import { copyAnswerOpening, openCollaboration } from './prompt-panel';
 import { ProjectQuestionDirectory } from './project-question-directory';
-import { questionDocuments, questionSources, visibleProjectQuestions, type QuestionDirectoryState, type QuestionStateInfo } from './project-question-model';
+import { questionDocuments, questionSources, questionFilter, questionMatchesFilter, questionStatusLabels, visibleProjectQuestions, type QuestionDirectoryState, type QuestionStateInfo } from './project-question-model';
 import { h } from './creative/render';
 import './round-questions.css';
 
 interface Draft { hash:string; text:string; choices:string[]; action:string; questionText?:string; basis?:string }
+/** 前题跳转仅改变个人浏览范围，返回时恢复搜索、筛选、轮次及汇总位置。 */
+interface QuestionOrigin { questionId:string; directory:QuestionDirectoryState; summary:boolean; summaryMode?:'round'|'all'; round:string }
 interface Session {
   round:string; question:string; summary:boolean; summaryMode?:'round'|'all';
   directory?:QuestionDirectoryState; receipt?:AnswerHandoff; receipts?:Record<string,AnswerHandoff>;
@@ -54,6 +56,7 @@ export class RoundQuestions {
   private basisCache=new Map<string,string>();
   private creativeCache?:{snapshot:ProjectSnapshot;index:ReturnType<typeof buildCreativeIndex>};
   private sourceWarnings=new Map<string,string>();
+  private questionTrail:QuestionOrigin[]=[];
   constructor(private host:HTMLElement,private nav:HTMLElement,private snapshot:ProjectSnapshot,private documentId:string,private options:Options){
     const id=snapshot.project.id;let stored=memory.get(id);
     if(!stored){
@@ -80,7 +83,7 @@ export class RoundQuestions {
     const saved=this.session.directory,defaults=emptyDirectory();
     this.session.directory={...defaults,group:typeof saved?.group==='string'?saved.group:'',documentId:typeof saved?.documentId==='string'?saved.documentId:'',
       questionId:this.session.question,query:typeof saved?.query==='string'?saved.query:'',includeArchived:saved?.includeArchived===true,
-      filter:saved&&['all','pending','draft','submitted','review'].includes(saved.filter)?saved.filter:'all'};
+      filter:questionFilter(saved?.filter)};
     this.rememberSubmittedBases();this.directory=this.createDirectory();
     this.chooseInitial();
     if(options.initialQuestionId&&this.all().some(q=>q.id===options.initialQuestionId))this.selectQuestion(options.initialQuestionId);
@@ -94,7 +97,7 @@ export class RoundQuestions {
   private current(){return this.all().find(d=>d.id===this.session.question);}
   private visible(records=this.records()){
     const questions=visibleProjectQuestions(this.snapshot,this.state(),records);
-    return this.documentId?questions.filter(q=>relatedQuestions(this.snapshot,this.documentId).some(d=>d.id===q.id)):questions;
+    return this.documentId&&!this.questionTrail.length?questions.filter(q=>relatedQuestions(this.snapshot,this.documentId).some(d=>d.id===q.id)):questions;
   }
   /** 每轮独立保留交接收据，不能借用另一轮实际提交的开场白。 */
   private receipt(){
@@ -121,7 +124,7 @@ export class RoundQuestions {
     const previous=this.current();
     if(previous&&previous.id!==id){
       const changedRound=questionRoundKey(previous)!==questionRoundKey(q),changedSources=JSON.stringify(questionSources(this.snapshot,previous))!==JSON.stringify(questionSources(this.snapshot,q));
-      if(changedRound||changedSources)this.banner='上一题的回答已在本机保留。';
+      if((changedRound||changedSources)&&filled(this.drafts[previous.id]))this.banner='上一题的回答已在本机保留。';
     }
     this.session.question=id;this.session.round=questionRoundKey(q);this.session.summary=false;
     this.state().questionId=id;
@@ -130,6 +133,29 @@ export class RoundQuestions {
     this.state().group=group;this.state().documentId=documentId;
     const first=this.preferred(this.visible());
     if(first)this.selectQuestion(first.id);else{this.session.question='';this.state().questionId='';this.session.summary=false;}
+  }
+  /** 条件入口允许跨分类、文档和筛选打开真实前题，跳转前统一由 navigate 暂存表单。 */
+  private openPrerequisite(id:string){
+    const target=this.all().find(q=>q.id===id);
+    if(!target){this.banner='前题已移除，请调整题目的关联。';this.render();return;}
+    if(target.id===this.session.question||this.questionTrail.some(origin=>origin.questionId===id)){
+      this.banner='题目存在循环前题关联，请调整关联。';this.feedback();return;
+    }
+    this.questionTrail.push({questionId:this.session.question,directory:{...this.state()},summary:this.session.summary,summaryMode:this.session.summaryMode,round:this.session.round});
+    this.session.directory={...emptyDirectory(),group:'question-all',includeArchived:target.status==='archived'};
+    this.selectQuestion(id);this.banner='';this.render();
+  }
+  /** 返回恢复原范围，不隐式保存其他轮回答；同轮草稿继续用于判断前题条件。 */
+  private returnToQuestion(){
+    const origin=this.questionTrail.pop();if(!origin)return;
+    this.session.directory={...origin.directory};this.session.round=origin.round;
+    this.session.question=origin.questionId;this.session.summary=origin.summary;this.session.summaryMode=origin.summaryMode;
+    this.banner=this.current()?'':'原题已移除，已返回原来的浏览范围。';this.render();
+  }
+  /** 主作答区及汇总共用条件按钮，键盘也能直接打开前题；不存在的前题只显示说明。 */
+  private condition(available:ReturnType<typeof questionAvailable>){
+    if(available.active)return '';
+    return `<p class="round-condition">${available.previousId?`<button type="button" class="round-condition-link" data-prerequisite="${h(available.previousId)}" aria-label="打开前题：${h(available.previousTitle)}">${h(available.reason)} ↗</button>`:h(available.reason)}</p>`;
   }
   private save(){
     if(isTransientProject(this.snapshot.project.id))return;
@@ -188,9 +214,11 @@ export class RoundQuestions {
     return reason&&this.session.reviewedBases?.[doc.id]!==this.basis(doc)?reason:'';
   }
   /** 条件预显只投影当前轮草稿；其他轮草稿不会因当前轮提交而自动生效。 */
-  private projected(selected?:Set<string>){
+  private projected(selected?:Set<string>,roundKey=this.session.round){
+    const pending=this.all().filter(d=>questionRoundKey(d)===roundKey&&(this.state().includeArchived||d.status!=='archived')&&(!selected||selected.has(d.id))&&filled(this.drafts[d.id])&&!this.stale(d)&&!this.reviewReason(d));
+    // 大项目的无草稿轮次直接复用只读快照，避免按轮重复复制所有文档。
+    if(!pending.length)return this.snapshot.documents;
     const docs=this.snapshot.documents.map(d=>({...d}));
-    const pending=this.round().filter(d=>(!selected||selected.has(d.id))&&filled(this.drafts[d.id])&&!this.stale(d)&&!this.reviewReason(d));
     for(let pass=0;pass<=pending.length;pass++)for(const doc of pending){
       const draft=this.drafts[doc.id],target=docs.find(d=>d.id===doc.id)!;
       if(!questionAvailable(doc,docs).active)continue;
@@ -199,15 +227,17 @@ export class RoundQuestions {
     return docs;
   }
   private records(docs=this.projected()):Record<string,QuestionStateInfo>{
+    // 目录逐轮投影，避免当前轮的未保存前题让另一轮题目被错误标成已解锁。
+    const projections=new Map([[this.session.round,docs]]);
     return Object.fromEntries(this.all().map(doc=>{
-      const available=questionAvailable(doc,docs),draft=this.drafts[doc.id],review=this.reviewReason(doc);
+      const key=questionRoundKey(doc);if(!projections.has(key))projections.set(key,this.projected(undefined,key));
+      const available=questionAvailable(doc,projections.get(key)!),draft=this.drafts[doc.id],review=this.reviewReason(doc);
       const saved=latestAnswer(doc),status:QuestionStateInfo['status']=review||saved&&!available.active?'review':filled(draft)?draft!.action==='暂缓'?'deferred':draft!.action==='前提不成立'?'premise':'draft':saved?saved.action==='暂缓'?'deferred':saved.action==='前提不成立'?'premise':'submitted':'pending';
       return [doc.id,{id:doc.id,status,sourceIds:questionSources(this.snapshot,doc),blocked:!available.active,reason:[review,!available.active?available.reason:''].filter(Boolean).join('；')}];
     }));
   }
   private status(doc:ProjectDocument,record=this.records()[doc.id]){
-    const labels:Record<QuestionStateInfo['status'],string>={review:'题目已更新',draft:'已回答',deferred:'暂缓',premise:'题目有问题',submitted:'已保存',pending:'待回答'};
-    return `${labels[record.status]}${record.blocked?' · 条件尚未满足':''}`;
+    return `${questionStatusLabels[record.status]}${record.blocked?' · 待前题':''}`;
   }
   /** 公开收尾入口供模式退出使用，只保存草稿，不销毁会话或提交。 */
   captureDraft(){this.capture(false);this.save();this.notifyStats();}
@@ -267,7 +297,7 @@ export class RoundQuestions {
     this.notifyStats(records);
   }
   private notifyStats(records=this.records()){
-    this.options.onStateChange?.({pending:this.all().filter(q=>q.status!=='archived'&&['pending','deferred','review'].includes(records[q.id]?.status)).length,drafts:Object.values(this.drafts).filter(filled).length});
+    this.options.onStateChange?.({pending:this.all().filter(q=>q.status!=='archived'&&questionMatchesFilter(records[q.id],'pending')).length,drafts:Object.values(this.drafts).filter(filled).length});
   }
   private sourceLabel(doc:ProjectDocument){
     return questionSources(this.snapshot,doc).map(id=>this.snapshot.documents.find(d=>d.id===id)?.title??`失效来源 ${id}`).join('、')||'未关联问题';
@@ -301,10 +331,11 @@ export class RoundQuestions {
     const background=questionDisplayBackground(q.background),issue=answer?.action==='前提不成立';
     content.innerHTML=`<article class="round-question">
       <small>${index>=0?`第 ${index+1} / ${visible.length} 题`:''}</small>
+      ${this.returnLink()}
       <h2>${h(questionDisplayTitle(q.title))}</h2>
       ${background?`<p class="round-background">${h(background)}</p>`:''}
-      ${review?`<details class="round-review"><summary>题目已更新，修改回答即可使用当前题目</summary><p>${h(review)}</p>${draft?`<pre>${h(draft.questionText??'')}</pre><p>此前选择：${h(draft.choices.join('；')||'无')}</p>`:''}<button data-reviewed>保留当前回答</button></details>`:''}
-      ${!available.active?`<p class="round-condition">${h(available.reason)}</p>`:''}
+      ${review?`<details class="round-review"><summary>回答需复核，修改即可更新</summary><p>${h(review)}</p>${draft?`<pre>${h(draft.questionText??'')}</pre><p>此前选择：${h(draft.choices.join('；')||'无')}</p>`:''}<button data-reviewed>保留当前回答</button></details>`:''}
+      ${this.condition(available)}
       ${!draft&&saved?'<p class="round-saved-answer">已保存的回答 <button data-revise>修改回答</button></p>':''}
       <form data-round-form><fieldset ${this.snapshot.historical||!available.active||!draft&&saved?'disabled':''}>
         ${q.options.map(option=>`<label class="round-option"><input type="${q.multiple?'checkbox':'radio'}" name="choice" value="${h(option)}" ${answer?.choices.includes(option)?'checked':''}/><span>${h(option)}</span></label>`).join('')}
@@ -335,6 +366,7 @@ export class RoundQuestions {
     const canHandoff=round.some(doc=>filled(this.drafts[doc.id])||latestAnswer(doc));
     let index=0;
     content.innerHTML=`<div class="round-summary-tools"><h2>本轮回答汇总</h2><button data-all-drafts>其他轮回答</button></div>
+      ${this.returnLink()}
       <p class="round-result-count">已回答 ${answered} 题 · 暂缓 ${round.length-answered-issues} 题${issues?` · 题目有问题 ${issues} 题`:''}</p>
       <div class="round-summary">${[...groups].map(([source,questions])=>`<section class="round-summary-group"><h3>${h(source?this.snapshot.documents.find(d=>d.id===source)?.title??'其他问题':'其他问题')}</h3>${questions.map(doc=>{
         const answer=result(doc),available=questionAvailable(doc,docs),review=this.reviewReason(doc);
@@ -343,7 +375,7 @@ export class RoundQuestions {
           ${answer?.choices.length?`<p>${h(answer.choices.join('；'))}</p>`:''}
           ${answer?.text?`<p class="round-verbatim">${h(answer.text)}</p>`:''}
           ${!answer||answer.action==='暂缓'?'<p class="quiet">暂缓，稍后再答</p>':''}
-          ${review||!available.active?`<small class="round-review-note">${h(review?'题目已更新，请返回修改回答':available.reason)}</small>`:''}
+          ${review?'<small class="round-review-note">需复核，请修改回答</small>':''}${this.condition(available)}
         </article>`;
       }).join('')}</section>`).join('')}</div>
       <section class="round-handoff"><h3>交给 LLM 分析</h3>
@@ -352,6 +384,12 @@ export class RoundQuestions {
         <button data-handoff ${this.busy||this.snapshot.historical||!canHandoff?'disabled':''}>预览 / 编辑开场白</button>
         ${this.options.hasUnsaved()?'<small>策划正文还有未保存修改，分析将使用已保存正文。</small>':''}
       </section>`;
+  }
+  /** 返回入口在汇总中也保留；跨轮草稿须明确保存后才能解锁原题。 */
+  private returnLink(){
+    const origin=this.questionTrail.at(-1);if(!origin)return '';
+    const target=this.all().find(q=>q.id===origin.questionId),crossRound=origin.round!==this.session.round;
+    return `<div class="round-return"><button type="button" data-return-question title="${h(target?questionDisplayTitle(target.title):'原来的浏览位置')}">${origin.summary?'返回原汇总':'返回原题'} ↩</button>${crossRound?'<small>跨轮前题请先在本轮汇总保存回答。</small>':''}</div>`;
   }
   private allDrafts(content:HTMLElement){
     const groups=new Map<string,ProjectDocument[]>(),records=this.records();
@@ -376,6 +414,8 @@ export class RoundQuestions {
       const run=(fn:()=>Promise<unknown>)=>void fn().catch(err=>{this.banner=err instanceof Error?err.message:String(err);this.feedback();});
       if(b.hasAttribute('data-back')){this.navigate(()=>this.options.back());return;}
       if(b.dataset.source){this.navigate(()=>this.options.source(b.dataset.source!));return;}
+      if(b.dataset.prerequisite){this.navigate(()=>this.openPrerequisite(b.dataset.prerequisite!));return;}
+      if(b.hasAttribute('data-return-question')){this.navigate(()=>this.returnToQuestion());return;}
       if(b.hasAttribute('data-start')){this.capture();run(()=>this.start());return;}
       if(b.hasAttribute('data-import-questions')){this.navigate(()=>this.options.importQuestions?.());return;}
       if(b.hasAttribute('data-clear-choice')){this.host.querySelectorAll<HTMLInputElement>('[name=choice]').forEach(input=>input.checked=false);this.capture(true,true);return;}

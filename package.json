@@ -1,7 +1,8 @@
 {
   "name": "baige-designform",
   "private": true,
-  "version": "0.9.4",
+  "version": "0.9.4+1",
+  "releaseVersion": "0.9.4.1",
   "type": "module",
   "main": "runtime/desktop.js",
   "description": "策问 Designform — 游戏策划知识空间",
@@ -14,7 +15,7 @@
     "desktop": "electron .",
     "cli": "node runtime/cli.js",
     "mcp": "node runtime/mcp.js",
-    "package:win": "npm run build && npm run build:runtime && electron-builder --win --x64",
+    "package:win": "npm run build && npm run build:runtime && node scripts/package-windows.mjs",
     "icons": "node scripts/export-icons.mjs",
     "dev:web": "vite --mode web --host 127.0.0.1 --port 5174",
     "build:web": "tsc --noEmit && vite build --mode web",

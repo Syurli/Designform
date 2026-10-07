@@ -55,11 +55,14 @@ export function questionAvailable(document: ProjectDocument, documents: ProjectD
   const metadata = questionContent(document.text).metadata;
   const when = metadata.when as { questionId?: string; option?: string } | undefined;
   const previousId = when?.questionId ?? (typeof metadata.follows === 'string' ? metadata.follows : undefined);
-  if (!previousId) return { active: true, reason: '' };
+  if (!previousId) return { active: true, reason: '', previousId: '', previousTitle: '' };
   const previous = documents.find(doc => doc.id === previousId && doc.type === 'question');
+  // 条件身份保留在数据中；界面使用可读题名并据此跳转，缺失前题不生成失效入口。
+  if (!previous) return { active: false, reason: '前题已移除，请调整题目的关联。', previousId: '', previousTitle: '' };
+  const previousTitle = questionDisplayTitle(previous.title);
   const answer = previous ? section(previous.text, '用户原始回答').text.split('### 回答 ').at(-1)! : '';
   const answered = Boolean(previous && section(previous.text, '用户原始回答').text.includes('### 回答 ') && answer.includes('- 作答方式：回答'));
-  return { active: answered && (!when?.option || answer.includes(`  - ${when.option}`)), reason: when?.option ? `前题 ${previousId} 选择“${when.option}”后可答` : `前题 ${previousId} 回答后可答` };
+  return { active: answered && (!when?.option || answer.includes(`  - ${when.option}`)), reason: when?.option ? `前题“${previousTitle}”选择“${when.option}”后可答` : `前题“${previousTitle}”回答后可答`, previousId, previousTitle };
 }
 /** 改答以新记录追加；用户原话与模型解释永远不共用一个可覆盖的字段。 */
 export function answerQuestion(document: ProjectDocument, answer: { id: string; choices: string[]; text: string; action: string; revision: string | null; supersedes?: string }) {

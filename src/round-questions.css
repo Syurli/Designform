@@ -44,4 +44,9 @@
 .round-review{font-size:12px;margin:12px 0;color:var(--text-muted)}
 .round-review pre{white-space:pre-wrap;max-height:180px;overflow:auto}
 .round-condition,.round-review-note{font-size:12px;color:var(--text-muted)}
+/* 前题提示是轻量导航按钮，长题名自然换行，焦点轮廓支持键盘操作。 */
+.round-condition-link,.round-return button{font:inherit;font-size:12px;text-align:left;white-space:normal;line-height:1.6;border:0;background:transparent;box-shadow:none;padding:3px 0;color:var(--accent-strong);text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.round-condition-link:focus-visible,.round-return button:focus-visible{outline:2px solid var(--accent-strong);outline-offset:3px;border-radius:3px}
+.round-return{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:6px 0}
+.round-return small{font-size:12px;color:var(--text-muted)}
 .round-handoff h3{font-size:16px;margin:0 0 8px}.round-handoff p{font-size:13px;margin:0 0 10px}.round-handoff small{display:block;color:var(--text-muted);margin-top:8px}

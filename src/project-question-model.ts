@@ -3,7 +3,7 @@ import { readHeader } from '../shared/markdown';
 import { groupAncestors } from '../shared/project-hierarchy';
 
 /** 策问筛选和阅读目录完全独立；特殊范围表示全项目平铺或没有有效普通来源。 */
-export type QuestionFilter = 'all' | 'pending' | 'draft' | 'submitted' | 'review';
+export type QuestionFilter = 'all' | 'pending' | 'submitted';
 export interface QuestionDirectoryState {
   group: string; documentId: string; questionId: string;
   filter: QuestionFilter; query: string; includeArchived: boolean;
@@ -14,8 +14,13 @@ export interface QuestionStateInfo {
   sourceIds: string[]; blocked?: boolean; reason?: string;
 }
 export type QuestionRecords = Readonly<Record<string, QuestionStateInfo>> | readonly QuestionStateInfo[];
-export const questionFilterLabels: Record<QuestionFilter, string> = { all: '全部', pending: '待答', draft: '本机回答', submitted: '已答', review: '题目更新' };
-export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '已回答', submitted: '已保存', review: '题目已更新', deferred: '暂缓', premise: '题目有问题' };
+export const questionFilterLabels: Record<QuestionFilter, string> = { all: '全部', pending: '待答', submitted: '已答' };
+export const questionStatusLabels: Record<QuestionStateInfo['status'], string> = { pending: '待答', draft: '已答 · 待保存', submitted: '已答', review: '需复核', deferred: '暂缓', premise: '题目有问题' };
+
+/** 旧个人筛选只迁移浏览偏好，不迁移、丢弃或改写回答。 */
+export function questionFilter(value: unknown): QuestionFilter {
+  return value === 'submitted' || value === 'draft' ? 'submitted' : value === 'pending' || value === 'review' ? 'pending' : 'all';
+}
 
 import { questionDocuments, questionSources } from '../shared/question-sources';
 export { questionDocuments, questionSources } from '../shared/question-sources';
@@ -25,7 +30,8 @@ export function questionRecord(records: QuestionRecords, id: string): QuestionSt
 }
 export function questionMatchesFilter(record: QuestionStateInfo | undefined, filter: QuestionFilter): boolean {
   const status = record?.status ?? 'pending';
-  return filter === 'all' || filter === 'draft' && ['draft', 'deferred', 'premise'].includes(status) || filter === 'submitted' && ['draft','submitted','premise'].includes(status) || filter === 'pending' && ['pending','deferred'].includes(status) || status === filter;
+  // 需要复核的回答回到待答；已答同时包含个人草稿、项目回答和已反馈的问题。
+  return filter === 'all' || filter === 'submitted' && ['draft','submitted','premise'].includes(status) || filter === 'pending' && ['pending','deferred','review'].includes(status);
 }
 
 /** 同一问题只返回一次；分类汇总自身和后代的正式问题及普通来源文档，不改变问题归属。 */
