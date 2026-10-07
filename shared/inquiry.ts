@@ -76,5 +76,6 @@ export function answerQuestion(document: ProjectDocument, answer: { id: string; 
   const entry = `\n\n### 回答 ${answer.id}\n\n- 时间：${new Date().toISOString()}\n- 作答基础修订：${answer.revision ?? '未建立'}\n- 作答方式：${answer.action}\n${answer.supersedes ? `- 替代回答：${answer.supersedes}\n` : ''}- 选择及当时原文：\n${answer.choices.map(choice => `  - ${choice}`).join('\n') || '  - 无预设选项'}\n\n用户自定义原话：\n\n${quote || '> 未填写自定义文本。'}\n\n`;
   const prefix = existing.text === '尚未回答。' ? document.text.slice(0, existing.start) : document.text.slice(0, existing.end);
   const text = prefix + entry + document.text.slice(existing.end);
-  return setMetadata(text, { status: answer.action === '暂缓' ? 'open' : 'answered' });
+  // 查看归档前题并补充回答只追加原话，不改变历史题的归档状态。
+  return setMetadata(text, { status: document.status === 'archived' ? 'archived' : answer.action === '暂缓' ? 'open' : 'answered' });
 }
