@@ -45,6 +45,8 @@ with sync_playwright() as playwright:
         page.locator('dialog[open] [name=example][value="'+kind+'"]').check()
         page.locator('dialog[open] [type=submit]').click()
         expect(page.locator('.desktop-work')).to_be_visible(timeout=60000)
+        # 工作区先显示再准备首份文档；等待载入模态完成，避免快捷键被进度框保护掉。
+        expect(page.locator('.project-loading-dialog')).to_have_count(0, timeout=60000)
         expect(page.locator('[data-session-kind]')).to_contain_text('临时')
 
     def menu(name):
