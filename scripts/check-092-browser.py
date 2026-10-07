@@ -66,7 +66,9 @@ with sync_playwright() as playwright:
         assert disk_state() == before, '另存为取消前发生了本地文件写入'
         assert page.evaluate('Object.keys(localStorage).sort()') == stored_before, '示例编辑写入持久偏好/草稿'
         assert page.evaluate('async()=> (await indexedDB.databases()).length') == 0, '示例打开持久数据库'
-        page.locator('[data-home]').click()
+        # 返回项目库只挂起会话；此处明确关闭示例，核对放弃后恢复原始内容。
+        page.locator('.document-menu [data-file]').click()
+        page.get_by_role('menuitem', name='关闭当前项目', exact=True).click()
         page.locator('[value=discard]').check()
         page.locator('dialog[open] [type=submit]').click()
         expect(page.locator('.desktop-library')).to_be_visible()
@@ -180,7 +182,8 @@ with sync_playwright() as playwright:
         # 属性已统一为标签，媒体入口使用当前文档右键插入菜单。
         page.locator('[data-doc-mode=preview]').click()
         page.locator('.document-tab-content:not([hidden]) .desktop-document-preview').click(button='right', position={'x':25,'y':30})
-        page.get_by_role('menuitem', name='图片与媒体', exact=True).click()
+        # 分类项包含展开箭头，按可读标签定位；子命令仍精确匹配。
+        page.get_by_role('menuitem', name='图片与媒体', exact=False).click()
         with page.expect_file_chooser() as picker:
             page.get_by_role('menuitem', name='音频 / 媒体…', exact=True).click()
         picker.value.set_files(str(fixture))
