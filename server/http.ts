@@ -15,6 +15,7 @@ import { chooseNativeDirectory } from './native-dialog.ts';
 import { installedFonts } from './system-fonts.ts';
 import { CollaborationService } from './collaboration.ts';
 import type { ProjectSnapshot } from '../shared/model.ts';
+import { createConnectionDiagnostics, type ConnectionTiming } from './connection-diagnostics.ts';
 
 /** API 生命周期由本地宿主管理；开发、浏览器和桌面复用同一服务实现。 */
 export function createProjectApi(options: { home?: string; templateRoot?: string; root?: string; chooseDirectory?: (initial: string) => Promise<string | null>; installation?: string; sessionToken?: string; projectId?: string } = {}) {
@@ -22,6 +23,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
   const creative = new CreativeService(service);
   const token = options.sessionToken ?? randomBytes(32).toString('hex');
   const connections = new ConnectionRegistry();
+  const recordConnection = createConnectionDiagnostics(service.home);
   const collaboration = new CollaborationService(service, id => connections.read().connections.some(connection => connection.id === id && connection.status === 'connected'));
 
   /** 有界请求体避免错误客户端把整个资料库塞入一个正文提交。 */
@@ -58,6 +60,23 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
   /** 回环地址、同源与会话凭证一起约束本地写入，正文不能成为执行命令。 */
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     if (!request.url?.startsWith('/api/')) return false;
+    const started = performance.now(), stages: Record<string, number> = {};
+    const diagnosticRoute = request.url.split('?')[0];
+    let errorCode: string | undefined, mode: ConnectionTiming['mode'];
+    if (['/api/session', '/api/projects', '/api/connections'].includes(diagnosticRoute)) {
+      const record = (status: number) => {
+        const elapsedMs = Math.round(performance.now() - started);
+        // 快速页面浏览不落盘，保留纯内存示例的零写入约定。
+        // 原生 MCP 握手及慢请求／失败始终记录；主动排查时可开启完整时序。
+        const fastSuccess = status >= 200 && status < 400 && elapsedMs < 1000;
+        if (fastSuccess && !(diagnosticRoute === '/api/session' && mode === 'handshake') && process.env.CEWEN_CONNECTION_TRACE !== '1') return;
+        recordConnection({ at: new Date().toISOString(), route: diagnosticRoute as ConnectionTiming['route'], method: request.method ?? '', ...(mode ? { mode } : {}), status, elapsedMs, ...(errorCode ? { errorCode } : {}), stages: Object.fromEntries(Object.entries(stages).map(([key, value]) => [key, Math.round(value)])) });
+      };
+      response.once('finish', () => record(response.statusCode));
+      response.once('close', () => { if (!response.writableFinished) record(0); });
+    }
+    /** 时序头只带数字阶段，不包含请求参数，诊断写入不在响应关键路径。 */
+    const sendTiming = () => response.setHeader('Server-Timing', Object.entries({ ...stages, responseMs: performance.now() - started }).map(([name, value]) => `${name};dur=${value.toFixed(1)}`).join(', '));
     try {
       const authority = request.headers.host ?? '';
       if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(authority)) throw new ProjectError('HOST_DENIED', '本地服务只接受回环地址访问。');
@@ -79,7 +98,11 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       }
       if (url.pathname === '/api/session' && request.method === 'GET') {
         response.setHeader('Set-Cookie', `cewen=${token}; HttpOnly; SameSite=Strict; Path=/api/`);
-        const listed = await service.list();
+        // 凭证签发独立于项目初始化、项目库队列和历史磁盘读取。
+        if (url.searchParams.get('handshake') === '1') { mode = 'handshake'; sendTiming(); send(response, { protocolVersion: PROTOCOL_VERSION, token }); return true; }
+        mode = 'library';
+        const listed = await service.list(timing => Object.assign(stages, timing));
+        sendTiming();
         send(response, { protocolVersion: PROTOCOL_VERSION, token, ...listed, ...(options.projectId ? { projects: listed.projects.filter(project => project.id === options.projectId) } : {}) }); return true;
       }
       const imageRead = request.method === 'GET' && /\/asset$/.test(url.pathname) && request.headers.cookie?.split(';').some(cookie => cookie.trim() === `cewen=${token}`);
@@ -96,10 +119,10 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       if(url.pathname==='/api/creative-project'&&request.method==='POST'){send(response,await createPresetProject(service,await body(request)));return true;}
       if (url.pathname === '/api/creative-capabilities' && request.method === 'GET') { send(response, creative.capabilities()); return true; }
       if (url.pathname === '/api/connections' && request.method === 'GET') { send(response, connections.read()); return true; }
-      if (url.pathname === '/api/connections' && request.method === 'POST') { send(response, connections.update(await body(request))); return true; }
+      if (url.pathname === '/api/connections' && request.method === 'POST') { const bodyStarted = performance.now(), input = await body(request); stages.bodyMs = performance.now() - bodyStarted; const updateStarted = performance.now(), state = connections.update(input); stages.registryMs = performance.now() - updateStarted; sendTiming(); send(response, state); return true; }
       if (url.pathname === '/api/document-presets') { await service.list(); send(response, await documentPresets(service.home, request.method === 'POST' ? await body(request) : undefined)); return true; }
       if (url.pathname === '/api/projects/save-as' && request.method === 'POST') { send(response,await service.saveAs(await body(request) as never));return true; }
-      if (url.pathname === '/api/projects' && request.method === 'GET') { const listed = await service.list(); send(response, { ...listed, ...(options.projectId ? { projects: listed.projects.filter(project => project.id === options.projectId) } : {}) }); return true; }
+      if (url.pathname === '/api/projects' && request.method === 'GET') { mode = 'library'; const listed = await service.list(timing => Object.assign(stages, timing)); sendTiming(); send(response, { ...listed, ...(options.projectId ? { projects: listed.projects.filter(project => project.id === options.projectId) } : {}) }); return true; }
       if (url.pathname === '/api/projects' && request.method === 'POST') {
         const input = await body(request);
         if (!['blank', 'basic', 'example'].includes(String(input.kind))) throw new ProjectError('INVALID_TEMPLATE', '请选择空白、基础总纲或虚构示例。');
@@ -205,6 +228,7 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
       send(response, { error: { code: 'NOT_FOUND', message: '没有这个项目操作。' } }, 404);
     } catch (error) {
       const failure = error instanceof ProjectError ? error : new ProjectError('LOCAL_IO_ERROR', error instanceof Error ? error.message : '本地文件操作未完成。');
+      errorCode = failure.code;
       send(response, { error: { code: failure.code, message: failure.message, details: failure.details } }, failure.code.includes('CONFLICT') || failure.code === 'RECOVERY_REQUIRED' ? 409 : failure.code.endsWith('DENIED') || failure.code === 'SESSION_REQUIRED' ? 403 : 400);
     }
     return true;

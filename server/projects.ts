@@ -72,6 +72,8 @@ export class ProjectService {
   private registry: Registry = { projects: [], current: null };
   private queues = new Map<string, Promise<unknown>>();
   private ready: Promise<void>;
+  /** 项目中心并发刷新共用一份在途结果，避免超时重试不断堆积同样的历史读取。 */
+  private listing?: { result: Promise<Registry & { defaultDirectory: string }>; timings: Record<string, number> };
   private closing=false;
   private watchers = new Map<string, FSWatcher>();
   private observations = new Map<string, { fingerprint: string; since: number }>();
@@ -166,26 +168,49 @@ export class ProjectService {
   private libraryView() { return { ...this.registry, projects: [...this.registry.projects], defaultDirectory: this.home }; }
 
   /** 项目库身份以各项目当前 PROJECT.md 为准；失联或损坏项目保留最近登记，供用户重新定位。 */
-  async list() {
+  async list(reportTiming?: (timings: Record<string, number>) => void) {
+    const started = performance.now();
     await this.ready;
-    return this.exclusive('library', async () => {
-      const refreshed = await Promise.all(this.registry.projects.map(async project => {
-        try {
-          const bytes = await optionalBytes(project.path, 'PROJECT.md');
-          if (!bytes) return project;
-          const actual = parseProjectInfo({ path: 'PROJECT.md', text: bytes.toString('utf8'), hash: sha256(bytes) }, project.path);
-          // 磁盘 ID 被改动时仍保留原登记，不悄悄把另一项目塞进当前历史身份。
-          const versions = await history(project.path,project.id);
-          const valid=versions.filter(entry=>entry.valid).map(entry=>entry.manifest);
-          return actual.id === project.id ? {...actual,createdAt:actual.createdAt||valid[0]?.createdAt,updatedAt:valid.at(-1)?.createdAt||actual.createdAt} : project;
-        } catch { return project; }
-      }));
-      if (JSON.stringify(refreshed) !== JSON.stringify(this.registry.projects)) {
-        this.registry.projects = refreshed;
-        await this.saveRegistry();
-      }
-      return this.libraryView();
-    });
+    const readyMs = performance.now() - started, shared = !!this.listing;
+    if (!this.listing) {
+      const queued = performance.now(), timings: Record<string, number> = {};
+      const result = this.exclusive('library', async () => {
+        timings.queueMs = performance.now() - queued;
+        const refreshStarted = performance.now();
+        const refreshed = await Promise.all(this.registry.projects.map(async project => {
+          try {
+            const headerStarted = performance.now();
+            const bytes = await optionalBytes(project.path, 'PROJECT.md');
+            timings.headerReadMaxMs = Math.max(timings.headerReadMaxMs ?? 0, performance.now() - headerStarted);
+            if (!bytes) return project;
+            const actual = parseProjectInfo({ path: 'PROJECT.md', text: bytes.toString('utf8'), hash: sha256(bytes) }, project.path);
+            // 磁盘 ID 被改动时仍保留原登记，不扫描另一个项目的历史。
+            if (actual.id !== project.id) return project;
+            // 导航时间仅需要清单；不为显示项目列表扫描、哈希每份历史正文和附件。
+            const historyStarted = performance.now();
+            const versions = await history(project.path, project.id, false);
+            timings.historyReadMaxMs = Math.max(timings.historyReadMaxMs ?? 0, performance.now() - historyStarted);
+            const valid = versions.filter(entry => entry.valid).map(entry => entry.manifest);
+            return { ...actual, createdAt: actual.createdAt || valid[0]?.createdAt, updatedAt: valid.at(-1)?.createdAt || actual.createdAt };
+          } catch { return project; }
+        }));
+        timings.refreshMs = performance.now() - refreshStarted;
+        if (JSON.stringify(refreshed) !== JSON.stringify(this.registry.projects)) {
+          this.registry.projects = refreshed;
+          const saveStarted = performance.now();
+          await this.saveRegistry();
+          timings.registrySaveMs = performance.now() - saveStarted;
+        }
+        return this.libraryView();
+      });
+      this.listing = { result, timings };
+      // 同时处理成功与失败，清理辅助 Promise 不制造未处理的拒绝。
+      const clear = () => { if (this.listing?.result === result) this.listing = undefined; };
+      void result.then(clear, clear);
+    }
+    const listing = this.listing;
+    try { return await listing.result; }
+    finally { reportTiming?.({ ...listing.timings, readyMs, totalMs: performance.now() - started, shared: Number(shared) }); }
   }
 
   /** 只打开用户明确传入且有公开项目入口的目录，检查重复身份避免两个副本串写。 */
