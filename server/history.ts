@@ -39,8 +39,13 @@ export async function recoverPublishedSnapshots(root: string) {
 
 /** 校验完整清单及项目身份，历史阅读不接受目录名作为完成凭据。 */
 export async function history(root: string, projectId: string, verify = true): Promise<HistoryEntry[]> {
-  await mkdir(await resolveInside(root, 'versions'), { recursive: true });
-  const names = (await readdir(await resolveInside(root, 'versions'))).filter(name => /^V\d{6,}$/.test(name)).sort();
+  // 清单导航是只读操作，没有历史目录时直接返回空列表，不创建版本目录。
+  const directory = await resolveInside(root, 'versions');
+  if (verify) await mkdir(directory, { recursive: true });
+  let labels: string[];
+  try { labels = await readdir(directory); }
+  catch (error) { if (!verify && (error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  const names = labels.filter(name => /^V\d{6,}$/.test(name)).sort();
   const result: HistoryEntry[] = [];
   let parent: string | null = null;
   for (const label of names) {
