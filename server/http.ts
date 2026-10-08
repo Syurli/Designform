@@ -66,8 +66,10 @@ export function createProjectApi(options: { home?: string; templateRoot?: string
     if (['/api/session', '/api/projects', '/api/connections'].includes(diagnosticRoute)) {
       const record = (status: number) => {
         const elapsedMs = Math.round(performance.now() - started);
-        // 高频轻量心跳只记录慢请求和失败；握手、列表保留完整阶段便于核对。
-        if (diagnosticRoute === '/api/connections' && status >= 200 && status < 400 && elapsedMs < 1000) return;
+        // 快速页面浏览不落盘，保留纯内存示例的零写入约定。
+        // 原生 MCP 握手及慢请求／失败始终记录；主动排查时可开启完整时序。
+        const fastSuccess = status >= 200 && status < 400 && elapsedMs < 1000;
+        if (fastSuccess && !(diagnosticRoute === '/api/session' && mode === 'handshake') && process.env.CEWEN_CONNECTION_TRACE !== '1') return;
         recordConnection({ at: new Date().toISOString(), route: diagnosticRoute as ConnectionTiming['route'], method: request.method ?? '', ...(mode ? { mode } : {}), status, elapsedMs, ...(errorCode ? { errorCode } : {}), stages: Object.fromEntries(Object.entries(stages).map(([key, value]) => [key, Math.round(value)])) });
       };
       response.once('finish', () => record(response.statusCode));
